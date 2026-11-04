@@ -77,7 +77,8 @@ jobs:
           $tags = git tag -l "v*" | Sort-Object { [version]($_.TrimStart('v')) }
           $prev = ($tags | Where-Object { $_ -lt "${{ steps.ver.outputs.tag }}" } | Select-Object -Last 1)
           $range = if ($prev) { "$prev..${{ steps.ver.outputs.tag }}" } else { "HEAD" }
-          git log $range --pretty=format:"### %s%n%n%b" |
+          # Only commits that touch the program itself (not CI/docs/infra).
+          git log $range --pretty=format:"### %s%n%n%b" -- src i18n resources build.rs app.manifest app.rc Cargo.toml |
             Where-Object { $_ -notmatch "Generated with|Co-Authored-By" } |
             Out-File -Encoding utf8 CHANGELOG_REL.md
 
