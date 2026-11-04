@@ -109,7 +109,7 @@ impl crate::ui::FileManagerApp {
             } else {
                 ui.add_space(18.0);
             }
-            let is_current = path == self.tabs[self.active].path;
+            let is_current = path == self.tabs[self.active].path.as_path();
             let resp = ui.selectable_label(is_current, name);
             if resp.clicked() {
                 self.navigate(self.active, path.to_path_buf(), ctx);

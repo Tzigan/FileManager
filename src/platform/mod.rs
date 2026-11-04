@@ -2,7 +2,7 @@
 mod windows;
 
 #[cfg(windows)]
-pub use self::windows::{acquire_single_instance, drives, format_local_time, notify_already_running, AcquireResult, SingleInstanceGuard};
+pub use self::windows::{acquire_single_instance, drives, format_local_time, free_space, notify_already_running, AcquireResult, SingleInstanceGuard};
 
 /// Stubs for non-Windows hosts so the crate still compiles for docs/tests.
 #[cfg(not(windows))]
@@ -36,7 +36,11 @@ mod stubs {
     pub fn drives() -> Vec<std::path::PathBuf> {
         vec![std::path::PathBuf::from("/")]
     }
+
+    pub fn free_space(_path: &std::path::Path) -> Option<u64> {
+        None
+    }
 }
 
 #[cfg(not(windows))]
-pub use stubs::{acquire_single_instance, drives, format_local_time, notify_already_running, AcquireResult, SingleInstanceGuard};
+pub use stubs::{acquire_single_instance, drives, format_local_time, free_space, notify_already_running, AcquireResult, SingleInstanceGuard};

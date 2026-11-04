@@ -68,6 +68,12 @@ impl FileManagerApp {
 
         let selected = self.tabs[self.active].selection.contains(&index);
         let focused = self.tabs[self.active].cursor == index;
+        let cut = self
+            .ops_ui
+            .clipboard
+            .as_ref()
+            .map(|c| c.cut && c.paths.contains(&entry.path))
+            .unwrap_or(false);
         let painter = ui.painter();
         if selected {
             painter.rect_filled(rect, 2.0, ui.visuals().selection.bg_fill);
@@ -87,7 +93,7 @@ impl FileManagerApp {
 
         let font = egui::TextStyle::Body.resolve(ui.style());
         let visuals = ui.visuals();
-        let name_color = if entry.hidden {
+        let name_color = if entry.hidden || cut {
             visuals.weak_text_color()
         } else {
             visuals.text_color()
@@ -154,11 +160,41 @@ impl FileManagerApp {
             self.select_click(index, ui.input(|i| i.modifiers));
         }
         if resp.double_clicked() && entry.is_dir {
-            self.navigate(self.active, entry.path, ctx);
+            self.navigate(self.active, entry.path.clone(), ctx);
         }
         if focused && self.scroll_to_cursor {
             ui.scroll_to_rect(rect, None);
         }
+
+        resp.context_menu(|ui| {
+            if ui.button(self.t("ctx.copy").to_owned()).clicked() {
+                self.act_copy();
+                ui.close();
+            }
+            if ui.button(self.t("ctx.cut").to_owned()).clicked() {
+                self.act_cut();
+                ui.close();
+            }
+            if ui
+                .add_enabled(
+                    self.ops_ui.clipboard.is_some(),
+                    egui::Button::new(self.t("ctx.paste").to_owned()),
+                )
+                .clicked()
+            {
+                self.act_paste();
+                ui.close();
+            }
+            ui.separator();
+            if ui.button(self.t("ctx.rename").to_owned()).clicked() {
+                self.act_rename();
+                ui.close();
+            }
+            if ui.button(self.t("ctx.delete").to_owned()).clicked() {
+                self.act_delete();
+                ui.close();
+            }
+        });
     }
 
     /// Click selection honoring Ctrl/Shift modifiers (Explorer semantics).

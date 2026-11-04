@@ -5,9 +5,11 @@ use std::thread;
 
 use crate::core::fs::{self, FileEntry, ReadDirError};
 use crate::core::i18n::{I18n, Language};
+use crate::core::ops::{self, OpEvent, OpJob, OpReply};
 use crate::core::paths::AppDirs;
 use crate::core::settings::{SettingsStore, Theme};
 use crate::platform::drives;
+use crate::ui::opsui::OpsUi;
 use crate::ui::tabs::{ListStatus, Tab};
 use crate::ui::tree::TreeState;
 
@@ -42,6 +44,12 @@ pub struct FileManagerApp {
     msg_rx: Receiver<WorkerMsg>,
     /// Requests to the dedicated folder-tree worker.
     pub(crate) tree_req: Sender<PathBuf>,
+
+    // File-operation queue (v0.4).
+    pub(crate) ops_ui: OpsUi,
+    pub(crate) ops_tx: Sender<OpJob>,
+    pub(crate) ops_evt: Receiver<OpEvent>,
+    pub(crate) op_reply: Sender<OpReply>,
 }
 
 impl FileManagerApp {
@@ -53,6 +61,10 @@ impl FileManagerApp {
     ) -> Self {
         let (msg_tx, msg_rx) = channel();
         let (tree_req, tree_req_rx) = channel::<PathBuf>();
+        let (ops_tx, jobs_rx) = channel::<OpJob>();
+        let (op_reply, reply_rx) = channel::<OpReply>();
+        let (events_tx, ops_evt) = channel::<OpEvent>();
+        ops::spawn(jobs_rx, reply_rx, events_tx);
 
         // Folder-tree worker: serial, low priority — one directory at a time.
         {
@@ -97,6 +109,10 @@ impl FileManagerApp {
             msg_tx,
             msg_rx,
             tree_req,
+            ops_ui: OpsUi::default(),
+            ops_tx,
+            ops_evt,
+            op_reply,
         };
         for i in 0..app.tabs.len() {
             app.navigate_fresh(i, &cc.egui_ctx);
@@ -313,6 +329,28 @@ impl FileManagerApp {
             return;
         }
 
+        // Clipboard / file operations.
+        if mods.ctrl && ctx.input(|i| i.key_pressed(egui::Key::C)) {
+            self.act_copy();
+            return;
+        }
+        if mods.ctrl && ctx.input(|i| i.key_pressed(egui::Key::X)) {
+            self.act_cut();
+            return;
+        }
+        if mods.ctrl && ctx.input(|i| i.key_pressed(egui::Key::V)) {
+            self.act_paste();
+            return;
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::Delete)) {
+            self.act_delete();
+            return;
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::F2)) {
+            self.act_rename();
+            return;
+        }
+
         // Selection and navigation.
         if mods.ctrl && ctx.input(|i| i.key_pressed(egui::Key::A)) {
             let len = self.tabs[self.active].entries.len();
@@ -520,6 +558,39 @@ impl FileManagerApp {
                 }
             }
 
+            // Bookmark toggle for the current folder.
+            let marked = self
+                .store
+                .settings
+                .bookmarks
+                .contains(&self.tabs[self.active].path);
+            if ui
+                .button(if marked { "★" } else { "☆" })
+                .on_hover_text(self.t("toolbar.bookmark").to_owned())
+                .clicked()
+            {
+                self.act_bookmark();
+            }
+
+            // "New / Paste" menu.
+            ui.menu_button("＋", |ui| {
+                if ui.button(self.t("ctx.new_folder").to_owned()).clicked() {
+                    self.ops_ui.create = Some((true, String::new()));
+                    ui.close();
+                }
+                if ui.button(self.t("ctx.new_file").to_owned()).clicked() {
+                    self.ops_ui.create = Some((false, String::new()));
+                    ui.close();
+                }
+                if ui
+                    .add_enabled(self.ops_ui.clipboard.is_some(), egui::Button::new(self.t("ctx.paste").to_owned()))
+                    .clicked()
+                {
+                    self.act_paste();
+                    ui.close();
+                }
+            });
+
             let resp = ui.add(
                 egui::TextEdit::singleline(&mut self.tabs[self.active].address_input)
                     .desired_width(f32::INFINITY),
@@ -593,6 +664,7 @@ impl eframe::App for FileManagerApp {
         });
 
         self.drain_messages();
+        self.drain_ops_events(&ctx);
         self.handle_keys(&ctx);
 
         egui::Panel::top("menu_bar").show(ui, |ui| self.menu_bar(ui));
@@ -610,6 +682,8 @@ impl eframe::App for FileManagerApp {
             .default_size(380.0)
             .size_range(300.0..=500.0)
             .show(ui, |ui| self.props_panel(ui));
+
+        egui::Panel::bottom("ops_panel").show(ui, |ui| self.ops_panel(ui));
 
         egui::Panel::bottom("status_bar").show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -670,5 +744,14 @@ impl eframe::App for FileManagerApp {
         });
 
         self.about_window(&ctx);
+        self.ops_dialogs(&ctx);
+
+        // Keep repainting while operations run so progress stays live.
+        if !self.ops_ui.jobs.is_empty()
+            || self.ops_ui.conflict.is_some()
+            || self.ops_ui.error_q.is_some()
+        {
+            ctx.request_repaint_after(std::time::Duration::from_millis(150));
+        }
     }
 }

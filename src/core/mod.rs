@@ -1,6 +1,7 @@
 pub mod format;
 pub mod fs;
 pub mod history;
+pub mod ops;
 pub mod i18n;
 pub mod logging;
 pub mod paths;
