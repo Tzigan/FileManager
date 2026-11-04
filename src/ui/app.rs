@@ -8,7 +8,7 @@ use crate::core::i18n::{I18n, Language};
 use crate::core::ops::{self, OpEvent, OpJob, OpReply};
 use crate::core::paths::AppDirs;
 use crate::core::settings::{SettingsStore, Theme};
-use crate::platform::drives;
+use crate::platform::{drives, install_context_menu, pipe_listen, uninstall_context_menu};
 use crate::ui::opsui::OpsUi;
 use crate::ui::tabs::{ListStatus, Tab};
 use crate::ui::tree::TreeState;
@@ -26,6 +26,8 @@ pub(crate) enum WorkerMsg {
         path: PathBuf,
         result: std::io::Result<Vec<PathBuf>>,
     },
+    /// A path forwarded by another instance / CLI — open in a new tab.
+    OpenPath(PathBuf),
 }
 
 pub struct FileManagerApp {
@@ -39,6 +41,8 @@ pub struct FileManagerApp {
     pub(crate) tree: TreeState,
     /// Scroll the focused row into view next repaint (set by keyboard nav).
     pub(crate) scroll_to_cursor: bool,
+    /// `--select` target: select this entry when the listing arrives.
+    pending_select: Option<String>,
 
     msg_tx: Sender<WorkerMsg>,
     msg_rx: Receiver<WorkerMsg>,
@@ -58,6 +62,8 @@ impl FileManagerApp {
         store: SettingsStore,
         i18n: I18n,
         dirs: AppDirs,
+        initial_path: Option<PathBuf>,
+        initial_select: Option<String>,
     ) -> Self {
         let (msg_tx, msg_rx) = channel();
         let (tree_req, tree_req_rx) = channel::<PathBuf>();
@@ -65,6 +71,16 @@ impl FileManagerApp {
         let (op_reply, reply_rx) = channel::<OpReply>();
         let (events_tx, ops_evt) = channel::<OpEvent>();
         ops::spawn(jobs_rx, reply_rx, events_tx);
+
+        // Secondary instances forward their CLI path here via named pipe.
+        {
+            let msg_tx = msg_tx.clone();
+            let ctx = cc.egui_ctx.clone();
+            pipe_listen(move |path| {
+                let _ = msg_tx.send(WorkerMsg::OpenPath(path));
+                ctx.request_repaint();
+            });
+        }
 
         // Folder-tree worker: serial, low priority — one directory at a time.
         {
@@ -106,6 +122,7 @@ impl FileManagerApp {
             active,
             tree: TreeState::new(drives()),
             scroll_to_cursor: false,
+            pending_select: initial_select,
             msg_tx,
             msg_rx,
             tree_req,
@@ -114,11 +131,23 @@ impl FileManagerApp {
             ops_evt,
             op_reply,
         };
+        // CLI path (Explorer "Open in FileManager") wins over restored tabs.
+        if let Some(p) = initial_path {
+            app.tabs.push(Tab::new(p));
+            app.active = app.tabs.len() - 1;
+        }
         for i in 0..app.tabs.len() {
             app.navigate_fresh(i, &cc.egui_ctx);
         }
         app.tree.reveal(&app.tabs[app.active].path.clone());
         app
+    }
+
+    /// Open `path` in a new tab (pipe-forwarded from another instance).
+    fn open_path_tab(&mut self, path: PathBuf, ctx: &egui::Context) {
+        self.tabs.push(Tab::new(path));
+        self.active = self.tabs.len() - 1;
+        self.navigate_fresh(self.active, ctx);
     }
 
     pub(crate) fn t<'a>(&'a self, key: &'a str) -> &'a str {
@@ -258,7 +287,7 @@ impl FileManagerApp {
     // Messages and input
     // ------------------------------------------------------------------
 
-    fn drain_messages(&mut self) {
+    fn drain_messages(&mut self, ctx: &egui::Context) {
         while let Ok(msg) = self.msg_rx.try_recv() {
             match msg {
                 WorkerMsg::Listing { tab, generation, result } => {
@@ -270,6 +299,14 @@ impl FileManagerApp {
                             let t = &mut self.tabs[tab];
                             t.entries = entries;
                             t.status = ListStatus::Ready;
+                            if let Some(name) = self.pending_select.take() {
+                                if let Some(i) = t.entries.iter().position(|e| e.name == name) {
+                                    t.selection.insert(i);
+                                    t.cursor = i;
+                                    t.anchor = Some(i);
+                                    self.scroll_to_cursor = true;
+                                }
+                            }
                         }
                         Err(ReadDirError::Cancelled) => {}
                         Err(ReadDirError::Io(e)) => {
@@ -290,6 +327,7 @@ impl FileManagerApp {
                         self.tree.children.insert(path, Vec::new());
                     }
                 }
+                WorkerMsg::OpenPath(path) => self.open_path_tab(path, ctx),
             }
         }
     }
@@ -343,7 +381,7 @@ impl FileManagerApp {
             return;
         }
         if ctx.input(|i| i.key_pressed(egui::Key::Delete)) {
-            self.act_delete();
+            self.act_delete(mods.shift);
             return;
         }
         if ctx.input(|i| i.key_pressed(egui::Key::F2)) {
@@ -411,6 +449,21 @@ impl FileManagerApp {
         }
     }
 
+    /// Files dropped onto the window from Windows — copy into current folder.
+    fn handle_dropped_files(&mut self, ctx: &egui::Context) {
+        let dropped: Vec<PathBuf> = ctx.input(|i| {
+            i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).collect()
+        });
+        if dropped.is_empty() {
+            return;
+        }
+        let dest = self.tabs[self.active].path.clone();
+        if dropped.iter().any(|p| p == &dest || dest.starts_with(p)) {
+            return; // dropped onto its own parent — no-op like Explorer
+        }
+        self.enqueue("ops.copying", crate::core::ops::OpKind::Copy { sources: dropped, dest });
+    }
+
     fn move_cursor(&mut self, target: usize, extend: bool) {
         let tab = &mut self.tabs[self.active];
         let len = tab.entries.len();
@@ -442,6 +495,26 @@ impl FileManagerApp {
     fn menu_bar(&mut self, ui: &mut egui::Ui) {
         egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button(self.t("menu.file").to_owned(), |ui| {
+                if ui.button(self.t("integrate.add").to_owned()).clicked() {
+                    if let Ok(exe) = std::env::current_exe() {
+                        let title = self.t("integrate.title").to_owned();
+                        if let Err(e) = install_context_menu(&exe, &title) {
+                            self.ops_ui.journal.push(format!("context menu: {e}"));
+                        }
+                    }
+                    ui.close();
+                }
+                if ui.button(self.t("integrate.remove").to_owned()).clicked() {
+                    if let Err(e) = uninstall_context_menu() {
+                        self.ops_ui.journal.push(format!("context menu: {e}"));
+                    }
+                    ui.close();
+                }
+                if ui.button(self.t("integrate.open_recycle").to_owned()).clicked() {
+                    let _ = crate::platform::open_recycle_bin();
+                    ui.close();
+                }
+                ui.separator();
                 if ui.button(self.t("file.quit").to_owned()).clicked() {
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                 }
@@ -663,9 +736,10 @@ impl eframe::App for FileManagerApp {
             Theme::Dark => egui::ThemePreference::Dark,
         });
 
-        self.drain_messages();
+        self.drain_messages(&ctx);
         self.drain_ops_events(&ctx);
         self.handle_keys(&ctx);
+        self.handle_dropped_files(&ctx);
 
         egui::Panel::top("menu_bar").show(ui, |ui| self.menu_bar(ui));
         egui::Panel::top("tab_bar").show(ui, |ui| self.tab_bar(&ctx, ui));

@@ -159,8 +159,12 @@ impl FileManagerApp {
         if resp.clicked() {
             self.select_click(index, ui.input(|i| i.modifiers));
         }
-        if resp.double_clicked() && entry.is_dir {
-            self.navigate(self.active, entry.path.clone(), ctx);
+        if resp.double_clicked() {
+            if entry.is_dir {
+                self.navigate(self.active, entry.path.clone(), ctx);
+            } else {
+                let _ = crate::platform::shell_open(&entry.path);
+            }
         }
         if focused && self.scroll_to_cursor {
             ui.scroll_to_rect(rect, None);
@@ -191,7 +195,7 @@ impl FileManagerApp {
                 ui.close();
             }
             if ui.button(self.t("ctx.delete").to_owned()).clicked() {
-                self.act_delete();
+                self.act_delete(false);
                 ui.close();
             }
         });

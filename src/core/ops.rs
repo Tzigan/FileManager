@@ -24,6 +24,8 @@ pub enum OpKind {
     Copy { sources: Vec<PathBuf>, dest: PathBuf },
     Move { sources: Vec<PathBuf>, dest: PathBuf },
     Delete { sources: Vec<PathBuf> },
+    /// Delete via the Windows Recycle Bin (undo-capable).
+    Recycle { sources: Vec<PathBuf> },
     Rename { from: PathBuf, to: PathBuf },
     CreateDir { path: PathBuf },
     CreateFile { path: PathBuf },
@@ -36,7 +38,9 @@ impl OpKind {
             OpKind::Copy { dest, .. } | OpKind::Move { dest, .. } => {
                 dest.display().to_string()
             }
-            OpKind::Delete { sources } => format!("{} items", sources.len()),
+            OpKind::Delete { sources } | OpKind::Recycle { sources } => {
+                format!("{} items", sources.len())
+            }
             OpKind::Rename { to, .. } => to.display().to_string(),
             OpKind::CreateDir { path } | OpKind::CreateFile { path } => {
                 path.display().to_string()
@@ -146,6 +150,7 @@ impl<'a> Worker<'a> {
             }
             OpKind::Move { sources, dest } => self.copy_many(job, sources, dest, true),
             OpKind::Delete { sources } => self.delete_many(job, sources),
+            OpKind::Recycle { sources } => self.recycle_many(job, sources),
             OpKind::Rename { from, to } => self.rename(job, from, to),
             OpKind::CreateDir { path } => self.create(job, path, true),
             OpKind::CreateFile { path } => self.create(job, path, false),
@@ -437,6 +442,28 @@ impl<'a> Worker<'a> {
             }
         }
         Ok(())
+    }
+
+    /// Delete via the Recycle Bin in one IFileOperation call (progress
+    /// reported per attempt — the bin handles subfolders itself).
+    fn recycle_many(&mut self, job: &OpJob, sources: &[PathBuf]) -> io::Result<()> {
+        self.progress(job, OpStage::Deleting, sources.first().map(|p| p.as_path()).unwrap_or(Path::new("")), 0, sources.len() as u64, 0, sources.len());
+        if self.cancelled(job) {
+            return Ok(());
+        }
+        loop {
+            match crate::platform::recycle_bin(sources) {
+                Ok(()) => return Ok(()),
+                Err(e) => match self.ask_error(job, &sources[0], &e) {
+                    ErrorAction::Retry => continue,
+                    ErrorAction::Skip => {
+                        self.failed += sources.len();
+                        return Ok(());
+                    }
+                    ErrorAction::Cancel => return Ok(()),
+                },
+            }
+        }
     }
 
     fn rename(&mut self, job: &OpJob, from: &Path, to: &Path) -> io::Result<()> {

@@ -33,7 +33,7 @@ pub struct OpsUi {
     // Dialog state.
     pub rename: Option<(PathBuf, String)>,
     pub create: Option<(bool, String)>, // (is_dir, name)
-    pub delete_confirm: Option<Vec<PathBuf>>,
+    pub delete_confirm: Option<(Vec<PathBuf>, bool)>, // (paths, recycle)
     pub conflict: Option<(u64, PathBuf, PathBuf)>,
     pub error_q: Option<(u64, PathBuf, String, bool)>,
     pub show_journal: bool,
@@ -86,6 +86,7 @@ impl FileManagerApp {
     pub(crate) fn act_copy(&mut self) {
         let paths = self.selected_paths();
         if !paths.is_empty() {
+            let _ = crate::platform::set_clipboard_files(&paths);
             self.ops_ui.clipboard = Some(Clipboard { paths, cut: false });
         }
     }
@@ -93,25 +94,35 @@ impl FileManagerApp {
     pub(crate) fn act_cut(&mut self) {
         let paths = self.selected_paths();
         if !paths.is_empty() {
+            let _ = crate::platform::set_clipboard_files(&paths);
             self.ops_ui.clipboard = Some(Clipboard { paths, cut: true });
         }
     }
 
     pub(crate) fn act_paste(&mut self) {
-        let Some(cb) = &self.ops_ui.clipboard else { return };
-        let dest = self.tabs[self.active].path.clone();
-        if cb.cut {
-            self.enqueue("ops.moving", OpKind::Move { sources: cb.paths.clone(), dest });
-            self.ops_ui.clipboard = None;
-        } else {
-            self.enqueue("ops.copying", OpKind::Copy { sources: cb.paths.clone(), dest });
+        // Internal clipboard first (tracks cut-vs-copy), then Explorer's.
+        if let Some(cb) = &self.ops_ui.clipboard {
+            let dest = self.tabs[self.active].path.clone();
+            if cb.cut {
+                self.enqueue("ops.moving", OpKind::Move { sources: cb.paths.clone(), dest });
+                self.ops_ui.clipboard = None;
+            } else {
+                self.enqueue("ops.copying", OpKind::Copy { sources: cb.paths.clone(), dest });
+            }
+            return;
+        }
+        let ext = crate::platform::get_clipboard_files();
+        if !ext.is_empty() {
+            let dest = self.tabs[self.active].path.clone();
+            self.enqueue("ops.copying", OpKind::Copy { sources: ext, dest });
         }
     }
 
-    pub(crate) fn act_delete(&mut self) {
+    /// `permanent`: Shift+Delete — bypass the Recycle Bin.
+    pub(crate) fn act_delete(&mut self, permanent: bool) {
         let paths = self.selected_paths();
         if !paths.is_empty() {
-            self.ops_ui.delete_confirm = Some(paths);
+            self.ops_ui.delete_confirm = Some((paths, !permanent));
         }
     }
 
@@ -250,11 +261,15 @@ impl FileManagerApp {
     }
 
     fn delete_dialog(&mut self, ctx: &egui::Context) {
-        let Some(paths) = self.ops_ui.delete_confirm.clone() else {
+        let Some((paths, recycle)) = self.ops_ui.delete_confirm.clone() else {
             return;
         };
         let title = self.t("dlg.delete_title").to_owned();
-        let msg = format!("{}: {}", self.t("dlg.delete_msg"), paths.len());
+        let msg = format!(
+            "{}: {}",
+            self.t(if recycle { "dlg.delete_msg_recycle" } else { "dlg.delete_msg" }),
+            paths.len()
+        );
         let ok = self.t("dlg.ok").to_owned();
         let cancel = self.t("dlg.cancel").to_owned();
         let mut action = 0u8; // 1=delete 2=cancel
@@ -275,8 +290,9 @@ impl FileManagerApp {
             });
         self.ops_ui.delete_confirm = None;
         match action {
+            1 if recycle => self.enqueue("ops.deleting", OpKind::Recycle { sources: paths }),
             1 => self.enqueue("ops.deleting", OpKind::Delete { sources: paths }),
-            0 => self.ops_ui.delete_confirm = Some(paths),
+            0 => self.ops_ui.delete_confirm = Some((paths, recycle)),
             _ => {}
         }
     }
