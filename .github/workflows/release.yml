@@ -2,6 +2,8 @@ name: Release
 
 on:
   push:
+    branches:
+      - main
     tags:
       - "v*"
 
@@ -17,32 +19,63 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
+      # Resolve the release tag. On a tag push — use it. On a push to main —
+      # read the version from Cargo.toml; if its tag doesn't exist yet,
+      # create and push it (GITHUB_TOKEN pushes don't retrigger workflows).
+      - name: Resolve release tag
+        id: ver
+        shell: pwsh
+        run: |
+          if ("${{ github.ref_type }}" -eq "tag") {
+            "tag=${{ github.ref_name }}" >> $env:GITHUB_OUTPUT
+            exit 0
+          }
+          $v = (Select-String -Path Cargo.toml -Pattern '^version = "([^"]+)"').Matches[0].Groups[1].Value
+          $tag = "v$v"
+          if (git tag -l $tag) {
+            Write-Output "Tag $tag already released — nothing to do."
+            exit 0
+          }
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag $tag
+          git push origin $tag
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+
       - name: Install Rust
+        if: steps.ver.outputs.tag != ''
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache cargo
+        if: steps.ver.outputs.tag != ''
         uses: Swatinem/rust-cache@v2
 
       - name: Build
+        if: steps.ver.outputs.tag != ''
         run: cargo build --release --locked
 
       - name: Package
+        if: steps.ver.outputs.tag != ''
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
-          Copy-Item target\release\filemanager.exe "dist\FileManager-${{ github.ref_name }}-x64.exe"
+          Copy-Item target\release\filemanager.exe "dist\FileManager-${{ steps.ver.outputs.tag }}-x64.exe"
 
       - name: Build changelog from commit messages
+        if: steps.ver.outputs.tag != ''
         shell: pwsh
         run: |
-          $prev = git describe --tags --abbrev=0 HEAD~1 2>$null
-          $range = if ($prev) { "$prev..HEAD" } else { "HEAD" }
+          $tags = git tag -l "v*" | Sort-Object { [version]($_.TrimStart('v')) }
+          $prev = ($tags | Where-Object { $_ -lt "${{ steps.ver.outputs.tag }}" } | Select-Object -Last 1)
+          $range = if ($prev) { "$prev..${{ steps.ver.outputs.tag }}" } else { "HEAD" }
           git log $range --pretty=format:"### %s%n%n%b" |
             Where-Object { $_ -notmatch "Generated with|Co-Authored-By" } |
             Out-File -Encoding utf8 CHANGELOG_REL.md
 
       - name: Publish release
+        if: steps.ver.outputs.tag != ''
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.ver.outputs.tag }}
           files: dist/*
           body_path: CHANGELOG_REL.md
