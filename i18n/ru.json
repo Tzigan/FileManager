@@ -1,0 +1,20 @@
+{
+  "menu.file": "Файл",
+  "menu.view": "Вид",
+  "menu.help": "Справка",
+  "file.quit": "Выход",
+  "view.theme": "Тема",
+  "view.language": "Язык",
+  "theme.system": "Системная",
+  "theme.light": "Светлая",
+  "theme.dark": "Тёмная",
+  "help.about": "О программе",
+  "about.title": "О программе",
+  "status.ready": "Готово",
+  "welcome.title": "Добро пожаловать в FileManager",
+  "welcome.body": "Каркас приложения версии 0.1: окно, настройки, логи, локализация RU/EN.",
+  "label.config_dir": "Папка настроек",
+  "label.log_dir": "Папка логов",
+  "label.language": "Язык интерфейса",
+  "common.close": "Закрыть"
+}

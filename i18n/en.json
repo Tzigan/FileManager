@@ -1,0 +1,20 @@
+{
+  "menu.file": "File",
+  "menu.view": "View",
+  "menu.help": "Help",
+  "file.quit": "Quit",
+  "view.theme": "Theme",
+  "view.language": "Language",
+  "theme.system": "System",
+  "theme.light": "Light",
+  "theme.dark": "Dark",
+  "help.about": "About",
+  "about.title": "About",
+  "status.ready": "Ready",
+  "welcome.title": "Welcome to FileManager",
+  "welcome.body": "Application skeleton v0.1: window, settings, logging, RU/EN localization.",
+  "label.config_dir": "Settings folder",
+  "label.log_dir": "Logs folder",
+  "label.language": "Interface language",
+  "common.close": "Close"
+}
