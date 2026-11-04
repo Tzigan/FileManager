@@ -36,10 +36,6 @@ jobs:
             Write-Output "Tag $tag already released — nothing to do."
             exit 0
           }
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag $tag
-          git push origin $tag
           "tag=$tag" >> $env:GITHUB_OUTPUT
 
       - name: Install Rust
@@ -60,6 +56,19 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
           Copy-Item target\release\filemanager.exe "dist\FileManager-${{ steps.ver.outputs.tag }}-x64.exe"
+
+      # The tag is created only after a successful build, so a failed run
+      # never leaves a tag that would block re-publishing.
+      - name: Create and push tag
+        if: steps.ver.outputs.tag != ''
+        shell: pwsh
+        run: |
+          $tag = "${{ steps.ver.outputs.tag }}"
+          if (git tag -l $tag) { exit 0 }
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag $tag
+          git push origin $tag
 
       - name: Build changelog from commit messages
         if: steps.ver.outputs.tag != ''
