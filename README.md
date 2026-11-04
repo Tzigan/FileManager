@@ -1,15 +1,15 @@
 # FileManager
 
+**English** | [Русский](#-русский)
+
 Portable file manager for **Windows 11 x64**, written in Rust with a native
 `egui` interface. Designed to work alongside Windows Explorer — fast, safe on
 your files, and free of a console window.
 
-> Статус: ранняя разработка. Дорожная карта до версии 1.0 — в [ROADMAP.md](ROADMAP.md) (на русском).
-
 ## Status
 
 Early development — **v0.1 skeleton complete**. See [ROADMAP.md](ROADMAP.md)
-for the full plan up to the stable 1.0 release.
+for the full plan up to the stable 1.0 release (in Russian).
 
 Working today:
 
@@ -58,3 +58,65 @@ cargo build --release
 ## License
 
 TBD — will be chosen before the public 1.0 release.
+
+---
+
+# 🇷🇺 Русский
+
+Portable-файловый менеджер для **Windows 11 x64**, написанный на Rust
+с интерфейсом на `egui`. Работает рядом с обычным Проводником Windows —
+быстрый, безопасный для файлов и без консольного окна.
+
+## Статус
+
+Ранняя разработка — **каркас v0.1 готов**. Полный план до стабильного
+релиза 1.0 — в [ROADMAP.md](ROADMAP.md).
+
+Уже работает:
+
+- GUI-окно без консоли, интерфейс RU/EN, светлая/тёмная/системная тема
+- Настройки в `%LOCALAPPDATA%\FileManager\settings.json`
+- Файловое логирование в `%LOCALAPPDATA%\FileManager\logs\`
+- Защита от второго экземпляра (именованный mutex)
+- Встроенный манифест: PerMonitorV2 DPI, поддержка длинных путей
+- Portable-режим: файл `filemanager.portable` рядом с `.exe` —
+  и все данные хранятся рядом с программой
+
+Планируется к 1.0:
+
+- Вкладки, дерево папок, закладки, история «назад/вперёд»
+- Копирование / перемещение / удаление через фоновую очередь
+  с прогрессом и обработкой ошибок (`copy → verify → delete`
+  при перемещении между томами)
+- Стандартная Корзина Windows через `IFileOperation` **и** отдельная
+  защищённая корзина приложения с метаданными и безопасным восстановлением
+- Буфер обмена `CF_HDROP` совместимый с Проводником, OLE drag-and-drop
+- Интеграция в контекстное меню через `HKCU` (без прав администратора)
+- Поиск, fuzzy-фильтр, предпросмотр текста и изображений, просмотр ZIP
+- Автообновление через отдельный updater с проверкой SHA-256 и подписи
+
+## Технологии
+
+| Слой | Выбор |
+|---|---|
+| Язык | Rust (edition 2024) |
+| UI | `egui` / `eframe` |
+| Windows API | crate `windows` |
+| Настройки | JSON через `serde` |
+| Логирование | `tracing` + `tracing-appender` (ежедневная ротация) |
+
+Структура кода: `src/core` (логика ФС, настройки, i18n — без UI/Win32),
+`src/platform/windows` (специфика Win32), `src/ui` (виджеты egui).
+
+## Сборка и запуск
+
+Требования: Rust toolchain (MSVC), Windows 11 x64.
+
+```powershell
+cargo build --release
+.\target\release\filemanager.exe
+```
+
+## Лицензия
+
+Пока не выбрана — будет определена к публичному релизу 1.0.
