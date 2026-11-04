@@ -8,11 +8,14 @@ your files, and free of a console window.
 
 ## Status
 
-Early development — **v0.1 skeleton complete**. See [ROADMAP.md](ROADMAP.md)
+Early development — **v0.2: directory listing**. See [ROADMAP.md](ROADMAP.md)
 for the full plan up to the stable 1.0 release (in Russian).
 
 Working today:
 
+- Directory listing: name / size / type / modified columns, dirs-first sorting,
+  double-click to enter, Up / Refresh / address bar
+- Background folder loading with cancellation, virtualized list
 - GUI window (no console subsystem), RU/EN interface, light/dark/system theme
 - Settings persisted to `%LOCALAPPDATA%\FileManager\settings.json`
 - File logging to `%LOCALAPPDATA%\FileManager\logs\`
@@ -69,11 +72,14 @@ Portable-файловый менеджер для **Windows 11 x64**, напис
 
 ## Статус
 
-Ранняя разработка — **каркас v0.1 готов**. Полный план до стабильного
-релиза 1.0 — в [ROADMAP.md](ROADMAP.md).
+Ранняя разработка — **готова версия 0.2: список файлов**. Полный план до
+стабильного релиза 1.0 — в [ROADMAP.md](ROADMAP.md).
 
 Уже работает:
 
+- Список файлов: колонки имя / размер / тип / изменён, папки первыми,
+  вход по двойному клику, кнопки «Наверх» / «Обновить», адресная строка
+- Фоновое чтение папок с отменой, виртуализированный список
 - GUI-окно без консоли, интерфейс RU/EN, светлая/тёмная/системная тема
 - Настройки в `%LOCALAPPDATA%\FileManager\settings.json`
 - Файловое логирование в `%LOCALAPPDATA%\FileManager\logs\`
