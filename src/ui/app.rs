@@ -1,49 +1,47 @@
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::Arc;
+use std::thread;
 
-use crate::core::format::format_size;
 use crate::core::fs::{self, FileEntry, ReadDirError};
 use crate::core::i18n::{I18n, Language};
 use crate::core::paths::AppDirs;
 use crate::core::settings::{SettingsStore, Theme};
-use crate::platform::format_local_time;
+use crate::platform::drives;
+use crate::ui::tabs::{ListStatus, Tab};
+use crate::ui::tree::TreeState;
 
-const ROW_HEIGHT: f32 = 24.0;
-const ICON_WIDTH: f32 = 26.0;
-const SIZE_COL: f32 = 90.0;
-const TYPE_COL: f32 = 110.0;
-const MODIFIED_COL: f32 = 140.0;
-const COL_GAP: f32 = 8.0;
-
-struct DirMessage {
-    generation: u64,
-    result: Result<Vec<FileEntry>, ReadDirError>,
-}
-
-#[derive(PartialEq)]
-enum ListStatus {
-    Ready,
-    Loading,
+/// Results produced by background worker threads.
+pub(crate) enum WorkerMsg {
+    /// A directory listing finished for a tab.
+    Listing {
+        tab: usize,
+        generation: u64,
+        result: Result<Vec<FileEntry>, ReadDirError>,
+    },
+    /// A folder tree node's children finished loading.
+    TreeChildren {
+        path: PathBuf,
+        result: std::io::Result<Vec<PathBuf>>,
+    },
 }
 
 pub struct FileManagerApp {
-    store: SettingsStore,
-    i18n: I18n,
+    pub(crate) store: SettingsStore,
+    pub(crate) i18n: I18n,
     dirs: AppDirs,
     show_about: bool,
 
-    current_path: PathBuf,
-    address_input: String,
-    entries: Vec<FileEntry>,
-    selected: Option<PathBuf>,
-    status: ListStatus,
-    generation: u64,
-    cancel: Arc<AtomicBool>,
-    tx: Sender<DirMessage>,
-    rx: Receiver<DirMessage>,
-    error: Option<String>,
+    pub(crate) tabs: Vec<Tab>,
+    pub(crate) active: usize,
+    pub(crate) tree: TreeState,
+    /// Scroll the focused row into view next repaint (set by keyboard nav).
+    pub(crate) scroll_to_cursor: bool,
+
+    msg_tx: Sender<WorkerMsg>,
+    msg_rx: Receiver<WorkerMsg>,
+    /// Requests to the dedicated folder-tree worker.
+    pub(crate) tree_req: Sender<PathBuf>,
 }
 
 impl FileManagerApp {
@@ -53,36 +51,61 @@ impl FileManagerApp {
         i18n: I18n,
         dirs: AppDirs,
     ) -> Self {
-        let (tx, rx) = channel();
-        let start = store
+        let (msg_tx, msg_rx) = channel();
+        let (tree_req, tree_req_rx) = channel::<PathBuf>();
+
+        // Folder-tree worker: serial, low priority — one directory at a time.
+        {
+            let msg_tx = msg_tx.clone();
+            let ctx = cc.egui_ctx.clone();
+            thread::spawn(move || {
+                while let Ok(path) = tree_req_rx.recv() {
+                    let result = fs::read_subdirs(&path);
+                    if msg_tx.send(WorkerMsg::TreeChildren { path, result }).is_err() {
+                        break;
+                    }
+                    ctx.request_repaint();
+                }
+            });
+        }
+
+        let mut paths: Vec<PathBuf> = store
             .settings
-            .last_folder
-            .clone()
+            .tabs
+            .iter()
             .filter(|p| p.is_dir())
-            .or_else(|| directories::UserDirs::new().map(|u| u.home_dir().to_path_buf()))
-            .unwrap_or_else(|| PathBuf::from("."));
+            .cloned()
+            .collect();
+        if paths.is_empty() {
+            paths.push(
+                directories::UserDirs::new()
+                    .map(|u| u.home_dir().to_path_buf())
+                    .unwrap_or_else(|| PathBuf::from(".")),
+            );
+        }
+        let active = store.settings.active_tab.min(paths.len() - 1);
 
         let mut app = Self {
             store,
             i18n,
             dirs,
             show_about: false,
-            current_path: start.clone(),
-            address_input: start.display().to_string(),
-            entries: Vec::new(),
-            selected: None,
-            status: ListStatus::Loading,
-            generation: 0,
-            cancel: Arc::new(AtomicBool::new(false)),
-            tx,
-            rx,
-            error: None,
+            tabs: paths.into_iter().map(Tab::new).collect(),
+            active,
+            tree: TreeState::new(drives()),
+            scroll_to_cursor: false,
+            msg_tx,
+            msg_rx,
+            tree_req,
         };
-        app.navigate(app.current_path.clone(), &cc.egui_ctx);
+        for i in 0..app.tabs.len() {
+            app.navigate_fresh(i, &cc.egui_ctx);
+        }
+        app.tree.reveal(&app.tabs[app.active].path.clone());
         app
     }
 
-    fn t<'a>(&'a self, key: &'a str) -> &'a str {
+    pub(crate) fn t<'a>(&'a self, key: &'a str) -> &'a str {
         self.i18n.t(key)
     }
 
@@ -97,74 +120,159 @@ impl FileManagerApp {
         self.persist();
     }
 
-    fn persist(&self) {
+    pub(crate) fn persist(&self) {
         if let Err(e) = self.store.save() {
             tracing::error!("failed to save settings: {e}");
         }
+    }
+
+    fn persist_tabs(&mut self) {
+        self.store.settings.tabs = self.tabs.iter().map(|t| t.path.clone()).collect();
+        self.store.settings.active_tab = self.active;
+        self.persist();
     }
 
     // ------------------------------------------------------------------
     // Navigation
     // ------------------------------------------------------------------
 
-    fn navigate(&mut self, path: PathBuf, ctx: &egui::Context) {
-        self.generation += 1;
-        let generation = self.generation;
-        self.cancel.store(true, Ordering::Relaxed);
-        let cancel = Arc::new(AtomicBool::new(false));
-        self.cancel = cancel.clone();
+    /// User-driven navigation to a new path (pushes history).
+    pub(crate) fn navigate(&mut self, tab: usize, path: PathBuf, ctx: &egui::Context) {
+        let current = self.tabs[tab].path.clone();
+        if current != path {
+            self.tabs[tab].history.push(current);
+        }
+        self.navigate_fresh(tab, ctx);
+    }
 
-        self.status = ListStatus::Loading;
-        self.error = None;
-        self.selected = None;
-        self.current_path = path.clone();
-        self.address_input = path.display().to_string();
+    /// Reload `tab`'s current path in the background without touching history.
+    pub(crate) fn navigate_fresh(&mut self, tab: usize, ctx: &egui::Context) {
+        let t = &mut self.tabs[tab];
+        t.generation += 1;
+        let generation = t.generation;
+        t.cancel.store(true, Ordering::Relaxed);
+        t.cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cancel = t.cancel.clone();
 
-        if self.store.settings.last_folder.as_deref() != Some(path.as_path()) {
-            self.store.settings.last_folder = Some(path.clone());
-            self.persist();
+        t.status = ListStatus::Loading;
+        t.error = None;
+        t.clear_selection();
+        t.cursor = 0;
+        let path = t.path.clone();
+        t.address_input = path.display().to_string();
+
+        if tab == self.active {
+            self.tree.reveal(&path);
+            self.persist_tabs();
         }
 
-        let tx = self.tx.clone();
+        let tx = self.msg_tx.clone();
         let ctx2 = ctx.clone();
-        std::thread::spawn(move || {
+        thread::spawn(move || {
             let result = fs::read_dir(&path, &cancel);
-            let _ = tx.send(DirMessage { generation, result });
+            let _ = tx.send(WorkerMsg::Listing { tab, generation, result });
             ctx2.request_repaint();
         });
     }
 
+    fn go_back(&mut self, ctx: &egui::Context) {
+        let cur = self.tabs[self.active].path.clone();
+        if let Some(path) = self.tabs[self.active].history.back(cur) {
+            self.tabs[self.active].path = path;
+            self.navigate_fresh(self.active, ctx);
+        }
+    }
+
+    fn go_forward(&mut self, ctx: &egui::Context) {
+        let cur = self.tabs[self.active].path.clone();
+        if let Some(path) = self.tabs[self.active].history.forward(cur) {
+            self.tabs[self.active].path = path;
+            self.navigate_fresh(self.active, ctx);
+        }
+    }
+
     fn go_up(&mut self, ctx: &egui::Context) {
-        if let Some(parent) = self.current_path.parent().map(|p| p.to_path_buf()) {
-            self.navigate(parent, ctx);
+        if let Some(parent) = self.tabs[self.active].path.parent().map(|p| p.to_path_buf()) {
+            self.navigate(self.active, parent, ctx);
         }
     }
 
     fn refresh(&mut self, ctx: &egui::Context) {
-        self.navigate(self.current_path.clone(), ctx);
+        self.navigate_fresh(self.active, ctx);
     }
 
     fn cancel_loading(&mut self) {
-        self.cancel.store(true, Ordering::Relaxed);
-        self.status = ListStatus::Ready;
+        let t = &mut self.tabs[self.active];
+        t.cancel.store(true, Ordering::Relaxed);
+        t.status = ListStatus::Ready;
     }
 
+    // ------------------------------------------------------------------
+    // Tabs
+    // ------------------------------------------------------------------
+
+    fn new_tab(&mut self, ctx: &egui::Context) {
+        let path = self.tabs[self.active].path.clone();
+        self.tabs.push(Tab::new(path));
+        self.active = self.tabs.len() - 1;
+        self.navigate_fresh(self.active, ctx);
+    }
+
+    fn close_tab(&mut self, idx: usize, ctx: &egui::Context) {
+        if self.tabs.len() <= 1 {
+            return;
+        }
+        self.tabs[idx].cancel.store(true, Ordering::Relaxed);
+        self.tabs.remove(idx);
+        if self.active >= self.tabs.len() {
+            self.active = self.tabs.len() - 1;
+        }
+        self.persist_tabs();
+        ctx.request_repaint();
+    }
+
+    fn switch_tab(&mut self, idx: usize) {
+        if idx != self.active && idx < self.tabs.len() {
+            self.active = idx;
+            self.persist_tabs();
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Messages and input
+    // ------------------------------------------------------------------
+
     fn drain_messages(&mut self) {
-        while let Ok(msg) = self.rx.try_recv() {
-            if msg.generation != self.generation {
-                continue;
-            }
-            match msg.result {
-                Ok(entries) => {
-                    self.entries = entries;
-                    self.status = ListStatus::Ready;
+        while let Ok(msg) = self.msg_rx.try_recv() {
+            match msg {
+                WorkerMsg::Listing { tab, generation, result } => {
+                    if self.tabs[tab].generation != generation {
+                        continue;
+                    }
+                    match result {
+                        Ok(entries) => {
+                            let t = &mut self.tabs[tab];
+                            t.entries = entries;
+                            t.status = ListStatus::Ready;
+                        }
+                        Err(ReadDirError::Cancelled) => {}
+                        Err(ReadDirError::Io(e)) => {
+                            tracing::warn!(path = %self.tabs[tab].path.display(), "read_dir failed: {e}");
+                            let text = self.error_text(&e);
+                            let t = &mut self.tabs[tab];
+                            t.entries.clear();
+                            t.status = ListStatus::Ready;
+                            t.error = Some(text);
+                        }
+                    }
                 }
-                Err(ReadDirError::Cancelled) => {}
-                Err(ReadDirError::Io(e)) => {
-                    tracing::warn!(path = %self.current_path.display(), "read_dir failed: {e}");
-                    self.entries.clear();
-                    self.status = ListStatus::Ready;
-                    self.error = Some(self.error_text(&e));
+                WorkerMsg::TreeChildren { path, result } => {
+                    self.tree.pending.remove(&path);
+                    if let Ok(kids) = result {
+                        self.tree.children.insert(path, kids);
+                    } else {
+                        self.tree.children.insert(path, Vec::new());
+                    }
                 }
             }
         }
@@ -182,24 +290,115 @@ impl FileManagerApp {
         if ctx.egui_wants_keyboard_input() {
             return;
         }
+        let input = |i: &egui::InputState| i.clone();
+        let mods = ctx.input(|i| i.modifiers);
+
+        // Tab management.
+        if mods.ctrl && ctx.input(|i| i.key_pressed(egui::Key::T)) {
+            self.new_tab(ctx);
+            return;
+        }
+        if mods.ctrl && ctx.input(|i| i.key_pressed(egui::Key::W)) {
+            self.close_tab(self.active, ctx);
+            return;
+        }
+        if mods.ctrl && ctx.input(|i| i.key_pressed(egui::Key::Tab)) {
+            let next = (self.active + 1) % self.tabs.len();
+            self.switch_tab(next);
+            return;
+        }
+        if mods.ctrl && mods.shift && ctx.input(|i| i.key_pressed(egui::Key::Tab)) {
+            let prev = (self.active + self.tabs.len() - 1) % self.tabs.len();
+            self.switch_tab(prev);
+            return;
+        }
+
+        // Selection and navigation.
+        if mods.ctrl && ctx.input(|i| i.key_pressed(egui::Key::A)) {
+            let len = self.tabs[self.active].entries.len();
+            self.tabs[self.active].selection.extend(0..len);
+            return;
+        }
         if ctx.input(|i| i.key_pressed(egui::Key::Backspace)) {
             self.go_up(ctx);
+            return;
         }
         if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
-            let target = self
-                .selected
-                .as_ref()
-                .and_then(|sel| self.entries.iter().find(|e| &e.path == sel))
-                .filter(|e| e.is_dir)
-                .map(|e| e.path.clone());
+            let target = {
+                let tab = &self.tabs[self.active];
+                if tab.selection.len() == 1 {
+                    tab.selection
+                        .iter()
+                        .next()
+                        .and_then(|&i| tab.entries.get(i))
+                        .filter(|e| e.is_dir)
+                        .map(|e| e.path.clone())
+                } else {
+                    None
+                }
+            };
             if let Some(dir) = target {
-                self.navigate(dir, ctx);
+                self.navigate(self.active, dir, ctx);
             }
+            return;
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::ArrowLeft)) && mods.alt {
+            self.go_back(ctx);
+            return;
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::ArrowRight)) && mods.alt {
+            self.go_forward(ctx);
+            return;
+        }
+
+        let len = self.tabs[self.active].entries.len();
+        if len == 0 {
+            return;
+        }
+        let cur = self.tabs[self.active].cursor.min(len - 1);
+        let extend = mods.shift;
+        let i = input(&ctx.input(|i| i.clone()));
+        if i.key_pressed(egui::Key::ArrowDown) {
+            self.move_cursor(cur.saturating_add(1), extend);
+        } else if i.key_pressed(egui::Key::ArrowUp) {
+            self.move_cursor(cur.saturating_sub(1), extend);
+        } else if i.key_pressed(egui::Key::PageDown) {
+            self.move_cursor(cur.saturating_add(20), extend);
+        } else if i.key_pressed(egui::Key::PageUp) {
+            self.move_cursor(cur.saturating_sub(20), extend);
+        } else if i.key_pressed(egui::Key::Home) {
+            self.move_cursor(0, extend);
+        } else if i.key_pressed(egui::Key::End) {
+            self.move_cursor(len - 1, extend);
         }
     }
 
+    fn move_cursor(&mut self, target: usize, extend: bool) {
+        let tab = &mut self.tabs[self.active];
+        let len = tab.entries.len();
+        if len == 0 {
+            return;
+        }
+        let target = target.min(len - 1);
+        if extend {
+            let anchor = *tab.anchor.get_or_insert(tab.cursor);
+            let (lo, hi) = if anchor <= target {
+                (anchor, target)
+            } else {
+                (target, anchor)
+            };
+            tab.selection.extend(lo..=hi);
+        } else {
+            tab.selection.clear();
+            tab.selection.insert(target);
+            tab.anchor = Some(target);
+        }
+        tab.cursor = target;
+        self.scroll_to_cursor = true;
+    }
+
     // ------------------------------------------------------------------
-    // UI parts
+    // Chrome: menus, tab bar, toolbar, breadcrumbs
     // ------------------------------------------------------------------
 
     fn menu_bar(&mut self, ui: &mut egui::Ui) {
@@ -244,19 +443,77 @@ impl FileManagerApp {
         });
     }
 
+    fn tab_bar(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
+        ui.horizontal_wrapped(|ui| {
+            let mut close = None;
+            let mut switch = None;
+            for (i, tab) in self.tabs.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 2.0;
+                    let resp = ui.selectable_label(i == self.active, tab.title());
+                    if resp.clicked() {
+                        switch = Some(i);
+                    }
+                    if resp.middle_clicked() {
+                        close = Some(i);
+                    }
+                    if ui.small_button("×").clicked() {
+                        close = Some(i);
+                    }
+                });
+            }
+            if ui.small_button("+").clicked() {
+                self.new_tab(ctx);
+            }
+            if let Some(i) = switch {
+                self.switch_tab(i);
+            }
+            if let Some(i) = close {
+                self.close_tab(i, ctx);
+            }
+        });
+    }
+
     fn toolbar(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            let has_parent = self.current_path.parent().is_some();
+            let (can_back, can_fwd, has_parent, loading) = {
+                let t = &self.tabs[self.active];
+                (
+                    t.history.can_back(),
+                    t.history.can_forward(),
+                    t.path.parent().is_some(),
+                    t.status == ListStatus::Loading,
+                )
+            };
             if ui
-                .add_enabled(has_parent, egui::Button::new(self.t("toolbar.up").to_owned()))
+                .add_enabled(can_back, egui::Button::new("←"))
+                .on_hover_text(self.t("toolbar.back").to_owned())
+                .clicked()
+            {
+                self.go_back(ctx);
+            }
+            if ui
+                .add_enabled(can_fwd, egui::Button::new("→"))
+                .on_hover_text(self.t("toolbar.forward").to_owned())
+                .clicked()
+            {
+                self.go_forward(ctx);
+            }
+            if ui
+                .add_enabled(has_parent, egui::Button::new("↑"))
+                .on_hover_text(self.t("toolbar.up").to_owned())
                 .clicked()
             {
                 self.go_up(ctx);
             }
-            if ui.button(self.t("toolbar.refresh").to_owned()).clicked() {
+            if ui
+                .button("⟳")
+                .on_hover_text(self.t("toolbar.refresh").to_owned())
+                .clicked()
+            {
                 self.refresh(ctx);
             }
-            if self.status == ListStatus::Loading {
+            if loading {
                 ui.spinner();
                 if ui.button(self.t("toolbar.cancel").to_owned()).clicked() {
                     self.cancel_loading();
@@ -264,149 +521,26 @@ impl FileManagerApp {
             }
 
             let resp = ui.add(
-                egui::TextEdit::singleline(&mut self.address_input)
+                egui::TextEdit::singleline(&mut self.tabs[self.active].address_input)
                     .desired_width(f32::INFINITY),
             );
             if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                let path = PathBuf::from(self.address_input.trim());
-                self.navigate(path, ctx);
+                let path = PathBuf::from(self.tabs[self.active].address_input.trim());
+                self.navigate(self.active, path, ctx);
             }
         });
-    }
 
-    fn file_list(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
-        self.list_header(ui);
-        ui.separator();
-
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .show_rows(ui, ROW_HEIGHT, self.entries.len(), |ui, range| {
-                for index in range {
-                    self.file_row(ui, index, ctx);
+        // Breadcrumbs row.
+        let path = self.tabs[self.active].path.clone();
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            for (label, seg_path) in breadcrumb_segments(&path) {
+                if ui.selectable_label(false, label).clicked() {
+                    self.navigate(self.active, seg_path, ctx);
                 }
-            });
-    }
-
-    fn column_x(&self, width: f32) -> (f32, f32, f32, f32) {
-        let mod_x = width - MODIFIED_COL;
-        let type_x = mod_x - TYPE_COL;
-        let size_x = type_x - SIZE_COL;
-        let name_x = ICON_WIDTH;
-        (name_x, size_x, type_x, mod_x)
-    }
-
-    fn list_header(&self, ui: &mut egui::Ui) {
-        let width = ui.available_width();
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(width, ROW_HEIGHT), egui::Sense::hover());
-        let (name_x, size_x, type_x, mod_x) = self.column_x(width);
-        let font = egui::TextStyle::Body.resolve(ui.style());
-        let color = ui.visuals().strong_text_color();
-        let painter = ui.painter();
-        let y = rect.center().y;
-
-        for (x, key) in [
-            (name_x, "col.name"),
-            (size_x, "col.size"),
-            (type_x, "col.type"),
-            (mod_x, "col.modified"),
-        ] {
-            painter.text(
-                egui::pos2(rect.min.x + x, y),
-                egui::Align2::LEFT_CENTER,
-                self.t(key).to_owned(),
-                font.clone(),
-                color,
-            );
-        }
-    }
-
-    fn file_row(&mut self, ui: &mut egui::Ui, index: usize, ctx: &egui::Context) {
-        let entry = self.entries[index].clone();
-        let width = ui.available_width();
-        let (rect, resp) =
-            ui.allocate_exact_size(egui::vec2(width, ROW_HEIGHT), egui::Sense::click());
-
-        let selected = self.selected.as_ref() == Some(&entry.path);
-        let painter = ui.painter();
-        if selected {
-            painter.rect_filled(rect, 2.0, ui.visuals().selection.bg_fill);
-        } else if resp.hovered() {
-            painter.rect_filled(rect, 2.0, ui.visuals().widgets.hovered.bg_fill);
-        }
-
-        paint_icon(painter, rect, entry.is_dir, entry.is_symlink);
-
-        let font = egui::TextStyle::Body.resolve(ui.style());
-        let visuals = ui.visuals();
-        let name_color = if entry.hidden {
-            visuals.weak_text_color()
-        } else {
-            visuals.text_color()
-        };
-        let weak = visuals.weak_text_color();
-        let y = rect.center().y;
-        let (name_x, size_x, type_x, mod_x) = self.column_x(width);
-
-        let name_rect = egui::Rect::from_min_max(
-            egui::pos2(rect.min.x + name_x, rect.min.y),
-            egui::pos2(rect.min.x + size_x - COL_GAP, rect.max.y),
-        );
-        painter.with_clip_rect(name_rect).text(
-            egui::pos2(rect.min.x + name_x, y),
-            egui::Align2::LEFT_CENTER,
-            &entry.name,
-            font.clone(),
-            name_color,
-        );
-
-        let size_text = if entry.is_dir {
-            String::new()
-        } else {
-            entry.size.map(format_size).unwrap_or_default()
-        };
-        painter.text(
-            egui::pos2(rect.min.x + type_x - COL_GAP, y),
-            egui::Align2::RIGHT_CENTER,
-            size_text,
-            font.clone(),
-            weak,
-        );
-
-        let type_text = if entry.is_dir {
-            self.t("type.folder").to_owned()
-        } else {
-            match &entry.extension {
-                Some(ext) => format!("{} {}", ext.to_uppercase(), self.t("type.file")),
-                None => self.t("type.file").to_owned(),
+                ui.label("›");
             }
-        };
-        let type_rect = egui::Rect::from_min_max(
-            egui::pos2(rect.min.x + type_x, rect.min.y),
-            egui::pos2(rect.min.x + mod_x - COL_GAP, rect.max.y),
-        );
-        painter.with_clip_rect(type_rect).text(
-            egui::pos2(rect.min.x + type_x, y),
-            egui::Align2::LEFT_CENTER,
-            type_text,
-            font.clone(),
-            weak,
-        );
-
-        let modified = entry.modified.map(format_local_time).unwrap_or_default();
-        painter.text(
-            egui::pos2(rect.min.x + mod_x, y),
-            egui::Align2::LEFT_CENTER,
-            modified,
-            font,
-            weak,
-        );
-
-        if resp.clicked() {
-            self.selected = Some(entry.path.clone());
-        }
-        if resp.double_clicked() && entry.is_dir {
-            self.navigate(entry.path, ctx);
-        }
+        });
     }
 
     fn about_window(&mut self, ctx: &egui::Context) {
@@ -432,28 +566,21 @@ impl FileManagerApp {
     }
 }
 
-fn paint_icon(painter: &egui::Painter, row: egui::Rect, is_dir: bool, _is_symlink: bool) {
-    let icon = egui::Rect::from_center_size(
-        row.left_center() + egui::vec2(ICON_WIDTH / 2.0, 0.0),
-        egui::vec2(17.0, 15.0),
-    );
-    if is_dir {
-        let back = egui::Color32::from_rgb(226, 152, 52);
-        let front = egui::Color32::from_rgb(255, 199, 90);
-        let tab = egui::Rect::from_min_max(icon.min, egui::pos2(icon.min.x + 7.0, icon.min.y + 4.0));
-        let body = egui::Rect::from_min_max(egui::pos2(icon.min.x, icon.min.y + 4.0), icon.max);
-        painter.rect_filled(tab, 1.5, back);
-        painter.rect_filled(body, 1.5, front);
-    } else {
-        let doc = icon.shrink(1.0);
-        painter.rect_filled(doc, 1.0, egui::Color32::from_rgb(190, 195, 205));
-        painter.rect_stroke(
-            doc,
-            1.0,
-            egui::Stroke::new(1.0, egui::Color32::from_rgb(130, 135, 150)),
-            egui::StrokeKind::Inside,
-        );
+/// Splits a path into clickable breadcrumb segments:
+/// `C:\a\b` → `[("C:\", C:\), ("a", C:\a), ("b", C:\a\b)]`.
+fn breadcrumb_segments(path: &Path) -> Vec<(String, PathBuf)> {
+    let mut segs = Vec::new();
+    let mut acc = PathBuf::new();
+    for comp in path.components() {
+        acc.push(comp.as_os_str());
+        let mut label = comp.as_os_str().to_string_lossy().into_owned();
+        // Show the drive root as "C:\" rather than bare "C:".
+        if segs.is_empty() && label.ends_with(':') {
+            label.push('\\');
+        }
+        segs.push((label, acc.clone()));
     }
+    segs
 }
 
 impl eframe::App for FileManagerApp {
@@ -469,20 +596,54 @@ impl eframe::App for FileManagerApp {
         self.handle_keys(&ctx);
 
         egui::Panel::top("menu_bar").show(ui, |ui| self.menu_bar(ui));
+        egui::Panel::top("tab_bar").show(ui, |ui| self.tab_bar(&ctx, ui));
         egui::Panel::top("toolbar").show(ui, |ui| self.toolbar(&ctx, ui));
+
+        egui::Panel::left("tree_panel")
+            .resizable(true)
+            .default_size(230.0)
+            .size_range(150.0..=400.0)
+            .show(ui, |ui| self.tree_panel(&ctx, ui));
+
+        egui::Panel::right("props_panel")
+            .resizable(true)
+            .default_size(380.0)
+            .size_range(300.0..=500.0)
+            .show(ui, |ui| self.props_panel(ui));
 
         egui::Panel::bottom("status_bar").show(ui, |ui| {
             ui.horizontal(|ui| {
-                if self.status == ListStatus::Loading {
+                let tab = &self.tabs[self.active];
+                if tab.status == ListStatus::Loading {
                     ui.label(self.t("status.loading").to_owned());
                 } else {
-                    ui.label(format!("{}: {}", self.t("status.items"), self.entries.len()));
+                    ui.label(format!(
+                        "{}: {}",
+                        self.t("status.items"),
+                        tab.entries.len()
+                    ));
+                    if !tab.selection.is_empty() {
+                        ui.separator();
+                        ui.label(format!(
+                            "{}: {}",
+                            self.t("status.selected"),
+                            tab.selection.len()
+                        ));
+                    }
                 }
             });
         });
 
         egui::CentralPanel::default().show(ui, |ui| {
-            if let Some(err) = self.error.clone() {
+            let (error, empty, loading) = {
+                let tab = &self.tabs[self.active];
+                (
+                    tab.error.clone(),
+                    tab.entries.is_empty(),
+                    tab.status == ListStatus::Loading,
+                )
+            };
+            if let Some(err) = error {
                 ui.vertical_centered(|ui| {
                     ui.add_space(60.0);
                     ui.colored_label(ui.visuals().error_fg_color, err);
@@ -493,10 +654,10 @@ impl eframe::App for FileManagerApp {
                 });
                 return;
             }
-            if self.entries.is_empty() {
+            if empty {
                 ui.vertical_centered(|ui| {
                     ui.add_space(60.0);
-                    if self.status == ListStatus::Loading {
+                    if loading {
                         ui.spinner();
                         ui.label(self.t("status.loading").to_owned());
                     } else {

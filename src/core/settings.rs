@@ -19,7 +19,10 @@ pub enum Theme {
 pub struct Settings {
     pub language: Language,
     pub theme: Theme,
-    pub last_folder: Option<PathBuf>,
+    /// Paths of open tabs, restored on startup.
+    pub tabs: Vec<PathBuf>,
+    pub active_tab: usize,
+    pub bookmarks: Vec<PathBuf>,
 }
 
 impl Default for Settings {
@@ -27,7 +30,9 @@ impl Default for Settings {
         Self {
             language: Language::default(),
             theme: Theme::default(),
-            last_folder: None,
+            tabs: Vec::new(),
+            active_tab: 0,
+            bookmarks: Vec::new(),
         }
     }
 }

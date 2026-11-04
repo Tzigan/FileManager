@@ -12,9 +12,11 @@ pub struct FileEntry {
     pub is_dir: bool,
     pub is_symlink: bool,
     pub hidden: bool,
+    pub readonly: bool,
     /// `None` for directories (their size is not computed on listing).
     pub size: Option<u64>,
     pub modified: Option<SystemTime>,
+    pub created: Option<SystemTime>,
     /// Lowercase extension without the dot, e.g. `txt`.
     pub extension: Option<String>,
 }
@@ -74,6 +76,11 @@ fn map_entry(item: &fs::DirEntry) -> Option<FileEntry> {
     let is_dir = meta.as_ref().map(|m| m.is_dir()).unwrap_or(file_type.is_dir());
     let size = if is_dir { None } else { meta.as_ref().map(|m| m.len()) };
     let modified = meta.as_ref().and_then(|m| m.modified().ok());
+    let created = meta.as_ref().and_then(|m| m.created().ok());
+    let readonly = meta
+        .as_ref()
+        .map(|m| m.permissions().readonly())
+        .unwrap_or(false);
 
     let extension = if is_dir {
         None
@@ -88,10 +95,30 @@ fn map_entry(item: &fs::DirEntry) -> Option<FileEntry> {
         is_dir,
         is_symlink: file_type.is_symlink(),
         hidden: is_hidden(item),
+        readonly,
         size,
         modified,
+        created,
         extension,
     })
+}
+
+/// Lists immediate subdirectories of `path`, sorted case-insensitively.
+/// Used by the folder tree; directory entries only, no file metadata.
+pub fn read_subdirs(path: &Path) -> io::Result<Vec<PathBuf>> {
+    let mut dirs = Vec::new();
+    for item in fs::read_dir(path)? {
+        let item = item?;
+        if item.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            dirs.push(item.path());
+        }
+    }
+    dirs.sort_by_cached_key(|p| {
+        p.file_name()
+            .map(|n| n.to_string_lossy().to_lowercase())
+            .unwrap_or_default()
+    });
+    Ok(dirs)
 }
 
 #[cfg(windows)]
@@ -122,8 +149,10 @@ mod tests {
             is_dir,
             is_symlink: false,
             hidden: false,
+            readonly: false,
             size: None,
             modified: None,
+            created: None,
             extension: None,
         }
     }
