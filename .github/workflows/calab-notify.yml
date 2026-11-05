@@ -24,7 +24,7 @@ jobs:
         env:
           CALAB_TOKEN: ${{ secrets.CALAB_TOKEN }}
           CALAB_URL: "https://app.calab.temsar.ru:8443"
-          ROOM: "01a1a807-456b-71d4-b20e-ee6a4f65e847"
+          ROOM: "01a1a9b6-033b-7852-9746-c1603114a9d7"
           REPO_URL: "https://github.com/Tzigan/FileManager"
         run: |
           set +e
