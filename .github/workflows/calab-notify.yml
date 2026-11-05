@@ -10,8 +10,6 @@ on:
     branches:
       - main
 
-permissions: {}
-
 jobs:
   notify:
     runs-on: ubuntu-latest
@@ -33,16 +31,15 @@ jobs:
             subject=$(git log -1 --format=%s "$sha")
             author=$(git log -1 --format=%an "$sha")
             short=$(git rev-parse --short "$sha")
-            payload=$(python3 -c 'import json,sys
-              print(json.dumps({"content": sys.argv[1], "nonce": sys.argv[2]}, ensure_ascii=False))' \
-              "FileManager: ${subject}
-${author} · main · ${short}
-${REPO_URL}/commit/${sha}" "$sha")
+            content="FileManager: ${subject}
+          ${author} · main · ${short}
+          ${REPO_URL}/commit/${sha}"
+            payload=$(python3 -c "import json,sys;print(json.dumps({'content':sys.argv[1],'nonce':sys.argv[2]},ensure_ascii=False))" "$content" "$sha")
             resp=$(curl -sS -m 15 -X POST "$CALAB_URL/api/rooms/$ROOM/messages" \
               -H "Authorization: Bearer $CALAB_TOKEN" \
               -H "Content-Type: application/json; charset=utf-8" \
               -d "$payload" 2>&1)
-            echo "calab $short: $resp" | head -c 200; echo
+            echo "calab $short: $(echo "$resp" | head -c 120)"
             sleep 1
           done
           exit 0
