@@ -274,3 +274,58 @@ mod tests_v02 {
         stdfs::remove_dir_all(&d).ok();
     }
 }
+
+
+#[cfg(test)]
+mod tests_acc {
+    use super::*;
+    use std::fs as stdfs;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+    use std::time::Instant;
+
+    fn cancel() -> Arc<AtomicBool> {
+        Arc::new(AtomicBool::new(false))
+    }
+
+    fn tmp(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("fm_acc_{name}_{}", std::process::id()));
+        let _ = stdfs::remove_dir_all(&d);
+        stdfs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn emoji_and_very_long_names() {
+        let d = tmp("names");
+        stdfs::write(d.join("файл 📁 emoji.txt"), b"x").unwrap();
+        let long = format!("{}.txt", "n".repeat(180));
+        stdfs::write(d.join(&long), b"x").unwrap();
+        let entries = read_dir(&d, &cancel()).unwrap();
+        assert!(entries.iter().any(|e| e.name.contains("📁")));
+        assert!(entries.iter().any(|e| e.name.len() > 150));
+        stdfs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn big_dir_reads_fast() {
+        let d = tmp("big");
+        for i in 0..1500 {
+            stdfs::write(d.join(format!("f{i:04}.txt")), b"x").unwrap();
+        }
+        let t = Instant::now();
+        let entries = read_dir(&d, &cancel()).unwrap();
+        assert_eq!(entries.len(), 1500);
+        assert!(t.elapsed().as_secs() < 10, "read_dir too slow");
+        stdfs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn file_as_dir_errors() {
+        let d = tmp("fdir");
+        let f = d.join("x.txt");
+        stdfs::write(&f, b"x").unwrap();
+        assert!(read_dir(&f, &cancel()).is_err());
+        stdfs::remove_dir_all(&d).ok();
+    }
+}
