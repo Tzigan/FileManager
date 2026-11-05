@@ -1,3 +1,7 @@
 /target
 
 .devin/config.local.json
+fix_*.sh
+debug_*.sh
+calab*token*
+fix_calab*
