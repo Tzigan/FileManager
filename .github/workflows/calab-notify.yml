@@ -1,0 +1,48 @@
+name: Calab Notify
+
+# Sends a Calab room message for every commit that reaches origin/main.
+# Replaces the local .git/hooks/reference-transaction hook: the bot token
+# lives in GitHub Secrets (never in a file), and the Linux runner has no
+# Windows codepage/UTF-8 transcoding issues.
+
+on:
+  push:
+    branches:
+      - main
+
+permissions: {}
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Post pushed commits to Calab
+        env:
+          CALAB_TOKEN: ${{ secrets.CALAB_TOKEN }}
+          CALAB_URL: "https://app.calab.temsar.ru:8443"
+          ROOM: "01a1a807-456b-71d4-b20e-ee6a4f65e847"
+          REPO_URL: "https://github.com/Tzigan/FileManager"
+        run: |
+          set +e
+          RANGE="${{ github.event.before }}..${{ github.event.after }}"
+          for sha in $(git rev-list --reverse "$RANGE"); do
+            subject=$(git log -1 --format=%s "$sha")
+            author=$(git log -1 --format=%an "$sha")
+            short=$(git rev-parse --short "$sha")
+            payload=$(python3 -c 'import json,sys
+              print(json.dumps({"content": sys.argv[1], "nonce": sys.argv[2]}, ensure_ascii=False))' \
+              "FileManager: ${subject}
+${author} · main · ${short}
+${REPO_URL}/commit/${sha}" "$sha")
+            resp=$(curl -sS -m 15 -X POST "$CALAB_URL/api/rooms/$ROOM/messages" \
+              -H "Authorization: Bearer $CALAB_TOKEN" \
+              -H "Content-Type: application/json; charset=utf-8" \
+              -d "$payload" 2>&1)
+            echo "calab $short: $resp" | head -c 200; echo
+            sleep 1
+          done
+          exit 0
