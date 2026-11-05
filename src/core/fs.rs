@@ -344,3 +344,37 @@ mod tests_acc {
         stdfs::remove_dir_all(&d).ok();
     }
 }
+
+#[cfg(test)]
+mod tests_v06 {
+    use super::*;
+
+    fn entry(name: &str, is_dir: bool) -> FileEntry {
+        FileEntry {
+            name: name.to_string(), path: PathBuf::from(name), is_dir, is_symlink: false,
+            hidden: false, readonly: false, size: None, modified: None, created: None, extension: None,
+        }
+    }
+
+    #[test]
+    fn sort_by_size_dirs_stay_first() {
+        let mut v = vec![
+            entry("z.txt", false), { let mut e = entry("a.txt", false); e.size = Some(10); e },
+            { let mut e = entry("m.txt", false); e.size = Some(1); e }, entry("dir", true),
+        ];
+        v[0].size = Some(99);
+        sort_entries_by(&mut v, SortKey::Size, false);
+        assert_eq!(v[0].name, "dir");
+        assert_eq!(v[1].name, "m.txt");
+        assert_eq!(v[3].name, "z.txt");
+    }
+
+    #[test]
+    fn sort_desc_reverses_group() {
+        let mut v = vec![entry("a.txt", false), entry("b.txt", false), entry("d", true)];
+        sort_entries_by(&mut v, SortKey::Name, true);
+        assert_eq!(v[0].name, "d");
+        assert_eq!(v[1].name, "b.txt");
+        assert_eq!(v[2].name, "a.txt");
+    }
+}

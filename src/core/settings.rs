@@ -116,3 +116,26 @@ mod tests {
         assert_eq!(back.language, s.language);
     }
 }
+
+#[cfg(test)]
+mod tests_v06 {
+    use super::*;
+
+    #[test]
+    fn view_mode_and_pinned_roundtrip() {
+        let mut s = Settings::default();
+        s.view_mode = ViewMode::Grid;
+        s.pinned_tabs = vec![PathBuf::from("C:\\p")];
+        let raw = serde_json::to_string(&s).unwrap();
+        let back: Settings = serde_json::from_str(&raw).unwrap();
+        assert_eq!(back.view_mode, ViewMode::Grid);
+        assert_eq!(back.pinned_tabs, vec![PathBuf::from("C:\\p")]);
+    }
+
+    #[test]
+    fn old_settings_without_new_fields_default() {
+        let s: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(s.view_mode, ViewMode::Table);
+        assert!(s.pinned_tabs.is_empty());
+    }
+}
