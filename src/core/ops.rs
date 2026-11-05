@@ -271,10 +271,8 @@ impl<'a> Worker<'a> {
                 return Ok(());
             }
             let dst = dest.join(src.file_name().unwrap_or_default());
-            if *src == dst {
-                self.failed += 1;
-                continue;
-            }
+            // Pasting into the same folder — Explorer copies to "name — копия".
+            let dst = if *src == dst { copy_variant(&dst) } else { dst };
             let stage = if is_move { OpStage::Moving } else { OpStage::Copying };
             self.progress(job, stage, src, done_bytes, total_bytes, done_files, total_files);
             if is_move {
@@ -601,6 +599,24 @@ fn is_retryable(e: &io::Error) -> bool {
 /// still correct: copy + verify + delete).
 fn is_cross_volume(_e: &io::Error) -> bool {
     true
+}
+
+/// First free sibling name for same-folder pastes:
+/// `name — копия.ext`, then `name — копия (2).ext`, etc.
+fn copy_variant(dst: &Path) -> PathBuf {
+    let stem = dst.file_stem().unwrap_or_default().to_string_lossy();
+    let ext = dst
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+    for n in 1..=999u32 {
+        let suffix = if n == 1 { format!(" — копия{ext}") } else { format!(" — копия ({n}){ext}") };
+        let cand = dst.with_file_name(format!("{stem}{suffix}"));
+        if !cand.exists() {
+            return cand;
+        }
+    }
+    dst.to_path_buf()
 }
 
 /// Prefixes paths longer than ~240 chars with `\\?\` for Windows long paths.
@@ -1073,5 +1089,44 @@ mod tests_acc04 {
             drop(hold);
         }
         fs::remove_dir_all(&d).ok();
+    }
+}
+
+
+#[cfg(test)]
+mod tests_samefolder {
+    use super::*;
+    use std::sync::mpsc::channel;
+
+    fn tmp(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("fm_sf_{name}_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn same_folder_paste_makes_copy_name() {
+        let dir = tmp("cv");
+        fs::write(dir.join("a.txt"), b"data").unwrap();
+        let (_rtx, rrx) = channel();
+        let (etx, _e) = channel();
+        let mut w = Worker { reply_rx: &rrx, events: &etx, overwrite_all: false, skip_all: false, failed: 0 };
+        w.run(&OpJob {
+            id: 1,
+            kind: OpKind::Copy { sources: vec![dir.join("a.txt")], dest: dir.clone() },
+            cancel: Arc::new(AtomicBool::new(false)),
+        });
+        let copy = dir.join("a — копия.txt");
+        assert_eq!(fs::read_to_string(&copy).unwrap(), "data");
+        // Second paste → "a — копия (2).txt"
+        w.run(&OpJob {
+            id: 2,
+            kind: OpKind::Copy { sources: vec![dir.join("a.txt")], dest: dir.clone() },
+            cancel: Arc::new(AtomicBool::new(false)),
+        });
+        assert!(dir.join("a — копия (2).txt").exists());
+        assert_eq!(fs::read_to_string(dir.join("a.txt")).unwrap(), "data");
+        fs::remove_dir_all(&dir).ok();
     }
 }

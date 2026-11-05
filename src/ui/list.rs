@@ -159,6 +159,14 @@ impl FileManagerApp {
         if resp.clicked() {
             self.select_click(index, ui.input(|i| i.modifiers));
         }
+        // Explorer semantics: right-click on an unselected row selects just it.
+        if resp.secondary_clicked() && !self.tabs[self.active].selection.contains(&index) {
+            let tab = &mut self.tabs[self.active];
+            tab.selection.clear();
+            tab.selection.insert(index);
+            tab.anchor = Some(index);
+            tab.cursor = index;
+        }
         if resp.double_clicked() {
             if entry.is_dir {
                 self.navigate(self.active, entry.path.clone(), ctx);
