@@ -1,4 +1,6 @@
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread;
@@ -113,12 +115,13 @@ impl FileManagerApp {
         }
         let active = store.settings.active_tab.min(paths.len() - 1);
 
+        let pins: BTreeSet<PathBuf> = store.settings.pinned_tabs.iter().cloned().collect();
         let mut app = Self {
             store,
             i18n,
             dirs,
             show_about: false,
-            tabs: paths.into_iter().map(Tab::new).collect(),
+            tabs: paths.into_iter().map(|p| { let mut t = Tab::new(p); t.pinned = pins.contains(&t.path); t }).collect(),
             active,
             tree: TreeState::new(drives()),
             scroll_to_cursor: false,
@@ -173,6 +176,7 @@ impl FileManagerApp {
 
     fn persist_tabs(&mut self) {
         self.store.settings.tabs = self.tabs.iter().map(|t| t.path.clone()).collect();
+        self.store.settings.pinned_tabs = self.tabs.iter().filter(|t| t.pinned).map(|t| t.path.clone()).collect();
         self.store.settings.active_tab = self.active;
         self.persist();
     }
@@ -265,7 +269,7 @@ impl FileManagerApp {
     }
 
     fn close_tab(&mut self, idx: usize, ctx: &egui::Context) {
-        if self.tabs.len() <= 1 {
+        if self.tabs.len() <= 1 || self.tabs[idx].pinned {
             return;
         }
         self.tabs[idx].cancel.store(true, Ordering::Relaxed);
@@ -282,6 +286,47 @@ impl FileManagerApp {
             self.active = idx;
             self.persist_tabs();
         }
+    }
+
+    fn duplicate_tab(&mut self, idx: usize, ctx: &egui::Context) {
+        let path = self.tabs[idx].path.clone();
+        self.tabs.insert(idx + 1, Tab::new(path));
+        self.active = idx + 1;
+        self.navigate_fresh(self.active, ctx);
+    }
+
+    fn close_others(&mut self, idx: usize, ctx: &egui::Context) {
+        if self.tabs.len() <= 1 {
+            return;
+        }
+        let kept = self.tabs[idx].cancel.clone();
+        let mut i = self.tabs.len();
+        while i > 0 {
+            i -= 1;
+            if i != idx && !self.tabs[i].pinned {
+                self.tabs[i].cancel.store(true, Ordering::Relaxed);
+                self.tabs.remove(i);
+            }
+        }
+        self.active = self.tabs.iter().position(|t| Arc::ptr_eq(&t.cancel, &kept)).unwrap_or(0);
+        self.persist_tabs();
+        ctx.request_repaint();
+    }
+
+    fn toggle_pin(&mut self, idx: usize) {
+        self.tabs[idx].pinned = !self.tabs[idx].pinned;
+        self.persist_tabs();
+    }
+
+    fn move_tab(&mut self, src: usize, dst: usize) {
+        if src == dst || src >= self.tabs.len() {
+            return;
+        }
+        let t = self.tabs.remove(src);
+        let dst = dst.min(self.tabs.len());
+        self.tabs.insert(dst, t);
+        self.active = dst;
+        self.persist_tabs();
     }
 
     // ------------------------------------------------------------------
@@ -555,31 +600,71 @@ impl FileManagerApp {
 
     fn tab_bar(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
-            let mut close = None;
-            let mut switch = None;
+            let mut act: Option<(&str, usize)> = None;
+            let mut mv = None;
             for (i, tab) in self.tabs.iter().enumerate() {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 2.0;
-                    let resp = ui.selectable_label(i == self.active, tab.title());
-                    if resp.clicked() {
-                        switch = Some(i);
-                    }
-                    if resp.middle_clicked() {
-                        close = Some(i);
-                    }
-                    if ui.small_button("×").clicked() {
-                        close = Some(i);
-                    }
+                let title = if tab.pinned { format!("📌 {}", tab.title()) } else { tab.title() };
+                let inner = ui.dnd_drag_source(egui::Id::new(("fm_tab", i)), i, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 2.0;
+                        let resp = ui.selectable_label(i == self.active, &title);
+                        resp.context_menu(|ui| {
+                            let close_txt = self.t("tab.close").to_owned();
+                            let others_txt = self.t("tab.close_others").to_owned();
+                            let dup_txt = self.t("tab.duplicate").to_owned();
+                            let pin_txt = self.t(if tab.pinned { "tab.unpin" } else { "tab.pin" }).to_owned();
+                            if !tab.pinned && ui.button(close_txt).clicked() {
+                                act = Some(("close", i));
+                                ui.close();
+                            }
+                            if ui.button(others_txt).clicked() {
+                                act = Some(("close_others", i));
+                                ui.close();
+                            }
+                            if ui.button(dup_txt).clicked() {
+                                act = Some(("dup", i));
+                                ui.close();
+                            }
+                            if ui.button(pin_txt).clicked() {
+                                act = Some(("pin", i));
+                                ui.close();
+                            }
+                        });
+                        if resp.clicked() {
+                            act = Some(("switch", i));
+                        }
+                        if resp.middle_clicked() && !tab.pinned {
+                            act = Some(("close", i));
+                        }
+                        if !tab.pinned && ui.small_button("×").clicked() {
+                            act = Some(("close", i));
+                        }
+                    });
                 });
+                if let Some(src) = inner.response.dnd_release_payload::<usize>() {
+                    let dst = ui
+                        .ctx()
+                        .pointer_latest_pos()
+                        .map(|p| if p.x < inner.response.rect.center().x { i } else { i + 1 })
+                        .unwrap_or(i);
+                    mv = Some((src, dst));
+                }
             }
             if ui.small_button("+").clicked() {
                 self.new_tab(ctx);
             }
-            if let Some(i) = switch {
-                self.switch_tab(i);
+            if let Some((src, dst)) = mv {
+                self.move_tab(*src, dst);
             }
-            if let Some(i) = close {
-                self.close_tab(i, ctx);
+            if let Some((what, i)) = act {
+                match what {
+                    "switch" => self.switch_tab(i),
+                    "close" => self.close_tab(i, ctx),
+                    "close_others" => self.close_others(i, ctx),
+                    "dup" => self.duplicate_tab(i, ctx),
+                    "pin" => self.toggle_pin(i),
+                    _ => {}
+                }
             }
         });
     }

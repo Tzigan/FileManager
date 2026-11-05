@@ -21,6 +21,8 @@ pub struct Settings {
     pub theme: Theme,
     /// Paths of open tabs, restored on startup.
     pub tabs: Vec<PathBuf>,
+    /// Paths of pinned tabs (subset of `tabs`), restored on startup.
+    pub pinned_tabs: Vec<PathBuf>,
     pub active_tab: usize,
     pub bookmarks: Vec<PathBuf>,
 }
@@ -31,6 +33,7 @@ impl Default for Settings {
             language: Language::default(),
             theme: Theme::default(),
             tabs: Vec::new(),
+            pinned_tabs: Vec::new(),
             active_tab: 0,
             bookmarks: Vec::new(),
         }

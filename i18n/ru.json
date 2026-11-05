@@ -89,5 +89,10 @@
   "label.config_dir": "Папка настроек",
   "label.log_dir": "Папка логов",
   "label.language": "Язык интерфейса",
-  "common.close": "Закрыть"
+  "common.close": "Закрыть",
+  "tab.close": "Закрыть",
+  "tab.close_others": "Закрыть другие",
+  "tab.duplicate": "Дублировать",
+  "tab.pin": "Закрепить",
+  "tab.unpin": "Открепить"
 }

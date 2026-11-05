@@ -53,7 +53,7 @@
   "dlg.delete_title": "Delete",
   "dlg.delete_msg": "Permanently delete items",
   "dlg.delete_msg_recycle": "Move to Recycle Bin items",
-  "integrate.add": "Add \u0022Open in FileManager\u0022 to context menu",
+  "integrate.add": "Add \"Open in FileManager\" to context menu",
   "integrate.remove": "Remove from context menu",
   "integrate.title": "Open in FileManager",
   "integrate.open_recycle": "Open Recycle Bin",
@@ -89,5 +89,10 @@
   "label.config_dir": "Settings folder",
   "label.log_dir": "Logs folder",
   "label.language": "Interface language",
-  "common.close": "Close"
+  "common.close": "Close",
+  "tab.close": "Close",
+  "tab.close_others": "Close others",
+  "tab.duplicate": "Duplicate",
+  "tab.pin": "Pin",
+  "tab.unpin": "Unpin"
 }
