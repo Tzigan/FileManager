@@ -231,3 +231,46 @@ mod tests_extra {
         stdfs::remove_dir_all(&d).ok();
     }
 }
+
+
+#[cfg(test)]
+mod tests_v02 {
+    use super::*;
+    use std::fs as stdfs;
+
+    fn tmp(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("fm_v02_{name}_{}", std::process::id()));
+        let _ = stdfs::remove_dir_all(&d);
+        stdfs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn unicode_names_roundtrip() {
+        let d = tmp("uni");
+        stdfs::write(d.join("отчёт_файл.txt"), b"x").unwrap();
+        stdfs::create_dir(d.join("папка_日本語")).unwrap();
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let entries = read_dir(&d, &cancel).unwrap();
+        assert!(entries.iter().any(|e| e.name == "отчёт_файл.txt"));
+        assert!(entries.iter().any(|e| e.name == "папка_日本語" && e.is_dir));
+        stdfs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn read_dir_missing_errors() {
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        assert!(read_dir(std::path::Path::new("Z:\\no\\such\\dir_fm"), &cancel).is_err());
+    }
+
+    #[test]
+    fn sort_dirs_first_then_files() {
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let d = tmp("sort");
+        stdfs::write(d.join("aaa.txt"), b"x").unwrap();
+        stdfs::create_dir(d.join("zzz")).unwrap();
+        let entries = read_dir(&d, &cancel).unwrap();
+        assert!(entries[0].is_dir, "dirs must come first");
+        stdfs::remove_dir_all(&d).ok();
+    }
+}
