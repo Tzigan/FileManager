@@ -377,4 +377,42 @@ mod tests_v06 {
         assert_eq!(v[1].name, "b.txt");
         assert_eq!(v[2].name, "a.txt");
     }
+
+
+    #[test]
+    fn sort_by_extension_then_name() {
+        let mut v = vec![
+            entry("b.txt", false),
+            { let mut e = entry("a.txt", false); e.extension = Some("txt".into()); e },
+            { let mut e = entry("c.md", false); e.extension = Some("md".into()); e },
+        ];
+        v[0].extension = Some("txt".into());
+        sort_entries_by(&mut v, SortKey::Extension, false);
+        assert_eq!(v[0].name, "c.md");
+        assert_eq!(v[1].name, "a.txt");
+        assert_eq!(v[2].name, "b.txt");
+    }
+
+    #[test]
+    fn sort_by_modified_newer_last_on_asc() {
+        let t1 = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(100);
+        let t2 = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(200);
+        let mut v = vec![
+            { let mut e = entry("new.txt", false); e.modified = Some(t2); e },
+            { let mut e = entry("old.txt", false); e.modified = Some(t1); e },
+        ];
+        sort_entries_by(&mut v, SortKey::Modified, false);
+        assert_eq!(v[0].name, "old.txt");
+        assert_eq!(v[1].name, "new.txt");
+    }
+
+    #[test]
+    fn equal_keys_fall_back_to_name() {
+        let mut v = vec![
+            { let mut e = entry("b.bin", false); e.size = Some(5); e },
+            { let mut e = entry("a.bin", false); e.size = Some(5); e },
+        ];
+        sort_entries_by(&mut v, SortKey::Size, false);
+        assert_eq!(v[0].name, "a.bin");
+    }
 }
