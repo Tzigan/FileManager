@@ -79,6 +79,7 @@ jobs:
         if: steps.ver.outputs.tag != ''
         shell: pwsh
         run: |
+          [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
           $tags = git tag -l "v*" | Sort-Object { [version]($_.TrimStart('v')) }
           $prev = ($tags | Where-Object { $_ -lt "${{ steps.ver.outputs.tag }}" } | Select-Object -Last 1)
           $range = if ($prev) { "$prev..${{ steps.ver.outputs.tag }}" } else { "HEAD" }
