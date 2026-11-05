@@ -204,24 +204,13 @@ impl FileManagerApp {
     /// Click selection honoring Ctrl/Shift modifiers (Explorer semantics).
     fn select_click(&mut self, index: usize, mods: egui::Modifiers) {
         let tab = &mut self.tabs[self.active];
-        if mods.shift && tab.anchor.is_some() {
-            let a = tab.anchor.unwrap();
-            let (lo, hi) = if a <= index { (a, index) } else { (index, a) };
-            if !mods.ctrl {
-                tab.selection.clear();
-            }
-            tab.selection.extend(lo..=hi);
-        } else if mods.ctrl {
-            if !tab.selection.remove(&index) {
-                tab.selection.insert(index);
-                tab.anchor = Some(index);
-            }
-        } else {
-            tab.selection.clear();
-            tab.selection.insert(index);
-            tab.anchor = Some(index);
-        }
-        tab.cursor = index;
+        tab.cursor = super::tabs::apply_click(
+            &mut tab.selection,
+            &mut tab.anchor,
+            index,
+            mods.ctrl,
+            mods.shift,
+        );
     }
 }
 
