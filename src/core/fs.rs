@@ -64,6 +64,30 @@ pub fn sort_entries(entries: &mut Vec<FileEntry>) {
     entries.sort_by_cached_key(|e| (!e.is_dir, e.name.to_lowercase()));
 }
 
+/// Column the file list is sorted by.
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub enum SortKey {
+    Name,
+    Extension,
+    Size,
+    Modified,
+}
+
+/// Directories first; inside a group — by `key`, `desc` reverses the group order.
+pub fn sort_entries_by(entries: &mut Vec<FileEntry>, key: SortKey, desc: bool) {
+    entries.sort_by(|a, b| {
+        b.is_dir.cmp(&a.is_dir).then_with(|| {
+            let ord = match key {
+                SortKey::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+                SortKey::Extension => a.extension.cmp(&b.extension).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())),
+                SortKey::Size => a.size.cmp(&b.size).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())),
+                SortKey::Modified => a.modified.cmp(&b.modified).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())),
+            };
+            if desc { ord.reverse() } else { ord }
+        })
+    });
+}
+
 fn map_entry(item: &fs::DirEntry) -> Option<FileEntry> {
     let path = item.path();
     let name = item.file_name().to_string_lossy().into_owned();

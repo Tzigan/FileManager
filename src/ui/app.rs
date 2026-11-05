@@ -5,11 +5,11 @@ use std::sync::atomic::Ordering;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread;
 
-use crate::core::fs::{self, FileEntry, ReadDirError};
+use crate::core::fs::{self, FileEntry, ReadDirError, SortKey};
 use crate::core::i18n::{I18n, Language};
 use crate::core::ops::{self, OpEvent, OpJob, OpReply};
 use crate::core::paths::AppDirs;
-use crate::core::settings::{SettingsStore, Theme};
+use crate::core::settings::{SettingsStore, Theme, ViewMode};
 use crate::platform::{drives, install_context_menu, pipe_listen, uninstall_context_menu};
 use crate::ui::opsui::OpsUi;
 use crate::ui::tabs::{ListStatus, Tab};
@@ -327,6 +327,24 @@ impl FileManagerApp {
         self.tabs.insert(dst, t);
         self.active = dst;
         self.persist_tabs();
+    }
+
+    pub(crate) fn sort_col(&mut self, key: SortKey) {
+        let tab = &mut self.tabs[self.active];
+        if tab.sort_key == key {
+            tab.sort_desc = !tab.sort_desc;
+        } else {
+            tab.sort_key = key;
+            tab.sort_desc = false;
+        }
+        let (k, d) = (tab.sort_key, tab.sort_desc);
+        fs::sort_entries_by(&mut tab.entries, k, d);
+        tab.clear_selection();
+    }
+
+    pub(crate) fn set_view(&mut self, mode: ViewMode) {
+        self.store.settings.view_mode = mode;
+        self.persist();
     }
 
     // ------------------------------------------------------------------

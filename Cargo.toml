@@ -1,6 +1,6 @@
 [package]
 name = "filemanager"
-version = "0.5.3"
+version = "0.6.0"
 edition = "2024"
 description = "Portable file manager for Windows 11 x64"
 build = "build.rs"

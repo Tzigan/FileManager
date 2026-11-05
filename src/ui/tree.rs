@@ -40,8 +40,14 @@ impl crate::ui::FileManagerApp {
             .show(ui, |ui| {
                 self.bookmark_section(ctx, ui);
                 ui.separator();
-                let heading = self.t("tree.this_pc").to_owned();
-                ui.label(egui::RichText::new(heading).strong());
+                ui.horizontal(|ui| {
+                    let heading = self.t("tree.this_pc").to_owned();
+                    ui.label(egui::RichText::new(heading).strong());
+                    if ui.small_button("⟳").clicked() {
+                        self.tree.children.clear();
+                        self.tree.pending.clear();
+                    }
+                });
                 ui.add_space(4.0);
                 let roots = self.tree.roots.clone();
                 for root in roots {

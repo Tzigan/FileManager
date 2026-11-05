@@ -94,5 +94,8 @@
   "tab.close_others": "Закрыть другие",
   "tab.duplicate": "Дублировать",
   "tab.pin": "Закрепить",
-  "tab.unpin": "Открепить"
+  "tab.unpin": "Открепить",
+  "view.table": "Таблица",
+  "view.list": "Список",
+  "view.grid": "Сетка"
 }

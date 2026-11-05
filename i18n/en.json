@@ -94,5 +94,8 @@
   "tab.close_others": "Close others",
   "tab.duplicate": "Duplicate",
   "tab.pin": "Pin",
-  "tab.unpin": "Unpin"
+  "tab.unpin": "Unpin",
+  "view.table": "Table",
+  "view.list": "List",
+  "view.grid": "Grid"
 }

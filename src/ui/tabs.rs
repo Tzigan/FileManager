@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-use crate::core::fs::FileEntry;
+use crate::core::fs::{FileEntry, SortKey};
 use crate::core::history::History;
 
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -26,6 +26,8 @@ pub struct Tab {
     pub history: History,
     pub status: ListStatus,
     pub pinned: bool,
+    pub sort_key: SortKey,
+    pub sort_desc: bool,
     pub generation: u64,
     pub cancel: Arc<AtomicBool>,
     pub error: Option<String>,
@@ -43,6 +45,8 @@ impl Tab {
             history: History::default(),
             status: ListStatus::Loading,
             pinned: false,
+            sort_key: SortKey::Name,
+            sort_desc: false,
             generation: 0,
             cancel: Arc::new(AtomicBool::new(false)),
             error: None,

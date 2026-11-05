@@ -1,5 +1,6 @@
 use crate::core::format::format_size;
-use crate::core::fs::FileEntry;
+use crate::core::fs::{FileEntry, SortKey};
+use crate::core::settings::ViewMode;
 use crate::platform::format_local_time;
 use crate::ui::FileManagerApp;
 
@@ -11,19 +12,50 @@ const MODIFIED_COL: f32 = 140.0;
 const COL_GAP: f32 = 8.0;
 
 impl FileManagerApp {
-    /// Virtualized file list: header + painted rows with multi-selection.
+    /// Virtualized file list: view switcher + header + rows in the current mode.
     pub(crate) fn file_list(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
-        self.list_header(ui);
+        ui.horizontal(|ui| {
+            for (mode, key) in [
+                (ViewMode::Table, "view.table"),
+                (ViewMode::List, "view.list"),
+                (ViewMode::Grid, "view.grid"),
+            ] {
+                let cur = self.store.settings.view_mode;
+                if ui.selectable_label(cur == mode, self.t(key).to_owned()).clicked() {
+                    self.set_view(mode);
+                }
+            }
+        });
         ui.separator();
 
         let count = self.tabs[self.active].entries.len();
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .show_rows(ui, ROW_HEIGHT, count, |ui, range| {
-                for index in range {
-                    self.file_row(ui, index, ctx);
-                }
-            });
+        match self.store.settings.view_mode {
+            ViewMode::Table => {
+                self.list_header(ui);
+                ui.separator();
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show_rows(ui, ROW_HEIGHT, count, |ui, range| {
+                        for index in range {
+                            self.file_row(ui, index, ctx);
+                        }
+                    });
+            }
+            ViewMode::List => {
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show_rows(ui, ROW_HEIGHT, count, |ui, range| {
+                        for index in range {
+                            self.list_row(ui, index, ctx);
+                        }
+                    });
+            }
+            ViewMode::Grid => {
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| self.grid_view(ui, ctx));
+            }
+        }
         self.scroll_to_cursor = false;
     }
 
@@ -34,7 +66,7 @@ impl FileManagerApp {
         (ICON_WIDTH, size_x, type_x, mod_x)
     }
 
-    fn list_header(&self, ui: &mut egui::Ui) {
+    fn list_header(&mut self, ui: &mut egui::Ui) {
         let width = ui.available_width();
         let (rect, _) =
             ui.allocate_exact_size(egui::vec2(width, ROW_HEIGHT), egui::Sense::hover());
@@ -43,20 +75,40 @@ impl FileManagerApp {
         let color = ui.visuals().strong_text_color();
         let painter = ui.painter();
         let y = rect.center().y;
+        let (key, desc) = {
+            let t = &self.tabs[self.active];
+            (t.sort_key, t.sort_desc)
+        };
 
-        for (x, key) in [
-            (name_x, "col.name"),
-            (size_x, "col.size"),
-            (type_x, "col.type"),
-            (mod_x, "col.modified"),
-        ] {
+        let cols: [(f32, f32, SortKey, &str); 4] = [
+            (name_x, size_x, SortKey::Name, "col.name"),
+            (size_x, type_x, SortKey::Size, "col.size"),
+            (type_x, mod_x, SortKey::Extension, "col.type"),
+            (mod_x, width, SortKey::Modified, "col.modified"),
+        ];
+        for (x0, x1, k, i18n_key) in cols {
+            let arrow = if k == key {
+                if desc { " ▼" } else { " ▲" }
+            } else {
+                ""
+            };
             painter.text(
-                egui::pos2(rect.min.x + x, y),
+                egui::pos2(rect.min.x + x0, y),
                 egui::Align2::LEFT_CENTER,
-                self.t(key).to_owned(),
+                format!("{}{arrow}", self.t(i18n_key)),
                 font.clone(),
                 color,
             );
+            let col_rect = egui::Rect::from_min_max(
+                egui::pos2(rect.min.x + x0, rect.min.y),
+                egui::pos2(rect.min.x + x1, rect.max.y),
+            );
+            if ui
+                .interact(col_rect, ui.id().with(i18n_key), egui::Sense::click())
+                .clicked()
+            {
+                self.sort_col(k);
+            }
         }
     }
 
@@ -156,6 +208,114 @@ impl FileManagerApp {
             weak,
         );
 
+        let _ = focused;
+        self.entry_actions(&resp, index, &entry, ui, ctx);
+    }
+
+    /// Compact list view: icon + name, no columns.
+    fn list_row(&mut self, ui: &mut egui::Ui, index: usize, ctx: &egui::Context) {
+        let entry: FileEntry = self.tabs[self.active].entries[index].clone();
+        let width = ui.available_width();
+        let (rect, resp) =
+            ui.allocate_exact_size(egui::vec2(width, ROW_HEIGHT), egui::Sense::click());
+        let selected = self.tabs[self.active].selection.contains(&index);
+        let focused = self.tabs[self.active].cursor == index;
+        let painter = ui.painter();
+        if selected {
+            painter.rect_filled(rect, 2.0, ui.visuals().selection.bg_fill);
+        } else if resp.hovered() {
+            painter.rect_filled(rect, 2.0, ui.visuals().widgets.hovered.bg_fill);
+        }
+        if focused {
+            painter.rect_stroke(
+                rect.shrink(1.0),
+                2.0,
+                egui::Stroke::new(1.0, ui.visuals().selection.stroke.color),
+                egui::StrokeKind::Inside,
+            );
+        }
+        paint_icon(painter, rect, entry.is_dir);
+        let font = egui::TextStyle::Body.resolve(ui.style());
+        painter.text(
+            egui::pos2(rect.min.x + ICON_WIDTH, rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            &entry.name,
+            font,
+            ui.visuals().text_color(),
+        );
+        self.entry_actions(&resp, index, &entry, ui, ctx);
+    }
+
+    fn grid_view(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let cell = 112.0f32;
+        let cols = (ui.available_width() / cell).floor().max(1.0) as usize;
+        let count = self.tabs[self.active].entries.len();
+        let mut index = 0usize;
+        egui::Grid::new("file_grid")
+            .num_columns(cols)
+            .spacing([8.0, 8.0])
+            .show(ui, |ui| {
+                for _row in 0..count.div_ceil(cols) {
+                    for _ in 0..cols {
+                        if index >= count {
+                            break;
+                        }
+                        self.grid_tile(ui, index, ctx);
+                        index += 1;
+                    }
+                    ui.end_row();
+                }
+            });
+    }
+
+    fn grid_tile(&mut self, ui: &mut egui::Ui, index: usize, ctx: &egui::Context) {
+        let entry: FileEntry = self.tabs[self.active].entries[index].clone();
+        let (rect, resp) =
+            ui.allocate_exact_size(egui::vec2(104.0, 68.0), egui::Sense::click());
+        let selected = self.tabs[self.active].selection.contains(&index);
+        let focused = self.tabs[self.active].cursor == index;
+        let painter = ui.painter();
+        if selected {
+            painter.rect_filled(rect, 4.0, ui.visuals().selection.bg_fill);
+        } else if resp.hovered() {
+            painter.rect_filled(rect, 4.0, ui.visuals().widgets.hovered.bg_fill);
+        }
+        if focused {
+            painter.rect_stroke(
+                rect.shrink(1.0),
+                4.0,
+                egui::Stroke::new(1.0, ui.visuals().selection.stroke.color),
+                egui::StrokeKind::Inside,
+            );
+        }
+        let icon = if entry.is_dir { "📁" } else { "📄" };
+        painter.text(
+            egui::pos2(rect.center().x, rect.min.y + 20.0),
+            egui::Align2::CENTER_CENTER,
+            icon,
+            egui::TextStyle::Heading.resolve(ui.style()),
+            ui.visuals().text_color(),
+        );
+        let font = egui::TextStyle::Body.resolve(ui.style());
+        painter.with_clip_rect(rect.shrink(4.0)).text(
+            egui::pos2(rect.center().x, rect.max.y - 14.0),
+            egui::Align2::CENTER_CENTER,
+            &entry.name,
+            font,
+            ui.visuals().text_color(),
+        );
+        self.entry_actions(&resp, index, &entry, ui, ctx);
+    }
+
+    /// Shared row/tile interactions: selection, right-click select, open, context menu.
+    fn entry_actions(
+        &mut self,
+        resp: &egui::Response,
+        index: usize,
+        entry: &FileEntry,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+    ) {
         if resp.clicked() {
             self.select_click(index, ui.input(|i| i.modifiers));
         }
@@ -174,8 +334,8 @@ impl FileManagerApp {
                 let _ = crate::platform::shell_open(&entry.path);
             }
         }
-        if focused && self.scroll_to_cursor {
-            ui.scroll_to_rect(rect, None);
+        if self.tabs[self.active].cursor == index && self.scroll_to_cursor {
+            ui.scroll_to_rect(resp.rect, None);
         }
 
         resp.context_menu(|ui| {

@@ -14,6 +14,15 @@ pub enum Theme {
     Dark,
 }
 
+/// File list view: table with columns, compact list or icon grid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ViewMode {
+    #[default]
+    Table,
+    List,
+    Grid,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -25,6 +34,7 @@ pub struct Settings {
     pub pinned_tabs: Vec<PathBuf>,
     pub active_tab: usize,
     pub bookmarks: Vec<PathBuf>,
+    pub view_mode: ViewMode,
 }
 
 impl Default for Settings {
@@ -36,6 +46,7 @@ impl Default for Settings {
             pinned_tabs: Vec::new(),
             active_tab: 0,
             bookmarks: Vec::new(),
+            view_mode: ViewMode::default(),
         }
     }
 }
