@@ -80,3 +80,28 @@ fn main() -> anyhow::Result<()> {
     tracing::info!("FileManager exiting");
     result.map_err(|e| anyhow::anyhow!("{e}"))
 }
+
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn windows_gui_subsystem() {
+        let src = include_str!("main.rs");
+        assert!(src.contains("windows_subsystem = \"windows\""));
+    }
+
+    #[test]
+    fn manifest_declares_awareness() {
+        let m = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "\\app.manifest")).unwrap();
+        assert!(m.contains("longPathAware"));
+        assert!(m.contains("PerMonitorV2") || m.contains("dpiAwareness"));
+    }
+
+    #[test]
+    fn icon_resource_exists() {
+        let rc = concat!(env!("CARGO_MANIFEST_DIR"), "\\app.rc");
+        assert!(std::path::Path::new(rc).exists());
+        let c = std::fs::read_to_string(rc).unwrap();
+        assert!(c.to_lowercase().contains("icon") || c.contains(".ico"));
+    }
+}
