@@ -61,3 +61,18 @@ pub fn get_clipboard_files() -> Vec<PathBuf> {
         out
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hdrop_roundtrip() {
+        let paths = vec![PathBuf::from("C:\\a.txt"), PathBuf::from("D:\\b.txt")];
+        set_clipboard_files(&paths).unwrap();
+        let got = get_clipboard_files();
+        for p in &paths {
+            assert!(got.iter().any(|g| g == p), "missing {p:?} in {got:?}");
+        }
+    }
+}

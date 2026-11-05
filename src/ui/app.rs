@@ -831,3 +831,22 @@ impl eframe::App for FileManagerApp {
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::breadcrumb_segments;
+    use std::path::Path;
+
+    #[test]
+    fn breadcrumbs_split_path() {
+        #[cfg(windows)]
+        {
+            let segs = breadcrumb_segments(Path::new("C:\\a\\b"));
+            assert!(segs.len() >= 3);
+            assert_eq!(segs[0].0, "C:\\");
+            let last = segs.last().unwrap();
+            assert_eq!(last.0, "b");
+            assert!(last.1.ends_with("b"));
+        }
+    }
+}

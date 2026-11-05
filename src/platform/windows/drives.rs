@@ -10,3 +10,15 @@ pub fn drives() -> Vec<PathBuf> {
         .map(|i| PathBuf::from(format!("{}:\\", (b'A' + i as u8) as char)))
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lists_drives() {
+        let d = drives();
+        assert!(!d.is_empty());
+        assert!(d.iter().all(|p| p.to_string_lossy().ends_with(":\\")));
+    }
+}

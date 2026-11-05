@@ -77,3 +77,28 @@ impl SettingsStore {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn defaults_are_safe() {
+        let s = Settings::default();
+        assert!(s.tabs.is_empty() && s.active_tab == 0 && s.bookmarks.is_empty());
+    }
+
+    #[test]
+    fn roundtrip_keeps_tabs_bookmarks() {
+        let s = Settings {
+            tabs: vec![PathBuf::from("C:\\a")],
+            active_tab: 0,
+            bookmarks: vec![PathBuf::from("D:\\b")],
+            ..Default::default()
+        };
+        let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(back.tabs, s.tabs);
+        assert_eq!(back.bookmarks, s.bookmarks);
+        assert_eq!(back.language, s.language);
+    }
+}

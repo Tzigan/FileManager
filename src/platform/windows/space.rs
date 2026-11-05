@@ -21,3 +21,15 @@ pub fn free_space(path: &Path) -> Option<u64> {
     }
     Some(free)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn free_space_positive() {
+        let f = free_space(Path::new("C:\\"));
+        assert!(f.map(|v| v > 0).unwrap_or(false));
+    }
+}

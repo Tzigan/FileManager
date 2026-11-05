@@ -32,3 +32,20 @@ fn run(args: &[&str]) -> io::Result<()> {
         Err(io::Error::new(io::ErrorKind::Other, String::from_utf8_lossy(&out.stderr).into_owned()))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Command;
+
+    #[test]
+    fn install_query_uninstall() {
+        let exe = std::env::current_exe().unwrap();
+        install_context_menu(&exe, "Open in FileManager").unwrap();
+        let q = Command::new("reg").args(["query", ROOT]).output().unwrap();
+        assert!(q.status.success());
+        uninstall_context_menu().unwrap();
+        let q2 = Command::new("reg").args(["query", ROOT]).output().unwrap();
+        assert!(!q2.status.success());
+    }
+}

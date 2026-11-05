@@ -186,3 +186,48 @@ mod tests {
         assert!(matches!(res, Err(ReadDirError::Cancelled)));
     }
 }
+
+#[cfg(test)]
+mod tests_extra {
+    use super::*;
+    use std::fs as stdfs;
+
+    fn tmp(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("fm_fs_{name}_{}", std::process::id()));
+        let _ = stdfs::remove_dir_all(&d);
+        stdfs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn read_subdirs_only_dirs_sorted_ci() {
+        let d = tmp("subdirs");
+        stdfs::create_dir(d.join("b_dir")).unwrap();
+        stdfs::create_dir(d.join("A_dir")).unwrap();
+        stdfs::write(d.join("file.txt"), b"x").unwrap();
+        let got = read_subdirs(&d).unwrap();
+        let names: Vec<String> = got
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().to_lowercase())
+            .collect();
+        assert_eq!(names, vec!["a_dir", "b_dir"]);
+        stdfs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn read_dir_populates_entry_fields() {
+        let d = tmp("fields");
+        stdfs::write(d.join("note.md"), b"abc").unwrap();
+        stdfs::create_dir(d.join("sub")).unwrap();
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let entries = read_dir(&d, &cancel).unwrap();
+        let f = entries.iter().find(|e| e.name == "note.md").unwrap();
+        assert!(!f.is_dir);
+        assert_eq!(f.size, Some(3));
+        assert!(f.modified.is_some());
+        assert_eq!(f.extension.as_deref(), Some("md"));
+        let dir = entries.iter().find(|e| e.name == "sub").unwrap();
+        assert!(dir.is_dir && dir.size.is_none());
+        stdfs::remove_dir_all(&d).ok();
+    }
+}

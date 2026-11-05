@@ -61,3 +61,20 @@ impl Tab {
         self.anchor = None;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn title_uses_folder_name() {
+        let t = Tab::new(PathBuf::from("C:\\foo\\bar"));
+        assert_eq!(t.title(), "bar");
+    }
+
+    #[test]
+    fn title_root_not_empty() {
+        let t = Tab::new(PathBuf::from("C:\\"));
+        assert!(!t.title().is_empty());
+    }
+}

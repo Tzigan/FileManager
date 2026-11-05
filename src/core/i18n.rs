@@ -63,3 +63,20 @@ fn load_table(raw: &str) -> HashMap<String, String> {
         HashMap::new()
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn translates_known_key() {
+        let i = I18n::new(Language::En);
+        assert_ne!(i.t("menu.file"), "menu.file");
+    }
+
+    #[test]
+    fn missing_key_returns_key() {
+        let i = I18n::new(Language::Ru);
+        assert_eq!(i.t("no.such.key"), "no.such.key");
+    }
+}

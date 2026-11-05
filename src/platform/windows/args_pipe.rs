@@ -53,3 +53,29 @@ pub fn send(path: &Path) -> io::Result<()> {
     let mut f = std::fs::OpenOptions::new().write(true).open(PIPE)?;
     f.write_all(path.as_os_str().to_string_lossy().as_bytes())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc::channel;
+    use std::time::Duration;
+
+    #[test]
+    fn pipe_forwards_path() {
+        let (tx, rx) = channel();
+        listen(move |p| {
+            let _ = tx.send(p);
+        });
+        let mut sent = false;
+        for _ in 0..100 {
+            std::thread::sleep(Duration::from_millis(100));
+            if send(Path::new(r"C:\test\pipe_path")).is_ok() {
+                sent = true;
+                break;
+            }
+        }
+        assert!(sent, "send() never connected to the pipe");
+        let got = rx.recv_timeout(Duration::from_secs(5));
+        assert_eq!(got.unwrap(), PathBuf::from(r"C:\test\pipe_path"));
+    }
+}

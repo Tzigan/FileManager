@@ -44,3 +44,15 @@ pub fn discover() -> anyhow::Result<AppDirs> {
         portable,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn discover_returns_dirs() {
+        let dirs = discover().unwrap();
+        assert!(!dirs.config_dir.as_os_str().is_empty());
+        assert!(!dirs.log_dir.as_os_str().is_empty());
+    }
+}
