@@ -45,6 +45,9 @@ mod tests_v05 {
         for k in [ROOT, ROOT_BG, ROOT_DRIVE] {
             let q = Command::new("reg").args(["query", k]).output().unwrap();
             assert!(q.status.success(), "missing {k}");
+            let qc = Command::new("reg").args(["query", &format!("{k}\\command"), "/ve"]).output().unwrap();
+            let out = String::from_utf8_lossy(&qc.stdout);
+            assert!(out.contains("%1"), "command lacks %1 in {k}");
         }
         uninstall_context_menu().unwrap();
         for k in [ROOT, ROOT_BG, ROOT_DRIVE] {
