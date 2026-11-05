@@ -29,6 +29,10 @@ impl FileManagerApp {
         ui.separator();
 
         let count = self.tabs[self.active].entries.len();
+        // Background hit-test under the whole list: rows drawn later win their
+        // rects, empty space falls through to this response.
+        let bg = ui.available_rect_before_wrap();
+        let bg_resp = ui.interact(bg, ui.id().with("empty_list_area"), egui::Sense::click());
         match self.store.settings.view_mode {
             ViewMode::Table => {
                 self.list_header(ui);
@@ -56,6 +60,7 @@ impl FileManagerApp {
                     .show(ui, |ui| self.grid_view(ui, ctx));
             }
         }
+        self.empty_area_menu(&bg_resp, ui, ctx);
         self.scroll_to_cursor = false;
     }
 
@@ -307,6 +312,42 @@ impl FileManagerApp {
         self.entry_actions(&resp, index, &entry, ui, ctx);
     }
 
+    /// Empty space below the rows: left-click clears the selection, right-click
+    /// shows the folder menu (Explorer semantics).
+    fn empty_area_menu(&mut self, resp: &egui::Response, ui: &mut egui::Ui, ctx: &egui::Context) {
+        if resp.clicked() {
+            let tab = &mut self.tabs[self.active];
+            tab.selection.clear();
+            tab.anchor = None;
+        }
+        resp.context_menu(|ui| {
+            if ui
+                .add_enabled(
+                    self.ops_ui.clipboard.is_some(),
+                    egui::Button::new(self.t("ctx.paste").to_owned()),
+                )
+                .clicked()
+            {
+                self.act_paste();
+                ui.close();
+            }
+            ui.separator();
+            if ui.button(self.t("ctx.new_folder").to_owned()).clicked() {
+                self.ops_ui.create = Some((true, String::new()));
+                ui.close();
+            }
+            if ui.button(self.t("ctx.new_file").to_owned()).clicked() {
+                self.ops_ui.create = Some((false, String::new()));
+                ui.close();
+            }
+            ui.separator();
+            if ui.button(self.t("toolbar.refresh").to_owned()).clicked() {
+                self.refresh(ctx);
+                ui.close();
+            }
+        });
+    }
+
     /// Shared row/tile interactions: selection, right-click select, open, context menu.
     fn entry_actions(
         &mut self,
@@ -339,6 +380,15 @@ impl FileManagerApp {
         }
 
         resp.context_menu(|ui| {
+            if ui.button(self.t("ctx.open").to_owned()).clicked() {
+                if entry.is_dir {
+                    self.navigate(self.active, entry.path.clone(), ctx);
+                } else {
+                    let _ = crate::platform::shell_open(&entry.path);
+                }
+                ui.close();
+            }
+            ui.separator();
             if ui.button(self.t("ctx.copy").to_owned()).clicked() {
                 self.act_copy();
                 ui.close();

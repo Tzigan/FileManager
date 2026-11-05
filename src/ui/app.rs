@@ -50,6 +50,8 @@ pub struct FileManagerApp {
     update_busy: bool,
     /// Update status/error text for the update window.
     update_err: Option<String>,
+    /// Index of the tab currently being drag-reordered.
+    tab_drag: Option<usize>,
 
     pub(crate) tabs: Vec<Tab>,
     pub(crate) active: usize,
@@ -154,6 +156,7 @@ impl FileManagerApp {
             pending_update: None,
             update_busy: false,
             update_err: None,
+            tab_drag: None,
             tabs: paths.into_iter().map(|p| { let mut t = Tab::new(p); t.pinned = pins.contains(&t.path); t }).collect(),
             active,
             tree: TreeState::new(drives()),
@@ -280,7 +283,7 @@ impl FileManagerApp {
         }
     }
 
-    fn refresh(&mut self, ctx: &egui::Context) {
+    pub(crate) fn refresh(&mut self, ctx: &egui::Context) {
         self.navigate_fresh(self.active, ctx);
     }
 
@@ -672,60 +675,167 @@ impl FileManagerApp {
     fn tab_bar(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
             let mut act: Option<(&str, usize)> = None;
-            let mut mv = None;
-            for (i, tab) in self.tabs.iter().enumerate() {
-                let title = if tab.pinned { format!("📌 {}", tab.title()) } else { tab.title() };
-                let inner = ui.dnd_drag_source(egui::Id::new(("fm_tab", i)), i, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 2.0;
-                        let resp = ui.selectable_label(i == self.active, &title);
-                        resp.context_menu(|ui| {
-                            let close_txt = self.t("tab.close").to_owned();
-                            let others_txt = self.t("tab.close_others").to_owned();
-                            let dup_txt = self.t("tab.duplicate").to_owned();
-                            let pin_txt = self.t(if tab.pinned { "tab.unpin" } else { "tab.pin" }).to_owned();
-                            if !tab.pinned && ui.button(close_txt).clicked() {
-                                act = Some(("close", i));
-                                ui.close();
-                            }
-                            if ui.button(others_txt).clicked() {
-                                act = Some(("close_others", i));
-                                ui.close();
-                            }
-                            if ui.button(dup_txt).clicked() {
-                                act = Some(("dup", i));
-                                ui.close();
-                            }
-                            if ui.button(pin_txt).clicked() {
-                                act = Some(("pin", i));
-                                ui.close();
-                            }
-                        });
-                        if resp.clicked() {
-                            act = Some(("switch", i));
+            let mut drop_dst = None;
+            let mut drag_src = None;
+            let metas: Vec<(bool, String)> = self
+                .tabs
+                .iter()
+                .map(|t| {
+                    let title = if t.pinned { format!("📌 {}", t.title()) } else { t.title() };
+                    (t.pinned, title)
+                })
+                .collect();
+            for (i, (pinned, title)) in metas.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 2.0;
+
+                    // Hand-rolled tab widget: click-and-drag sense so a plain click
+                    // stays a click (arrow cursor), while press+drag reorders.
+                    let galley = ui.painter().layout_no_wrap(
+                        title.clone(),
+                        egui::TextStyle::Button.resolve(ui.style()),
+                        ui.visuals().text_color(),
+                    );
+                    // The × lives inside the tab: right-side strip of the same rect.
+                    let x_w = if *pinned { 0.0 } else { 18.0 };
+                    let size = galley.size() + egui::vec2(14.0 + x_w, 6.0);
+                    let (rect, resp) =
+                        ui.allocate_exact_size(size, egui::Sense::click_and_drag());
+                    let x_rect = egui::Rect::from_min_max(
+                        egui::pos2(rect.max.x - x_w, rect.min.y),
+                        rect.max,
+                    );
+                    let over_x = !*pinned
+                        && ui
+                            .ctx()
+                            .pointer_latest_pos()
+                            .map(|p| x_rect.contains(p))
+                            .unwrap_or(false);
+                    let visuals = ui.visuals();
+                    let painter = ui.painter();
+                    if i == self.active {
+                        painter.rect_filled(rect, 3.0, visuals.selection.bg_fill);
+                    } else if resp.hovered() {
+                        painter.rect_filled(rect, 3.0, visuals.widgets.hovered.bg_fill);
+                    }
+                    let color = if i == self.active {
+                        visuals.strong_text_color()
+                    } else {
+                        visuals.text_color()
+                    };
+                    painter.galley(
+                        rect.center() - galley.size() / 2.0 - egui::vec2(x_w / 2.0, 0.0),
+                        galley,
+                        color,
+                    );
+                    if !*pinned {
+                        if over_x {
+                            painter.rect_filled(
+                                x_rect.shrink(2.0),
+                                3.0,
+                                visuals.error_fg_color.gamma_multiply(0.25),
+                            );
                         }
-                        if resp.middle_clicked() && !tab.pinned {
+                        let x_color = if over_x {
+                            visuals.error_fg_color
+                        } else {
+                            visuals.weak_text_color()
+                        };
+                        painter.text(
+                            x_rect.center(),
+                            egui::Align2::CENTER_CENTER,
+                            "×",
+                            egui::TextStyle::Button.resolve(ui.style()),
+                            x_color,
+                        );
+                    }
+
+                    resp.context_menu(|ui| {
+                        let close_txt = self.t("tab.close").to_owned();
+                        let others_txt = self.t("tab.close_others").to_owned();
+                        let dup_txt = self.t("tab.duplicate").to_owned();
+                        let pin_txt = self.t(if *pinned { "tab.unpin" } else { "tab.pin" }).to_owned();
+                        if !*pinned && ui.button(close_txt).clicked() {
                             act = Some(("close", i));
+                            ui.close();
                         }
-                        if !tab.pinned && ui.small_button("×").clicked() {
-                            act = Some(("close", i));
+                        if ui.button(others_txt).clicked() {
+                            act = Some(("close_others", i));
+                            ui.close();
+                        }
+                        if ui.button(dup_txt).clicked() {
+                            act = Some(("dup", i));
+                            ui.close();
+                        }
+                        if ui.button(pin_txt).clicked() {
+                            act = Some(("pin", i));
+                            ui.close();
                         }
                     });
+                    if resp.clicked() {
+                        let in_x = resp
+                            .interact_pointer_pos()
+                            .map(|p| x_rect.contains(p))
+                            .unwrap_or(false);
+                        if in_x {
+                            act = Some(("close", i));
+                        } else {
+                            act = Some(("switch", i));
+                        }
+                    }
+                    if resp.middle_clicked() && !*pinned {
+                        act = Some(("close", i));
+                    }
+                    if resp.dragged() {
+                        drag_src = Some(i);
+                    }
+                    if drag_src.is_some() || self.tab_drag.is_some() {
+                        if let Some(pos) = ui.ctx().pointer_latest_pos() {
+                            if rect.contains(pos) {
+                                let before = pos.x < rect.center().x;
+                                drop_dst = Some(if before { i } else { i + 1 });
+                                // Vertical insertion line at the hovered edge.
+                                ui.painter().vline(
+                                    if before { rect.left() } else { rect.right() },
+                                    rect.y_range(),
+                                    egui::Stroke::new(2.0, ui.visuals().selection.stroke.color),
+                                );
+                            }
+                        }
+                    }
                 });
-                if let Some(src) = inner.response.dnd_release_payload::<usize>() {
-                    let dst = ui
-                        .ctx()
-                        .pointer_latest_pos()
-                        .map(|p| if p.x < inner.response.rect.center().x { i } else { i + 1 })
-                        .unwrap_or(i);
-                    mv = Some((src, dst));
-                }
             }
             if ui.small_button("+").clicked() {
                 self.new_tab(ctx);
             }
-            if let Some((src, dst)) = mv {
-                self.move_tab(*src, dst);
+            if let Some(src) = drag_src.or(self.tab_drag) {
+                // Floating chip under the pointer while a tab is dragged.
+                if let Some(pos) = ui.ctx().pointer_latest_pos() {
+                    if let Some((_, title)) = metas.get(src) {
+                        egui::Area::new(egui::Id::new("tab_drag_chip"))
+                            .order(egui::Order::Foreground)
+                            .current_pos(pos + egui::vec2(10.0, -16.0))
+                            .show(ui.ctx(), |ui| {
+                                egui::Frame::new()
+                                    .fill(ui.visuals().extreme_bg_color)
+                                    .corner_radius(4.0)
+                                    .inner_margin(egui::Margin::symmetric(10, 4))
+                                    .stroke(egui::Stroke::new(1.0, ui.visuals().selection.stroke.color))
+                                    .show(ui, |ui| {
+                                        ui.label(title.clone());
+                                    });
+                            });
+                    }
+                }
+            }
+            if let Some(src) = drag_src {
+                self.tab_drag = Some(src);
+            }
+            if self.tab_drag.is_some() && ui.ctx().input(|i| i.pointer.any_released()) {
+                if let (Some(src), Some(dst)) = (self.tab_drag, drop_dst) {
+                    self.move_tab(src, dst);
+                }
+                self.tab_drag = None;
             }
             if let Some((what, i)) = act {
                 match what {
@@ -751,31 +861,31 @@ impl FileManagerApp {
                     t.status == ListStatus::Loading,
                 )
             };
-            if ui
-                .add_enabled(can_back, egui::Button::new("←"))
-                .on_hover_text(self.t("toolbar.back").to_owned())
-                .clicked()
+            if icon_button(ui, can_back, self.t("toolbar.back").to_owned(), |p, r, c| {
+                icon_arrow(p, r, egui::vec2(-1.0, 0.0), c);
+            })
+            .clicked()
             {
                 self.go_back(ctx);
             }
-            if ui
-                .add_enabled(can_fwd, egui::Button::new("→"))
-                .on_hover_text(self.t("toolbar.forward").to_owned())
-                .clicked()
+            if icon_button(ui, can_fwd, self.t("toolbar.forward").to_owned(), |p, r, c| {
+                icon_arrow(p, r, egui::vec2(1.0, 0.0), c);
+            })
+            .clicked()
             {
                 self.go_forward(ctx);
             }
-            if ui
-                .add_enabled(has_parent, egui::Button::new("↑"))
-                .on_hover_text(self.t("toolbar.up").to_owned())
-                .clicked()
+            if icon_button(ui, has_parent, self.t("toolbar.up").to_owned(), |p, r, c| {
+                icon_arrow(p, r, egui::vec2(0.0, -1.0), c);
+            })
+            .clicked()
             {
                 self.go_up(ctx);
             }
-            if ui
-                .button("⟳")
-                .on_hover_text(self.t("toolbar.refresh").to_owned())
-                .clicked()
+            if icon_button(ui, true, self.t("toolbar.refresh").to_owned(), |p, r, c| {
+                icon_refresh(p, r, c);
+            })
+            .clicked()
             {
                 self.refresh(ctx);
             }
@@ -792,16 +902,17 @@ impl FileManagerApp {
                 .settings
                 .bookmarks
                 .contains(&self.tabs[self.active].path);
-            if ui
-                .button(if marked { "★" } else { "☆" })
-                .on_hover_text(self.t("toolbar.bookmark").to_owned())
-                .clicked()
+            let star_color = ui.visuals().selection.stroke.color;
+            if icon_button(ui, true, self.t("toolbar.bookmark").to_owned(), |p, r, c| {
+                icon_star(p, r, if marked { star_color } else { c }, marked);
+            })
+            .clicked()
             {
                 self.act_bookmark();
             }
 
             // "New / Paste" menu.
-            ui.menu_button("＋", |ui| {
+            ui.menu_button("+", |ui| {
                 if ui.button(self.t("ctx.new_folder").to_owned()).clicked() {
                     self.ops_ui.create = Some((true, String::new()));
                     ui.close();
@@ -1109,5 +1220,87 @@ mod tests {
             assert_eq!(last.0, "b");
             assert!(last.1.ends_with("b"));
         }
+    }
+}
+
+/// Square toolbar button with a painter-drawn glyph — no font glyphs to miss.
+fn icon_button(
+    ui: &mut egui::Ui,
+    enabled: bool,
+    hover: String,
+    draw: impl FnOnce(&egui::Painter, egui::Rect, egui::Color32),
+) -> egui::Response {
+    let sense = if enabled { egui::Sense::click() } else { egui::Sense::hover() };
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(26.0, 26.0), sense);
+    let resp = resp.on_hover_text(hover);
+    let visuals = ui.visuals();
+    let painter = ui.painter();
+    if enabled && resp.hovered() {
+        painter.rect_filled(rect, 5.0, visuals.widgets.hovered.bg_fill);
+    }
+    let color = if !enabled {
+        visuals.weak_text_color().gamma_multiply(0.4)
+    } else if resp.hovered() {
+        visuals.strong_text_color()
+    } else {
+        visuals.text_color()
+    };
+    draw(painter, rect.shrink(7.0), color);
+    resp
+}
+
+/// Arrow glyph: `dir` is the tip direction (unit axis vector).
+fn icon_arrow(p: &egui::Painter, r: egui::Rect, dir: egui::Vec2, color: egui::Color32) {
+    let stroke = egui::Stroke::new(1.6, color);
+    let c = r.center();
+    let tip = c + dir * (r.width() * 0.5);
+    let tail = c - dir * (r.width() * 0.42);
+    p.line_segment([tail, tip], stroke);
+    let perp = egui::vec2(-dir.y, dir.x);
+    let w = r.width() * 0.32;
+    p.line_segment([tip, tip - dir * w + perp * w], stroke);
+    p.line_segment([tip, tip - dir * w - perp * w], stroke);
+}
+
+/// Circular arrow (refresh): ~280° arc with a filled triangular tip at top-right.
+fn icon_refresh(p: &egui::Painter, r: egui::Rect, color: egui::Color32) {
+    let stroke = egui::Stroke::new(1.7, color);
+    let c = r.center();
+    let rad = r.width() * 0.44;
+    let pts: Vec<egui::Pos2> = (0..=20)
+        .map(|i| {
+            let a = 0.9 + std::f32::consts::TAU * 0.78 * (i as f32 / 20.0);
+            c + egui::vec2(a.cos(), a.sin()) * rad
+        })
+        .collect();
+    p.add(egui::Shape::line(pts.clone(), stroke));
+    let end = *pts.last().unwrap();
+    let tan = (end - pts[pts.len() - 2]).normalized();
+    let perp = egui::vec2(-tan.y, tan.x);
+    p.add(egui::Shape::convex_polygon(
+        vec![end, end - tan * 5.0 + perp * 2.6, end - tan * 5.0 - perp * 2.6],
+        color,
+        egui::Stroke::NONE,
+    ));
+}
+
+/// Five-point star: filled (marked) or outline.
+fn icon_star(p: &egui::Painter, r: egui::Rect, color: egui::Color32, filled: bool) {
+    let c = r.center();
+    let ro = r.width() * 0.5;
+    let ri = ro * 0.42;
+    let pts: Vec<egui::Pos2> = (0..10)
+        .map(|i| {
+            let rad = if i % 2 == 0 { ro } else { ri };
+            let a = -std::f32::consts::FRAC_PI_2 + i as f32 * std::f32::consts::PI / 5.0;
+            c + egui::vec2(a.cos(), a.sin()) * rad
+        })
+        .collect();
+    if filled {
+        p.add(egui::Shape::convex_polygon(pts, color, egui::Stroke::NONE));
+    } else {
+        let mut closed = pts;
+        closed.push(closed[0]);
+        p.add(egui::Shape::line(closed, egui::Stroke::new(1.4, color)));
     }
 }
