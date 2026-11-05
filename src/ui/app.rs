@@ -186,6 +186,7 @@ impl FileManagerApp {
         let current = self.tabs[tab].path.clone();
         if current != path {
             self.tabs[tab].history.push(current);
+            self.tabs[tab].path = path;
         }
         self.navigate_fresh(tab, ctx);
     }
@@ -829,3 +830,4 @@ impl eframe::App for FileManagerApp {
         }
     }
 }
+
