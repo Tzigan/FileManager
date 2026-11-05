@@ -141,3 +141,25 @@ impl crate::ui::FileManagerApp {
         }
     }
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_tree_is_collapsed() {
+        let t = TreeState::new(vec![PathBuf::from("C:\\")]);
+        assert!(t.expanded.is_empty() && t.children.is_empty() && t.pending.is_empty());
+    }
+
+    #[test]
+    fn reveal_expands_ancestors() {
+        let mut t = TreeState::new(vec![PathBuf::from("C:\\")]);
+        t.reveal(Path::new("C:\\a\\b\\c"));
+        assert!(t.expanded.contains(Path::new("C:\\a\\b")));
+        assert!(t.expanded.contains(Path::new("C:\\a")));
+        assert!(t.expanded.contains(Path::new("C:\\")));
+        assert!(!t.expanded.contains(Path::new("C:\\a\\b\\c")));
+    }
+}
