@@ -9,6 +9,9 @@ on:
   push:
     branches:
       - main
+  release:
+    types:
+      - published
 
 jobs:
   notify:
@@ -42,4 +45,26 @@ jobs:
             echo "calab $short: $(echo "$resp" | head -c 120)"
             sleep 1
           done
+          exit 0
+
+  notify-release:
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post release to Calab
+        env:
+          CALAB_TOKEN: ${{ secrets.CALAB_TOKEN }}
+          CALAB_URL: "https://app.calab.temsar.ru:8443"
+          ROOM: "01a1a9b6-033b-7852-9746-c1603114a9d7"
+        run: |
+          set +e
+          tag="${{ github.event.release.tag_name }}"
+          content="FileManager: релиз ${tag} опубликован
+          ${{ github.event.release.html_url }}"
+          payload=$(python3 -c "import json,sys;print(json.dumps({'content':sys.argv[1],'nonce':sys.argv[2]},ensure_ascii=False))" "$content" "release-${tag}")
+          resp=$(curl -sS -m 15 -X POST "$CALAB_URL/api/rooms/$ROOM/messages" \
+            -H "Authorization: Bearer $CALAB_TOKEN" \
+            -H "Content-Type: application/json; charset=utf-8" \
+            -d "$payload" 2>&1)
+          echo "calab release $tag: $(echo "$resp" | head -c 120)"
           exit 0
