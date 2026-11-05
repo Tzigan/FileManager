@@ -46,6 +46,11 @@ jobs:
         if: steps.ver.outputs.tag != ''
         uses: Swatinem/rust-cache@v2
 
+      # Tests gate the release: a red suite blocks tag creation and publish.
+      - name: Test
+        if: steps.ver.outputs.tag != ''
+        run: cargo test --locked
+
       - name: Build
         if: steps.ver.outputs.tag != ''
         run: cargo build --release --locked
