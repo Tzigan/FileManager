@@ -29,3 +29,17 @@ pub fn recycle_bin(paths: &[PathBuf]) -> io::Result<()> {
     }
     Ok(())
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sends_file_to_bin() {
+        let f = std::env::temp_dir().join(format!("fm_bin_{}.txt", std::process::id()));
+        std::fs::write(&f, b"x").unwrap();
+        recycle_bin(&[f.clone()]).unwrap();
+        assert!(!f.exists());
+    }
+}

@@ -1,4 +1,5 @@
 pub mod format;
+pub mod cli;
 pub mod fs;
 pub mod history;
 pub mod ops;

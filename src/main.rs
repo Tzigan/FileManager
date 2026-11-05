@@ -21,32 +21,9 @@ fn main() -> anyhow::Result<()> {
 
     // CLI args: positional path, `--folder <dir>`, `--select <file>`.
     // Explorer's context menu passes "%1" positionally.
-    let mut initial_path = None;
-    let mut initial_select = None;
+    let (initial_path, initial_select) =
+        core::cli::parse_args(&std::env::args().skip(1).collect::<Vec<_>>());
     {
-        let args: Vec<String> = std::env::args().skip(1).collect();
-        let mut i = 0;
-        while i < args.len() {
-            let p = std::path::PathBuf::from(&args[i]);
-            match args[i].as_str() {
-                "--folder" if i + 1 < args.len() => {
-                    initial_path = Some(std::path::PathBuf::from(&args[i + 1]));
-                    i += 1;
-                }
-                "--select" if i + 1 < args.len() => {
-                    let f = std::path::PathBuf::from(&args[i + 1]);
-                    if let (Some(parent), Some(name)) = (f.parent(), f.file_name()) {
-                        initial_path = Some(parent.to_path_buf());
-                        initial_select = Some(name.to_string_lossy().into_owned());
-                    }
-                    i += 1;
-                }
-                _ if p.is_dir() => initial_path = Some(p),
-                _ => {}
-            }
-            i += 1;
-        }
-        initial_path = initial_path.filter(|p: &std::path::PathBuf| p.is_dir());
     }
 
     // Single instance: a second launch forwards its path over a named pipe

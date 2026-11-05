@@ -34,18 +34,22 @@ fn run(args: &[&str]) -> io::Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
+mod tests_v05 {
     use super::*;
     use std::process::Command;
 
     #[test]
-    fn install_query_uninstall() {
+    fn installs_all_three_keys() {
         let exe = std::env::current_exe().unwrap();
         install_context_menu(&exe, "Open in FileManager").unwrap();
-        let q = Command::new("reg").args(["query", ROOT]).output().unwrap();
-        assert!(q.status.success());
+        for k in [ROOT, ROOT_BG, ROOT_DRIVE] {
+            let q = Command::new("reg").args(["query", k]).output().unwrap();
+            assert!(q.status.success(), "missing {k}");
+        }
         uninstall_context_menu().unwrap();
-        let q2 = Command::new("reg").args(["query", ROOT]).output().unwrap();
-        assert!(!q2.status.success());
+        for k in [ROOT, ROOT_BG, ROOT_DRIVE] {
+            let q = Command::new("reg").args(["query", k]).output().unwrap();
+            assert!(!q.status.success(), "leftover {k}");
+        }
     }
 }
