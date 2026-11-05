@@ -3,7 +3,7 @@
           xmlns:asmv3="urn:schemas-microsoft-com:asm.v3"
           manifestVersion="1.0">
   <assemblyIdentity
-      version="0.6.0.0"
+      version="0.6.1.0"
       processorArchitecture="amd64"
       name="FileManager"
       type="win32"/>

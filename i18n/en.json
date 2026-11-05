@@ -97,5 +97,12 @@
   "tab.unpin": "Unpin",
   "view.table": "Table",
   "view.list": "List",
-  "view.grid": "Grid"
+  "view.grid": "Grid",
+  "update.title": "Update",
+  "update.found": "Version {v} is available",
+  "update.now": "Update",
+  "update.later": "Later",
+  "update.downloading": "Downloading update...",
+  "update.check": "Check for updates",
+  "update.latest": "You are on the latest version"
 }

@@ -97,5 +97,12 @@
   "tab.unpin": "Открепить",
   "view.table": "Таблица",
   "view.list": "Список",
-  "view.grid": "Сетка"
+  "view.grid": "Сетка",
+  "update.title": "Обновление",
+  "update.found": "Доступна версия {v}",
+  "update.now": "Обновить",
+  "update.later": "Позже",
+  "update.downloading": "Загрузка обновления...",
+  "update.check": "Проверить обновления",
+  "update.latest": "Установлена последняя версия"
 }

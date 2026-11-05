@@ -30,6 +30,14 @@ pub(crate) enum WorkerMsg {
     },
     /// A path forwarded by another instance / CLI — open in a new tab.
     OpenPath(PathBuf),
+    /// A newer release exists on GitHub (version, exe URL).
+    UpdateFound { version: String, url: String },
+    /// The downloaded exe is ready to apply.
+    UpdateReady(PathBuf),
+    /// The app is on the latest version (manual check).
+    UpdateLatest,
+    /// Update check or download failed.
+    UpdateFailed(String),
 }
 
 pub struct FileManagerApp {
@@ -37,6 +45,11 @@ pub struct FileManagerApp {
     pub(crate) i18n: I18n,
     dirs: AppDirs,
     show_about: bool,
+    /// Update offer: (version, exe URL).
+    pending_update: Option<(String, String)>,
+    update_busy: bool,
+    /// Update status/error text for the update window.
+    update_err: Option<String>,
 
     pub(crate) tabs: Vec<Tab>,
     pub(crate) active: usize,
@@ -73,6 +86,23 @@ impl FileManagerApp {
         let (op_reply, reply_rx) = channel::<OpReply>();
         let (events_tx, ops_evt) = channel::<OpEvent>();
         ops::spawn(jobs_rx, reply_rx, events_tx);
+
+        crate::core::update::cleanup_leftovers();
+        {
+            let msg_tx = msg_tx.clone();
+            let ctx = cc.egui_ctx.clone();
+            thread::spawn(move || {
+                if let Ok(r) = crate::core::update::check_latest() {
+                    if crate::core::update::version_newer(env!("CARGO_PKG_VERSION"), &r.version) {
+                        let _ = msg_tx.send(WorkerMsg::UpdateFound {
+                            version: r.version,
+                            url: r.url,
+                        });
+                        ctx.request_repaint();
+                    }
+                }
+            });
+        }
 
         // Secondary instances forward their CLI path here via named pipe.
         {
@@ -121,6 +151,9 @@ impl FileManagerApp {
             i18n,
             dirs,
             show_about: false,
+            pending_update: None,
+            update_busy: false,
+            update_err: None,
             tabs: paths.into_iter().map(|p| { let mut t = Tab::new(p); t.pinned = pins.contains(&t.path); t }).collect(),
             active,
             tree: TreeState::new(drives()),
@@ -392,6 +425,26 @@ impl FileManagerApp {
                     }
                 }
                 WorkerMsg::OpenPath(path) => self.open_path_tab(path, ctx),
+                WorkerMsg::UpdateFound { version, url } => {
+                    self.pending_update = Some((version, url));
+                    self.update_err = None;
+                    ctx.request_repaint();
+                }
+                WorkerMsg::UpdateReady(path) => {
+                    self.update_busy = false;
+                    if let Err(e) = crate::core::update::apply_and_restart(&path) {
+                        self.update_err = Some(e.to_string());
+                    }
+                }
+                WorkerMsg::UpdateLatest => {
+                    self.update_err = Some(self.t("update.latest").to_owned());
+                    ctx.request_repaint();
+                }
+                WorkerMsg::UpdateFailed(e) => {
+                    self.update_busy = false;
+                    self.update_err = Some(e);
+                    ctx.request_repaint();
+                }
             }
         }
     }
@@ -807,8 +860,85 @@ impl FileManagerApp {
                 ui.add_space(8.0);
                 ui.label(format!("{}: {}", config_label, self.dirs.config_dir.display()));
                 ui.label(format!("{}: {}", log_label, self.dirs.log_dir.display()));
+                ui.add_space(8.0);
+                if ui.button(self.t("update.check").to_owned()).clicked() {
+                    self.spawn_update_check(ctx);
+                }
             });
         self.show_about = open;
+    }
+
+    fn spawn_update_check(&self, ctx: &egui::Context) {
+        let tx = self.msg_tx.clone();
+        let ctx = ctx.clone();
+        thread::spawn(move || {
+            let msg = match crate::core::update::check_latest() {
+                Ok(r) if crate::core::update::version_newer(env!("CARGO_PKG_VERSION"), &r.version) => {
+                    WorkerMsg::UpdateFound { version: r.version, url: r.url }
+                }
+                Ok(_) => WorkerMsg::UpdateLatest,
+                Err(e) => WorkerMsg::UpdateFailed(e.to_string()),
+            };
+            let _ = tx.send(msg);
+            ctx.request_repaint();
+        });
+    }
+
+    fn start_update_download(&mut self, ctx: &egui::Context) {
+        let Some((_, url)) = &self.pending_update else {
+            return;
+        };
+        self.update_busy = true;
+        let url = url.clone();
+        let tx = self.msg_tx.clone();
+        let ctx = ctx.clone();
+        thread::spawn(move || {
+            let msg = match crate::core::update::download(&url) {
+                Ok(p) => WorkerMsg::UpdateReady(p),
+                Err(e) => WorkerMsg::UpdateFailed(e.to_string()),
+            };
+            let _ = tx.send(msg);
+            ctx.request_repaint();
+        });
+    }
+
+    fn update_window(&mut self, ctx: &egui::Context) {
+        if self.pending_update.is_none() && self.update_err.is_none() && !self.update_busy {
+            return;
+        }
+        let title = self.t("update.title").to_owned();
+        let found = self.pending_update.clone();
+        let mut open = true;
+        egui::Window::new(title)
+            .collapsible(false)
+            .resizable(false)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                if self.update_busy {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label(self.t("update.downloading").to_owned());
+                    });
+                }
+                if let Some((ver, _)) = &found {
+                    ui.label(self.t("update.found").replace("{v}", ver));
+                    ui.horizontal(|ui| {
+                        if ui.add_enabled(!self.update_busy, egui::Button::new(self.t("update.now").to_owned())).clicked() {
+                            self.start_update_download(ctx);
+                        }
+                        if ui.button(self.t("update.later").to_owned()).clicked() {
+                            self.pending_update = None;
+                        }
+                    });
+                }
+                if let Some(e) = &self.update_err {
+                    ui.label(e.as_str());
+                }
+            });
+        if !open {
+            self.pending_update = None;
+            self.update_err = None;
+        }
     }
 }
 
@@ -925,6 +1055,7 @@ impl eframe::App for FileManagerApp {
         });
 
         self.about_window(&ctx);
+        self.update_window(&ctx);
         self.ops_dialogs(&ctx);
 
         // Keep repainting while operations run so progress stays live.
