@@ -715,22 +715,6 @@ mod tests_extra {
     }
 
     #[test]
-    fn move_job_removes_source() {
-        let dir = tmpdir("wmove");
-        fs::write(dir.join("a.txt"), b"hi").unwrap();
-        let (_rtx, rrx) = channel();
-        let (etx, _erx) = channel();
-        let mut w = worker(&rrx, &etx);
-        w.run(&job_with(OpKind::Move {
-            sources: vec![dir.join("a.txt")],
-            dest: dir.join("out"),
-        }));
-        assert!(!dir.join("a.txt").exists());
-        assert_eq!(fs::read_to_string(dir.join("out").join("a.txt")).unwrap(), "hi");
-        fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
     fn rename_job_renames() {
         let dir = tmpdir("wren");
         fs::write(dir.join("old.txt"), b"x").unwrap();

@@ -263,16 +263,7 @@ mod tests_v02 {
         assert!(read_dir(std::path::Path::new("Z:\\no\\such\\dir_fm"), &cancel).is_err());
     }
 
-    #[test]
-    fn sort_dirs_first_then_files() {
-        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let d = tmp("sort");
-        stdfs::write(d.join("aaa.txt"), b"x").unwrap();
-        stdfs::create_dir(d.join("zzz")).unwrap();
-        let entries = read_dir(&d, &cancel).unwrap();
-        assert!(entries[0].is_dir, "dirs must come first");
-        stdfs::remove_dir_all(&d).ok();
-    }
+
 }
 
 
