@@ -452,9 +452,7 @@ impl FileManagerApp {
 
     /// Files dropped onto the window from Windows — copy into current folder.
     fn handle_dropped_files(&mut self, ctx: &egui::Context) {
-        let dropped: Vec<PathBuf> = ctx.input(|i| {
-            i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).collect()
-        });
+        let dropped = ctx.input(|i| dropped_paths(&i.raw.dropped_files));
         if dropped.is_empty() {
             return;
         }
@@ -713,6 +711,11 @@ impl FileManagerApp {
 
 /// Splits a path into clickable breadcrumb segments:
 /// `C:\a\b` → `[("C:\", C:\), ("a", C:\a), ("b", C:\a\b)]`.
+/// Collects real filesystem paths from egui's dropped-file handles.
+pub(crate) fn dropped_paths(files: &[egui::DroppedFileHandle]) -> Vec<PathBuf> {
+    files.iter().map(|f| f.path().to_path_buf()).collect()
+}
+
 fn breadcrumb_segments(path: &Path) -> Vec<(String, PathBuf)> {
     let mut segs = Vec::new();
     let mut acc = PathBuf::new();
@@ -834,8 +837,32 @@ impl eframe::App for FileManagerApp {
 
 #[cfg(test)]
 mod tests {
-    use super::breadcrumb_segments;
-    use std::path::Path;
+    use super::{breadcrumb_segments, dropped_paths};
+    use std::path::{Path, PathBuf};
+
+    #[derive(Debug)]
+    struct MockDrop(PathBuf);
+
+    impl egui::DroppedFile for MockDrop {
+        fn path(&self) -> &Path {
+            &self.0
+        }
+        fn bytes(&self) -> Result<Vec<u8>, String> {
+            Ok(vec![])
+        }
+    }
+
+    #[test]
+    fn dropped_paths_collects() {
+        let files: Vec<egui::DroppedFileHandle> = vec![
+            std::sync::Arc::new(MockDrop(PathBuf::from("C:\\a.txt"))),
+            std::sync::Arc::new(MockDrop(PathBuf::from("D:\\b.txt"))),
+        ];
+        let got = dropped_paths(&files);
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0], PathBuf::from("C:\\a.txt"));
+        assert_eq!(got[1], PathBuf::from("D:\\b.txt"));
+    }
 
     #[test]
     fn breadcrumbs_split_path() {
