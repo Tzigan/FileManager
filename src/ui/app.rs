@@ -855,6 +855,7 @@ impl FileManagerApp {
                     }
 
                     resp.context_menu(|ui| {
+                        style::compact_context_menu(ui);
                         let close_txt = self.t("tab.close").to_owned();
                         let others_txt = self.t("tab.close_others").to_owned();
                         let dup_txt = self.t("tab.duplicate").to_owned();

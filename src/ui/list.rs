@@ -420,6 +420,7 @@ impl FileManagerApp {
         let mod_txt = self.t("col.modified").to_owned();
         let group_txt = self.t("group.by_type").to_owned();
         resp.context_menu(|ui| {
+            style::compact_context_menu(ui);
             let s = &mut self.store.settings;
             let mut dirty = false;
             dirty |= ui.checkbox(&mut s.col_size, size_txt).changed();
@@ -690,6 +691,7 @@ impl FileManagerApp {
             tab.anchor = None;
         }
         resp.context_menu(|ui| {
+            style::compact_context_menu(ui);
             if ui
                 .add_enabled(
                     self.ops_ui.clipboard.is_some(),
@@ -707,6 +709,14 @@ impl FileManagerApp {
             }
             if ui.button(self.t("ctx.new_file").to_owned()).clicked() {
                 self.ops_ui.create = Some((false, String::new()));
+                ui.close();
+            }
+            if ui.button(self.t("ctx.open_terminal").to_owned()).clicked() {
+                let path = self.tabs[self.active].path.clone();
+                if let Err(e) = crate::platform::open_terminal(&path) {
+                    tracing::error!(path = %path.display(), "failed to launch terminal: {e}");
+                    self.ops_ui.journal.push(format!("open terminal: {e}"));
+                }
                 ui.close();
             }
             ui.separator();
@@ -755,6 +765,7 @@ impl FileManagerApp {
         }
 
         resp.context_menu(|ui| {
+            style::compact_context_menu(ui);
             if ui.button(self.t("ctx.open").to_owned()).clicked() {
                 if entry.is_dir {
                     self.navigate(self.active, entry.path.clone(), ctx);

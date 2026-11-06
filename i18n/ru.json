@@ -51,6 +51,7 @@
   "ctx.delete": "Удалить",
   "ctx.new_folder": "Новая папка",
   "ctx.new_file": "Новый файл",
+  "ctx.open_terminal": "Открыть терминал здесь",
   "ops.scanning": "Подсчёт…",
   "ops.copying": "Копирование",
   "ops.moving": "Перемещение",

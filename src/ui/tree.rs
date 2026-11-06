@@ -100,6 +100,7 @@ impl crate::ui::FileManagerApp {
                 self.navigate(self.active, bm.clone(), ctx);
             }
             resp.context_menu(|ui| {
+                style::compact_context_menu(ui);
                 if ui.button(self.t("ctx.open").to_owned()).clicked() {
                     self.navigate(self.active, bm.clone(), ctx);
                     ui.close();
@@ -154,6 +155,7 @@ impl crate::ui::FileManagerApp {
             }
             let is_bookmarked = self.store.settings.bookmarks.iter().any(|bookmark| bookmark == path);
             resp.context_menu(|ui| {
+                style::compact_context_menu(ui);
                 if ui.button(self.t("ctx.open").to_owned()).clicked() {
                     self.navigate(self.active, path.to_path_buf(), ctx);
                     ui.close();

@@ -7,6 +7,7 @@ pub(crate) const SPACE_MD: f32 = 12.0;
 pub(crate) const SPACE_LG: f32 = 16.0;
 pub(crate) const SPACE_EMPTY_STATE: f32 = 60.0;
 pub(crate) const TAB_BAR_VERTICAL_SPACING: f32 = 0.0;
+pub(crate) const CONTEXT_MENU_ITEM_HEIGHT: f32 = 20.0;
 
 pub(crate) const RADIUS_ICON: f32 = 2.0;
 pub(crate) const RADIUS_ROW: f32 = 4.0;
@@ -29,6 +30,15 @@ pub(crate) fn configure(ctx: &Context) {
 
 pub(crate) fn dense_vertical_spacing(style: &mut Style) {
     style.spacing.item_spacing.y = SPACE_XXS;
+}
+
+pub(crate) fn compact_context_menu(ui: &mut egui::Ui) {
+    compact_context_menu_style(ui.style_mut());
+}
+
+fn compact_context_menu_style(style: &mut Style) {
+    style.spacing.item_spacing.y = SPACE_XXS;
+    style.spacing.interact_size.y = CONTEXT_MENU_ITEM_HEIGHT;
 }
 
 fn configure_style(style: &mut Style) {
@@ -103,6 +113,20 @@ mod tests {
         dense_vertical_spacing(&mut style);
 
         assert_eq!(style.spacing.item_spacing.x, SPACE_LG);
+        assert_eq!(style.spacing.item_spacing.y, SPACE_XXS);
+    }
+
+    #[test]
+    fn context_menu_rows_use_compact_height_and_gap() {
+        let mut style = Style::default();
+        style.spacing.interact_size = vec2(TOOLBAR_BUTTON_SIZE, TOOLBAR_BUTTON_SIZE);
+        style.spacing.item_spacing = vec2(SPACE_SM, SPACE_LG);
+
+        compact_context_menu_style(&mut style);
+
+        assert_eq!(style.spacing.interact_size.x, TOOLBAR_BUTTON_SIZE);
+        assert_eq!(style.spacing.interact_size.y, CONTEXT_MENU_ITEM_HEIGHT);
+        assert_eq!(style.spacing.item_spacing.x, SPACE_SM);
         assert_eq!(style.spacing.item_spacing.y, SPACE_XXS);
     }
 }

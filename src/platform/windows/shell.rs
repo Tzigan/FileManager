@@ -18,6 +18,15 @@ pub fn shell_open(path: &Path) -> io::Result<()> {
     }
 }
 
+/// Opens Windows Terminal at the given directory.
+pub fn open_terminal(path: &Path) -> io::Result<()> {
+    std::process::Command::new("wt.exe")
+        .arg("-d")
+        .arg(path)
+        .spawn()
+        .map(|_| ())
+}
+
 /// Opens the Windows Recycle Bin in Explorer.
 pub fn open_recycle_bin() -> io::Result<()> {
     unsafe {

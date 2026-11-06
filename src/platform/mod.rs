@@ -2,7 +2,7 @@
 mod windows;
 
 #[cfg(windows)]
-pub use self::windows::{acquire_single_instance, drives, format_local_time, free_space, get_clipboard_files, get_clipboard_text, install_context_menu, notify_already_running, open_recycle_bin, pipe_listen, pipe_send, recycle_bin, set_attributes, set_clipboard_files, shell_open, uninstall_context_menu, AcquireResult, SingleInstanceGuard};
+pub use self::windows::{acquire_single_instance, drives, format_local_time, free_space, get_clipboard_files, get_clipboard_text, install_context_menu, notify_already_running, open_recycle_bin, open_terminal, pipe_listen, pipe_send, recycle_bin, set_attributes, set_clipboard_files, shell_open, uninstall_context_menu, AcquireResult, SingleInstanceGuard};
 
 /// Stubs for non-Windows hosts so the crate still compiles for docs/tests.
 #[cfg(not(windows))]
@@ -58,9 +58,10 @@ mod stubs {
     pub fn install_context_menu(_e: &std::path::Path, _t: &str) -> std::io::Result<()> { Ok(()) }
     pub fn uninstall_context_menu() -> std::io::Result<()> { Ok(()) }
     pub fn shell_open(_p: &std::path::Path) -> std::io::Result<()> { Ok(()) }
+    pub fn open_terminal(_p: &std::path::Path) -> std::io::Result<()> { Ok(()) }
     pub fn open_recycle_bin() -> std::io::Result<()> { Ok(()) }
     pub fn set_attributes(_p: &std::path::Path, _r: bool, _h: bool) -> std::io::Result<()> { Ok(()) }
 }
 
 #[cfg(not(windows))]
-pub use stubs::{acquire_single_instance, drives, format_local_time, free_space, get_clipboard_files, get_clipboard_text, install_context_menu, notify_already_running, open_recycle_bin, pipe_listen, pipe_send, recycle_bin, set_attributes, set_clipboard_files, shell_open, uninstall_context_menu, AcquireResult, SingleInstanceGuard};
+pub use stubs::{acquire_single_instance, drives, format_local_time, free_space, get_clipboard_files, get_clipboard_text, install_context_menu, notify_already_running, open_recycle_bin, open_terminal, pipe_listen, pipe_send, recycle_bin, set_attributes, set_clipboard_files, shell_open, uninstall_context_menu, AcquireResult, SingleInstanceGuard};

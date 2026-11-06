@@ -51,6 +51,7 @@
   "ctx.delete": "Delete",
   "ctx.new_folder": "New folder",
   "ctx.new_file": "New file",
+  "ctx.open_terminal": "Open Terminal Here",
   "ops.scanning": "Counting…",
   "ops.copying": "Copying",
   "ops.moving": "Moving",

@@ -95,6 +95,7 @@ mod tests {
     #[test]
     fn new_folder_context_actions_are_localized_in_both_languages() {
         let ru = I18n::new(Language::Ru);
+        assert_eq!(ru.t("ctx.open_terminal"), "Открыть терминал здесь");
         assert_eq!(ru.t("ctx.open_new_tab"), "Открыть в новой вкладке");
         assert_eq!(ru.t("ctx.add_bookmark"), "Добавить в закладки");
         assert_eq!(ru.t("tree.expand"), "Развернуть");
@@ -108,6 +109,7 @@ mod tests {
         );
 
         let en = I18n::new(Language::En);
+        assert_eq!(en.t("ctx.open_terminal"), "Open Terminal Here");
         assert_eq!(en.t("ctx.open_new_tab"), "Open in new tab");
         assert_eq!(en.t("ctx.add_bookmark"), "Add to bookmarks");
         assert_eq!(en.t("tree.expand"), "Expand");
