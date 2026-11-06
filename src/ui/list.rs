@@ -4,6 +4,12 @@ use crate::core::settings::ViewMode;
 use crate::platform::format_local_time;
 use crate::ui::FileManagerApp;
 
+/// A row in the table view: either a file entry or a group label.
+enum ListRow {
+    Header(String),
+    Item(usize),
+}
+
 pub(crate) const ROW_HEIGHT: f32 = 24.0;
 pub(crate) const ICON_WIDTH: f32 = 26.0;
 const SIZE_COL: f32 = 90.0;
@@ -37,11 +43,15 @@ impl FileManagerApp {
             ViewMode::Table => {
                 self.list_header(ui);
                 ui.separator();
+                let rows = self.build_rows();
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
-                    .show_rows(ui, ROW_HEIGHT, count, |ui, range| {
+                    .show_rows(ui, ROW_HEIGHT, rows.len(), |ui, range| {
                         for index in range {
-                            self.file_row(ui, index, ctx);
+                            match rows[index] {
+                                ListRow::Item(i) => self.file_row(ui, i, ctx),
+                                ListRow::Header(ref label) => self.group_header(ui, label),
+                            }
                         }
                     });
             }
@@ -64,17 +74,28 @@ impl FileManagerApp {
         self.scroll_to_cursor = false;
     }
 
-    fn column_x(&self, width: f32) -> (f32, f32, f32, f32) {
-        let mod_x = width - MODIFIED_COL;
-        let type_x = mod_x - TYPE_COL;
-        let size_x = type_x - SIZE_COL;
+    /// Column x-origins; hidden columns come out `None`. Visible ones pack right.
+    fn column_x(&self, width: f32) -> (f32, Option<f32>, Option<f32>, Option<f32>) {
+        let s = &self.store.settings;
+        let mut x = width;
+        let mut slot = |w: f32, vis: bool| {
+            if vis {
+                x -= w;
+                Some(x)
+            } else {
+                None
+            }
+        };
+        let mod_x = slot(MODIFIED_COL, s.col_modified);
+        let type_x = slot(TYPE_COL, s.col_type);
+        let size_x = slot(SIZE_COL, s.col_size);
         (ICON_WIDTH, size_x, type_x, mod_x)
     }
 
     fn list_header(&mut self, ui: &mut egui::Ui) {
         let width = ui.available_width();
-        let (rect, _) =
-            ui.allocate_exact_size(egui::vec2(width, ROW_HEIGHT), egui::Sense::hover());
+        let (rect, hr) =
+            ui.allocate_exact_size(egui::vec2(width, ROW_HEIGHT), egui::Sense::click());
         let (name_x, size_x, type_x, mod_x) = self.column_x(width);
         let font = egui::TextStyle::Body.resolve(ui.style());
         let color = ui.visuals().strong_text_color();
@@ -85,12 +106,18 @@ impl FileManagerApp {
             (t.sort_key, t.sort_desc)
         };
 
-        let cols: [(f32, f32, SortKey, &str); 4] = [
-            (name_x, size_x, SortKey::Name, "col.name"),
-            (size_x, type_x, SortKey::Size, "col.size"),
-            (type_x, mod_x, SortKey::Extension, "col.type"),
-            (mod_x, width, SortKey::Modified, "col.modified"),
-        ];
+        let mut cols: Vec<(f32, f32, SortKey, &str)> = Vec::new();
+        let name_right = size_x.or(type_x).or(mod_x).unwrap_or(width);
+        cols.push((name_x, name_right, SortKey::Name, "col.name"));
+        if let Some(sx) = size_x {
+            cols.push((sx, type_x.or(mod_x).unwrap_or(width), SortKey::Size, "col.size"));
+        }
+        if let Some(tx) = type_x {
+            cols.push((tx, mod_x.unwrap_or(width), SortKey::Extension, "col.type"));
+        }
+        if let Some(mx) = mod_x {
+            cols.push((mx, width, SortKey::Modified, "col.modified"));
+        }
         for (x0, x1, k, i18n_key) in cols {
             let arrow = if k == key {
                 if desc { " ▼" } else { " ▲" }
@@ -108,13 +135,89 @@ impl FileManagerApp {
                 egui::pos2(rect.min.x + x0, rect.min.y),
                 egui::pos2(rect.min.x + x1, rect.max.y),
             );
-            if ui
-                .interact(col_rect, ui.id().with(i18n_key), egui::Sense::click())
-                .clicked()
-            {
+            let col_resp = ui.interact(col_rect, ui.id().with(i18n_key), egui::Sense::click());
+            if col_resp.clicked() {
                 self.sort_col(k);
             }
+            self.column_menu(&col_resp);
         }
+
+        // Header gaps (right of the last column) get the same menu.
+        self.column_menu(&hr);
+    }
+
+    /// Table rows: either a flat item index list, or group headers + items
+    /// (folders first, then per-extension, name-sorted inside a group).
+    fn build_rows(&self) -> Vec<ListRow> {
+        let entries = &self.tabs[self.active].entries;
+        if !self.store.settings.group_by_type {
+            return (0..entries.len()).map(ListRow::Item).collect();
+        }
+        let mut order: Vec<usize> = (0..entries.len()).collect();
+        order.sort_by_key(|&i| {
+            let e = &entries[i];
+            (
+                !e.is_dir,
+                e.extension.clone().unwrap_or_default(),
+                e.name.to_lowercase(),
+            )
+        });
+        let mut rows = Vec::new();
+        let mut last: Option<String> = None;
+        for i in order {
+            let e = &entries[i];
+            let g = if e.is_dir {
+                self.t("type.folder").to_owned()
+            } else {
+                e.extension
+                    .as_deref()
+                    .map(|x| x.to_uppercase())
+                    .unwrap_or_else(|| self.t("type.file").to_owned())
+            };
+            if last.as_deref() != Some(g.as_str()) {
+                rows.push(ListRow::Header(g.clone()));
+                last = Some(g);
+            }
+            rows.push(ListRow::Item(i));
+        }
+        rows
+    }
+
+    fn group_header(&self, ui: &mut egui::Ui, label: &str) {
+        let width = ui.available_width();
+        let (rect, _) =
+            ui.allocate_exact_size(egui::vec2(width, ROW_HEIGHT), egui::Sense::hover());
+        let painter = ui.painter();
+        let font = egui::TextStyle::Body.resolve(ui.style());
+        let y = rect.center().y;
+        let weak = ui.visuals().weak_text_color();
+        let galley = painter.layout_no_wrap(label.to_owned(), font, weak);
+        painter.galley(egui::pos2(rect.min.x + 4.0, y - galley.size().y / 2.0), galley.clone(), weak);
+        painter.hline(
+            egui::Rangef::new(rect.min.x + galley.size().x + 12.0, rect.max.x - 8.0),
+            y,
+            egui::Stroke::new(1.0, weak.gamma_multiply(0.3)),
+        );
+    }
+
+    /// Right-click on a header column: visibility toggles (Explorer style).
+    fn column_menu(&mut self, resp: &egui::Response) {
+        let size_txt = self.t("col.size").to_owned();
+        let type_txt = self.t("col.type").to_owned();
+        let mod_txt = self.t("col.modified").to_owned();
+        let group_txt = self.t("group.by_type").to_owned();
+        resp.context_menu(|ui| {
+            let s = &mut self.store.settings;
+            let mut dirty = false;
+            dirty |= ui.checkbox(&mut s.col_size, size_txt).changed();
+            dirty |= ui.checkbox(&mut s.col_type, type_txt).changed();
+            dirty |= ui.checkbox(&mut s.col_modified, mod_txt).changed();
+            ui.separator();
+            dirty |= ui.checkbox(&mut s.group_by_type, group_txt).changed();
+            if dirty {
+                self.persist();
+            }
+        });
     }
 
     fn file_row(&mut self, ui: &mut egui::Ui, index: usize, ctx: &egui::Context) {
@@ -159,9 +262,10 @@ impl FileManagerApp {
         let y = rect.center().y;
         let (name_x, size_x, type_x, mod_x) = self.column_x(width);
 
+        let name_right = size_x.or(type_x).or(mod_x).unwrap_or(width);
         let name_rect = egui::Rect::from_min_max(
             egui::pos2(rect.min.x + name_x, rect.min.y),
-            egui::pos2(rect.min.x + size_x - COL_GAP, rect.max.y),
+            egui::pos2(rect.min.x + name_right - COL_GAP, rect.max.y),
         );
         painter.with_clip_rect(name_rect).text(
             egui::pos2(rect.min.x + name_x, y),
@@ -171,47 +275,54 @@ impl FileManagerApp {
             name_color,
         );
 
-        let size_text = if entry.is_dir {
-            String::new()
-        } else {
-            entry.size.map(format_size).unwrap_or_default()
-        };
-        painter.text(
-            egui::pos2(rect.min.x + type_x - COL_GAP, y),
-            egui::Align2::RIGHT_CENTER,
-            size_text,
-            font.clone(),
-            weak,
-        );
+        if let Some(sx) = size_x {
+            let size_text = if entry.is_dir {
+                String::new()
+            } else {
+                entry.size.map(format_size).unwrap_or_default()
+            };
+            painter.text(
+                egui::pos2(rect.min.x + type_x.or(mod_x).unwrap_or(width) - COL_GAP, y),
+                egui::Align2::RIGHT_CENTER,
+                size_text,
+                font.clone(),
+                weak,
+            );
+            let _ = sx;
+        }
 
-        let type_text = if entry.is_dir {
-            self.t("type.folder").to_owned()
-        } else {
-            match &entry.extension {
-                Some(ext) => format!("{} {}", ext.to_uppercase(), self.t("type.file")),
-                None => self.t("type.file").to_owned(),
-            }
-        };
-        let type_rect = egui::Rect::from_min_max(
-            egui::pos2(rect.min.x + type_x, rect.min.y),
-            egui::pos2(rect.min.x + mod_x - COL_GAP, rect.max.y),
-        );
-        painter.with_clip_rect(type_rect).text(
-            egui::pos2(rect.min.x + type_x, y),
-            egui::Align2::LEFT_CENTER,
-            type_text,
-            font.clone(),
-            weak,
-        );
+        if let Some(tx) = type_x {
+            let type_text = if entry.is_dir {
+                self.t("type.folder").to_owned()
+            } else {
+                match &entry.extension {
+                    Some(ext) => format!("{} {}", ext.to_uppercase(), self.t("type.file")),
+                    None => self.t("type.file").to_owned(),
+                }
+            };
+            let type_rect = egui::Rect::from_min_max(
+                egui::pos2(rect.min.x + tx, rect.min.y),
+                egui::pos2(rect.min.x + mod_x.unwrap_or(width) - COL_GAP, rect.max.y),
+            );
+            painter.with_clip_rect(type_rect).text(
+                egui::pos2(rect.min.x + tx, y),
+                egui::Align2::LEFT_CENTER,
+                type_text,
+                font.clone(),
+                weak,
+            );
+        }
 
-        let modified = entry.modified.map(format_local_time).unwrap_or_default();
-        painter.text(
-            egui::pos2(rect.min.x + mod_x, y),
-            egui::Align2::LEFT_CENTER,
-            modified,
-            font,
-            weak,
-        );
+        if let Some(mx) = mod_x {
+            let modified = entry.modified.map(format_local_time).unwrap_or_default();
+            painter.text(
+                egui::pos2(rect.min.x + mx, y),
+                egui::Align2::LEFT_CENTER,
+                modified,
+                font,
+                weak,
+            );
+        }
 
         let _ = focused;
         self.entry_actions(&resp, index, &entry, ui, ctx);
@@ -414,6 +525,11 @@ impl FileManagerApp {
             }
             if ui.button(self.t("ctx.delete").to_owned()).clicked() {
                 self.act_delete(false);
+                ui.close();
+            }
+            ui.separator();
+            if ui.button(self.t("ctx.properties").to_owned()).clicked() {
+                self.props_target = Some(entry.path.clone());
                 ui.close();
             }
         });

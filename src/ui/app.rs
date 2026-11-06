@@ -52,6 +52,8 @@ pub struct FileManagerApp {
     update_err: Option<String>,
     /// Index of the tab currently being drag-reordered.
     tab_drag: Option<usize>,
+    /// Path shown in the properties dialog.
+    pub(crate) props_target: Option<PathBuf>,
 
     pub(crate) tabs: Vec<Tab>,
     pub(crate) active: usize,
@@ -157,6 +159,7 @@ impl FileManagerApp {
             update_busy: false,
             update_err: None,
             tab_drag: None,
+            props_target: None,
             tabs: paths.into_iter().map(|p| { let mut t = Tab::new(p); t.pinned = pins.contains(&t.path); t }).collect(),
             active,
             tree: TreeState::new(drives()),
@@ -503,6 +506,9 @@ impl FileManagerApp {
         if ctx.input(|i| i.key_pressed(egui::Key::Delete)) {
             self.act_delete(mods.shift);
             return;
+        }
+        if mods.alt && ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
+            self.act_props();
         }
         if ctx.input(|i| i.key_pressed(egui::Key::F2)) {
             self.act_rename();
@@ -975,6 +981,14 @@ impl FileManagerApp {
                 if ui.button(self.t("update.check").to_owned()).clicked() {
                     self.spawn_update_check(ctx);
                 }
+                ui.add_space(4.0);
+                let si_txt = self.t("settings.single_instance").to_owned();
+                if ui
+                    .checkbox(&mut self.store.settings.single_instance, si_txt)
+                    .changed()
+                {
+                    self.persist();
+                }
             });
         self.show_about = open;
     }
@@ -1011,6 +1025,92 @@ impl FileManagerApp {
             let _ = tx.send(msg);
             ctx.request_repaint();
         });
+    }
+
+    fn act_props(&mut self) {
+        let tab = &self.tabs[self.active];
+        let idx = tab
+            .selection
+            .iter()
+            .next()
+            .copied()
+            .or(if tab.entries.is_empty() { None } else { Some(tab.cursor) });
+        if let Some(e) = idx.and_then(|i| tab.entries.get(i)) {
+            self.props_target = Some(e.path.clone());
+        }
+    }
+
+    fn props_window(&mut self, ctx: &egui::Context) {
+        let Some(target) = self.props_target.clone() else {
+            return;
+        };
+        let title = self.t("props.title").to_owned();
+        let mut open = true;
+        let mut dirty = false;
+        let mut apply = None;
+        egui::Window::new(title)
+            .collapsible(false)
+            .resizable(false)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                let entry = self
+                    .tabs[self.active]
+                    .entries
+                    .iter()
+                    .find(|e| e.path == target)
+                    .cloned();
+                let name = entry
+                    .as_ref()
+                    .map(|e| e.name.clone())
+                    .unwrap_or_else(|| {
+                        target
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| target.display().to_string())
+                    });
+                ui.heading(&name);
+                ui.label(format!("{}: {}", self.t("props.path"), target.display()));
+                if let Some(e) = &entry {
+                    let ty = if e.is_dir {
+                        self.t("type.folder").to_owned()
+                    } else {
+                        match &e.extension {
+                            Some(x) => format!("{} {}", x.to_uppercase(), self.t("type.file")),
+                            None => self.t("type.file").to_owned(),
+                        }
+                    };
+                    ui.label(format!("{}: {ty}", self.t("col.type")));
+                    if let Some(s) = e.size {
+                        ui.label(format!("{}: {}", self.t("col.size"), crate::core::format::format_size(s)));
+                    }
+                    if let Some(m) = e.modified {
+                        ui.label(format!("{}: {}", self.t("col.modified"), crate::platform::format_local_time(m)));
+                    }
+                    if let Some(c) = e.created {
+                        ui.label(format!("{}: {}", self.t("props.created"), crate::platform::format_local_time(c)));
+                    }
+                    ui.separator();
+                    let mut ro = e.readonly;
+                    let mut hi = e.hidden;
+                    if ui.checkbox(&mut ro, self.t("props.readonly").to_owned()).changed() {
+                        dirty = true;
+                    }
+                    if ui.checkbox(&mut hi, self.t("props.hidden").to_owned()).changed() {
+                        dirty = true;
+                    }
+                    if dirty {
+                        apply = Some((ro, hi));
+                    }
+                }
+            });
+        if let Some((ro, hi)) = apply {
+            if crate::platform::set_attributes(&target, ro, hi).is_ok() {
+                self.refresh(ctx);
+            }
+        }
+        if !open {
+            self.props_target = None;
+        }
     }
 
     fn update_window(&mut self, ctx: &egui::Context) {
@@ -1167,6 +1267,7 @@ impl eframe::App for FileManagerApp {
 
         self.about_window(&ctx);
         self.update_window(&ctx);
+        self.props_window(&ctx);
         self.ops_dialogs(&ctx);
 
         // Keep repainting while operations run so progress stays live.

@@ -104,5 +104,12 @@
   "update.later": "Позже",
   "update.downloading": "Загрузка обновления...",
   "update.check": "Проверить обновления",
-  "update.latest": "Установлена последняя версия"
+  "update.latest": "Установлена последняя версия",
+  "group.by_type": "Группировать по типу",
+  "settings.single_instance": "Один экземпляр приложения",
+  "ctx.properties": "Свойства",
+  "props.title": "Свойства",
+  "props.path": "Путь",
+  "props.readonly": "Только чтение",
+  "props.hidden": "Скрытый"
 }

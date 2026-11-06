@@ -104,5 +104,12 @@
   "update.later": "Later",
   "update.downloading": "Downloading update...",
   "update.check": "Check for updates",
-  "update.latest": "You are on the latest version"
+  "update.latest": "You are on the latest version",
+  "group.by_type": "Group by type",
+  "settings.single_instance": "Single instance",
+  "ctx.properties": "Properties",
+  "props.title": "Properties",
+  "props.path": "Path",
+  "props.readonly": "Read-only",
+  "props.hidden": "Hidden"
 }

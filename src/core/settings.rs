@@ -35,6 +35,22 @@ pub struct Settings {
     pub active_tab: usize,
     pub bookmarks: Vec<PathBuf>,
     pub view_mode: ViewMode,
+    /// Table-column visibility (name is always shown).
+    #[serde(default = "default_true")]
+    pub col_size: bool,
+    #[serde(default = "default_true")]
+    pub col_type: bool,
+    #[serde(default = "default_true")]
+    pub col_modified: bool,
+    /// Table view: rows grouped by type (folders, then per-extension).
+    pub group_by_type: bool,
+    /// One running instance: new launches forward their path over the pipe.
+    #[serde(default = "default_true")]
+    pub single_instance: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for Settings {
@@ -47,6 +63,11 @@ impl Default for Settings {
             active_tab: 0,
             bookmarks: Vec::new(),
             view_mode: ViewMode::default(),
+            col_size: true,
+            col_type: true,
+            col_modified: true,
+            group_by_type: false,
+            single_instance: true,
         }
     }
 }

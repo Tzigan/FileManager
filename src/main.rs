@@ -26,29 +26,34 @@ fn main() -> anyhow::Result<()> {
     {
     }
 
+    let store = core::settings::SettingsStore::load(&dirs.config_dir);
+
     // Single instance: a second launch forwards its path over a named pipe
-    // instead of showing a dialog.
-    let _instance = match platform::acquire_single_instance() {
-        Ok(AcquireResult::Acquired(guard)) => guard,
-        Ok(AcquireResult::AlreadyRunning) => {
-            tracing::info!("another instance is already running");
-            if let Some(p) = &initial_path {
-                match platform::pipe_send(p) {
-                    Ok(()) => tracing::info!(path = %p.display(), "path forwarded to running instance"),
-                    Err(e) => tracing::warn!("pipe_send failed: {e}"),
+    // instead of showing a dialog. Disabled in settings → every launch opens a window.
+    let _instance = if !store.settings.single_instance {
+        platform::SingleInstanceGuard::noop()
+    } else {
+        match platform::acquire_single_instance() {
+            Ok(AcquireResult::Acquired(guard)) => guard,
+            Ok(AcquireResult::AlreadyRunning) => {
+                tracing::info!("another instance is already running");
+                if let Some(p) = &initial_path {
+                    match platform::pipe_send(p) {
+                        Ok(()) => tracing::info!(path = %p.display(), "path forwarded to running instance"),
+                        Err(e) => tracing::warn!("pipe_send failed: {e}"),
+                    }
+                } else {
+                    platform::notify_already_running();
                 }
-            } else {
-                platform::notify_already_running();
+                return Ok(());
             }
-            return Ok(());
-        }
-        Err(e) => {
-            tracing::warn!("single-instance check failed, continuing anyway: {e}");
-            platform::SingleInstanceGuard::noop()
+            Err(e) => {
+                tracing::warn!("single-instance check failed, continuing anyway: {e}");
+                platform::SingleInstanceGuard::noop()
+            }
         }
     };
 
-    let store = core::settings::SettingsStore::load(&dirs.config_dir);
     let i18n = core::i18n::I18n::new(store.settings.language);
 
     let mut viewport = egui::ViewportBuilder::default()
