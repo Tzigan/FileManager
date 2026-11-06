@@ -31,6 +31,16 @@ impl TreeState {
         }
     }
 
+    /// Toggles a node and returns its new expanded state.
+    pub(crate) fn toggle_expanded(&mut self, path: &Path) -> bool {
+        if self.expanded.remove(path) {
+            false
+        } else {
+            self.expanded.insert(path.to_path_buf());
+            true
+        }
+    }
+
     /// Starts at most one lazy child request for an expanded, uncached node.
     pub(crate) fn begin_children_load(&mut self, path: &Path) -> bool {
         if !self.expanded.contains(path)
@@ -86,6 +96,15 @@ impl crate::ui::FileManagerApp {
                 self.navigate(self.active, bm.clone(), ctx);
             }
             resp.context_menu(|ui| {
+                if ui.button(self.t("ctx.open").to_owned()).clicked() {
+                    self.navigate(self.active, bm.clone(), ctx);
+                    ui.close();
+                }
+                if ui.button(self.t("ctx.open_new_tab").to_owned()).clicked() {
+                    self.queue_open_path_in_new_tab(bm.clone());
+                    ui.close();
+                }
+                ui.separator();
                 if ui.button(self.t("ctx.remove_bookmark").to_owned()).clicked() {
                     self.store.settings.bookmarks.retain(|b| b != &bm);
                     self.persist();
@@ -117,22 +136,45 @@ impl crate::ui::FileManagerApp {
         ui.horizontal(|ui| {
             ui.add_space(indent);
             if has_arrow {
-                let glyph = if expanded { "▾" } else { "▸" };
-                if ui.small_button(glyph).clicked() {
-                    if expanded {
-                        self.tree.expanded.remove(path);
-                    } else {
-                        self.tree.expanded.insert(path.to_path_buf());
-                    }
+                if tree_disclosure_button(ui, expanded) {
+                    self.tree.toggle_expanded(path);
                 }
             } else {
                 ui.add_space(18.0);
             }
+            paint_tree_icon(ui, depth == 0, expanded, path == self.tabs[self.active].path);
             let is_current = path == self.tabs[self.active].path.as_path();
             let resp = ui.selectable_label(is_current, name);
             if resp.clicked() {
                 self.navigate(self.active, path.to_path_buf(), ctx);
             }
+            let is_bookmarked = self.store.settings.bookmarks.iter().any(|bookmark| bookmark == path);
+            resp.context_menu(|ui| {
+                if ui.button(self.t("ctx.open").to_owned()).clicked() {
+                    self.navigate(self.active, path.to_path_buf(), ctx);
+                    ui.close();
+                }
+                if ui.button(self.t("ctx.open_new_tab").to_owned()).clicked() {
+                    self.queue_open_path_in_new_tab(path.to_path_buf());
+                    ui.close();
+                }
+                ui.separator();
+                let bookmark_action = if is_bookmarked {
+                    "ctx.remove_bookmark"
+                } else {
+                    "ctx.add_bookmark"
+                };
+                if ui.button(self.t(bookmark_action).to_owned()).clicked() {
+                    self.act_bookmark_path(path);
+                    ui.close();
+                }
+                ui.separator();
+                let expand_action = if expanded { "tree.collapse" } else { "tree.expand" };
+                if ui.button(self.t(expand_action).to_owned()).clicked() {
+                    self.tree.toggle_expanded(path);
+                    ui.close();
+                }
+            });
             if loading {
                 ui.spinner();
             }
@@ -169,6 +211,18 @@ mod tests {
     fn new_tree_is_collapsed() {
         let t = TreeState::new(vec![PathBuf::from("C:\\")]);
         assert!(t.expanded.is_empty() && t.children.is_empty() && t.pending.is_empty());
+    }
+
+    #[test]
+    fn expand_and_collapse_toggle_the_requested_node_only() {
+        let a = PathBuf::from("C:\\a");
+        let b = PathBuf::from("C:\\b");
+        let mut tree = TreeState::new(vec![]);
+        assert!(tree.toggle_expanded(&a));
+        assert!(tree.expanded.contains(&a));
+        assert!(!tree.expanded.contains(&b));
+        assert!(!tree.toggle_expanded(&a));
+        assert!(tree.expanded.is_empty());
     }
 
     #[test]
@@ -215,4 +269,83 @@ mod tests {
         assert_eq!(tree.children.get(&root), Some(&Vec::new()));
         assert!(!tree.begin_children_load(&root));
     }
+}
+
+/// Paints a compact disclosure chevron so the tree does not depend on font
+/// support for Unicode arrow glyphs.
+fn tree_disclosure_button(ui: &mut egui::Ui, expanded: bool) -> bool {
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::click());
+    let color = if response.hovered() {
+        ui.visuals().strong_text_color()
+    } else {
+        ui.visuals().weak_text_color()
+    };
+    let c = rect.center();
+    let points = if expanded {
+        vec![
+            egui::pos2(c.x - 4.0, c.y - 2.0),
+            egui::pos2(c.x, c.y + 2.0),
+            egui::pos2(c.x + 4.0, c.y - 2.0),
+        ]
+    } else {
+        vec![
+            egui::pos2(c.x - 2.0, c.y - 4.0),
+            egui::pos2(c.x + 2.0, c.y),
+            egui::pos2(c.x - 2.0, c.y + 4.0),
+        ]
+    };
+    ui.painter().add(egui::Shape::line(
+        points,
+        egui::Stroke::new(1.6, color),
+    ));
+    response.clicked()
+}
+
+/// Paints folder/drive icons in vector form instead of relying on emoji fonts.
+fn paint_tree_icon(ui: &mut egui::Ui, is_drive: bool, expanded: bool, current: bool) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(20.0, 18.0), egui::Sense::hover());
+    let painter = ui.painter();
+    if is_drive {
+        let frame = egui::Rect::from_center_size(rect.center(), egui::vec2(16.0, 11.0));
+        let fill = if current {
+            ui.visuals().selection.bg_fill
+        } else {
+            egui::Color32::from_rgb(105, 122, 139)
+        };
+        painter.rect_filled(frame, 2.0, fill);
+        painter.rect_filled(
+            egui::Rect::from_min_max(
+                egui::pos2(frame.left() + 2.0, frame.top() + 2.0),
+                egui::pos2(frame.right() - 2.0, frame.bottom() - 3.0),
+            ),
+            1.0,
+            egui::Color32::from_rgb(45, 57, 69),
+        );
+        painter.circle_filled(
+            egui::pos2(frame.right() - 3.0, frame.bottom() - 1.5),
+            1.0,
+            egui::Color32::from_rgb(125, 218, 140),
+        );
+        return;
+    }
+
+    let back = egui::Color32::from_rgb(226, 152, 52);
+    let front = if current || expanded {
+        egui::Color32::from_rgb(255, 207, 112)
+    } else {
+        egui::Color32::from_rgb(245, 188, 82)
+    };
+    let left = rect.left() + 2.0;
+    let top = rect.top() + 3.0;
+    let tab = egui::Rect::from_min_max(
+        egui::pos2(left, top),
+        egui::pos2(left + 8.0, top + 5.0),
+    );
+    let body = egui::Rect::from_min_max(
+        egui::pos2(left, top + 4.0),
+        egui::pos2(rect.right() - 2.0, rect.bottom() - 2.0),
+    );
+    painter.rect_filled(tab, 1.5, back);
+    painter.rect_filled(body, 1.5, front);
 }

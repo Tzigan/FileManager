@@ -7,7 +7,7 @@ use crate::ui::FileManagerApp;
 /// A row in the table view: either a file entry or a group label.
 #[derive(Debug, PartialEq, Eq)]
 enum ListRow {
-    Header(String),
+    Header { key: String, label: String },
     Item(usize),
 }
 
@@ -76,7 +76,13 @@ pub(super) fn next_sort_order(current: SortKey, descending: bool, requested: Sor
     }
 }
 
-fn table_rows(entries: &[FileEntry], group: bool, folders_label: &str, files_label: &str) -> Vec<ListRow> {
+fn table_rows(
+    entries: &[FileEntry],
+    group: bool,
+    preferred_group_order: &[String],
+    folders_label: &str,
+    files_label: &str,
+) -> Vec<ListRow> {
     if !group {
         return (0..entries.len()).map(ListRow::Item).collect();
     }
@@ -92,25 +98,71 @@ fn table_rows(entries: &[FileEntry], group: bool, folders_label: &str, files_lab
             e.name.to_lowercase(),
         )
     });
-    let mut rows = Vec::new();
-    let mut last: Option<String> = None;
+    let mut groups: Vec<(String, String, Vec<usize>)> = Vec::new();
     for i in order {
         let e = &entries[i];
-        let group_name = if e.is_dir {
-            folders_label.to_owned()
+        let (key, label) = if e.is_dir {
+            ("folder".to_owned(), folders_label.to_owned())
+        } else if let Some(extension) = e.extension.as_deref() {
+            let extension = extension.to_lowercase();
+            (format!("ext:{extension}"), extension.to_uppercase())
         } else {
-            e.extension
-                .as_deref()
-                .map(str::to_uppercase)
-                .unwrap_or_else(|| files_label.to_owned())
+            ("file".to_owned(), files_label.to_owned())
         };
-        if last.as_deref() != Some(group_name.as_str()) {
-            rows.push(ListRow::Header(group_name.clone()));
-            last = Some(group_name);
+        if groups.last().is_some_and(|(group_key, _, _)| group_key == &key) {
+            groups.last_mut().unwrap().2.push(i);
+        } else {
+            groups.push((key, label, vec![i]));
         }
-        rows.push(ListRow::Item(i));
+    }
+
+    let preferred: std::collections::HashMap<&str, usize> = preferred_group_order
+        .iter()
+        .enumerate()
+        .map(|(index, key)| (key.as_str(), index))
+        .collect();
+    let group_count = groups.len();
+    let mut ranked: Vec<_> = groups.into_iter().enumerate().collect();
+    ranked.sort_by_key(|(default_index, (key, _, _))| {
+        (
+            preferred
+                .get(key.as_str())
+                .copied()
+                .unwrap_or(preferred.len() + default_index),
+            *default_index,
+        )
+    });
+    let mut rows = Vec::with_capacity(entries.len() + group_count);
+    for (_, (key, label, items)) in ranked {
+        rows.push(ListRow::Header { key, label });
+        rows.extend(items.into_iter().map(ListRow::Item));
     }
     rows
+}
+
+fn move_group_order(
+    current_order: &[String],
+    source_key: &str,
+    target_key: &str,
+    after: bool,
+) -> Option<Vec<String>> {
+    if source_key == target_key {
+        return None;
+    }
+    let mut order = current_order.to_vec();
+    let source = order.iter().position(|key| key == source_key)?;
+    let group = order.remove(source);
+    let target = order.iter().position(|key| key == target_key)?;
+    order.insert(target + usize::from(after), group);
+    (order != current_order).then_some(order)
+}
+
+fn group_drag_threshold_crossed(press: egui::Pos2, pointer: egui::Pos2) -> bool {
+    pointer.distance(press) > 5.0
+}
+
+fn entry_at(entries: &[FileEntry], index: usize) -> Option<FileEntry> {
+    entries.get(index).cloned()
 }
 
 impl FileManagerApp {
@@ -135,21 +187,35 @@ impl FileManagerApp {
         // rects, empty space falls through to this response.
         let bg = ui.available_rect_before_wrap();
         let bg_resp = ui.interact(bg, ui.scope_id().with("empty_list_area"), egui::Sense::click());
+        let mut group_drop: Option<(Vec<String>, String, bool)> = None;
         match self.store.settings.view_mode {
             ViewMode::Table => {
                 self.list_header(ui);
                 ui.separator();
                 let rows = self.build_rows();
+                let group_keys: Vec<String> = rows
+                    .iter()
+                    .filter_map(|row| match row {
+                        ListRow::Header { key, .. } => Some(key.clone()),
+                        ListRow::Item(_) => None,
+                    })
+                    .collect();
+                let mut drop_target = None;
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show_rows(ui, ROW_HEIGHT, rows.len(), |ui, range| {
                         for index in range {
-                            match rows[index] {
-                                ListRow::Item(i) => self.file_row(ui, i, ctx),
-                                ListRow::Header(ref label) => self.group_header(ui, label),
+                            match &rows[index] {
+                                ListRow::Item(i) => self.file_row(ui, *i, ctx),
+                                ListRow::Header { key, label } => {
+                                    self.group_header(ui, key, label, &mut drop_target)
+                                }
                             }
                         }
                     });
+                if let Some((target, after)) = drop_target {
+                    group_drop = Some((group_keys, target, after));
+                }
             }
             ViewMode::List => {
                 egui::ScrollArea::vertical()
@@ -163,8 +229,36 @@ impl FileManagerApp {
             ViewMode::Grid => {
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
-                    .show(ui, |ui| self.grid_view(ui, ctx));
+                .show(ui, |ui| self.grid_view(ui, ctx));
             }
+        }
+        if ctx.input(|i| i.pointer.any_released()) {
+            if let Some((source, _)) = self.group_drag.take() {
+                if let Some((keys, target, after)) = group_drop {
+                    if let Some(order) = move_group_order(&keys, &source, &target, after) {
+                        self.store.settings.group_order = order;
+                        self.persist();
+                    }
+                }
+            }
+            self.group_press = None;
+        }
+        if let (Some((_, label)), Some(pointer)) =
+            (&self.group_drag, ctx.pointer_latest_pos())
+        {
+            egui::Area::new(ui.scope_id().with("group_drag_chip"))
+                .order(egui::Order::Foreground)
+                .current_pos(pointer + egui::vec2(12.0, -18.0))
+                .show(ctx, |ui| {
+                    egui::Frame::new()
+                        .fill(ui.visuals().extreme_bg_color)
+                        .corner_radius(4.0)
+                        .inner_margin(egui::Margin::symmetric(10, 4))
+                        .stroke(egui::Stroke::new(1.0, ui.visuals().selection.stroke.color))
+                        .show(ui, |ui| {
+                            ui.label(label);
+                        });
+                });
         }
         self.empty_area_menu(&bg_resp, ctx);
         self.scroll_to_cursor = false;
@@ -243,19 +337,33 @@ impl FileManagerApp {
         table_rows(
             &self.tabs[self.active].entries,
             self.store.settings.group_by_type,
+            &self.store.settings.group_order,
             self.t("type.folder"),
             self.t("type.file"),
         )
     }
 
-    fn group_header(&self, ui: &mut egui::Ui, label: &str) {
+    fn group_header(
+        &mut self,
+        ui: &mut egui::Ui,
+        key: &str,
+        label: &str,
+        drop_target: &mut Option<(String, bool)>,
+    ) {
         let width = ui.available_width();
-        let (rect, _) =
-            ui.allocate_exact_size(egui::vec2(width, ROW_HEIGHT), egui::Sense::hover());
+        let (rect, response) =
+            ui.allocate_exact_size(egui::vec2(width, ROW_HEIGHT), egui::Sense::click());
         let painter = ui.painter();
         let font = egui::TextStyle::Body.resolve(ui.style());
         let y = rect.center().y;
-        let weak = ui.visuals().weak_text_color();
+        let source_is_dragged = self
+            .group_drag
+            .as_ref()
+            .is_some_and(|(source, _)| source == key);
+        let weak = ui
+            .visuals()
+            .weak_text_color()
+            .gamma_multiply(if source_is_dragged { 0.3 } else { 1.0 });
         let galley = painter.layout_no_wrap(label.to_owned(), font, weak);
         painter.galley(egui::pos2(rect.min.x + 4.0, y - galley.size().y / 2.0), galley.clone(), weak);
         painter.hline(
@@ -263,6 +371,35 @@ impl FileManagerApp {
             y,
             egui::Stroke::new(1.0, weak.gamma_multiply(0.3)),
         );
+
+        let pointer = ui.ctx().pointer_latest_pos();
+        if response.is_pointer_button_down_on() && self.group_press.is_none() {
+            if let Some(pos) = pointer {
+                self.group_press = Some((key.to_owned(), label.to_owned(), pos));
+            }
+        }
+        if ui.ctx().input(|i| i.pointer.primary_down()) {
+            if let (Some((source, source_label, start)), Some(pos)) = (&self.group_press, pointer) {
+                if group_drag_threshold_crossed(*start, pos) {
+                    self.group_drag = Some((source.clone(), source_label.clone()));
+                }
+            }
+        }
+
+        if let (Some((source, _)), Some(pos)) = (&self.group_drag, pointer) {
+            if rect.contains(pos) {
+                let after = pos.y >= rect.center().y;
+                if source != key {
+                    *drop_target = Some((key.to_owned(), after));
+                }
+                let line_y = if after { rect.bottom() } else { rect.top() };
+                ui.painter().hline(
+                    rect.x_range(),
+                    line_y,
+                    egui::Stroke::new(2.0, ui.visuals().selection.stroke.color),
+                );
+            }
+        }
     }
 
     /// Right-click on a header column: visibility toggles (Explorer style).
@@ -286,7 +423,9 @@ impl FileManagerApp {
     }
 
     fn file_row(&mut self, ui: &mut egui::Ui, index: usize, ctx: &egui::Context) {
-        let entry: FileEntry = self.tabs[self.active].entries[index].clone();
+        let Some(entry) = entry_at(&self.tabs[self.active].entries, index) else {
+            return;
+        };
         let width = ui.available_width();
         let (rect, resp) =
             ui.allocate_exact_size(egui::vec2(width, ROW_HEIGHT), egui::Sense::click());
@@ -346,14 +485,20 @@ impl FileManagerApp {
             } else {
                 entry.size.map(format_size).unwrap_or_default()
             };
-            painter.text(
-                egui::pos2(rect.min.x + type_x.or(mod_x).unwrap_or(width) - COL_GAP, y),
-                egui::Align2::RIGHT_CENTER,
+            let size_rect = egui::Rect::from_min_max(
+                egui::pos2(rect.min.x + sx, rect.min.y),
+                egui::pos2(
+                    rect.min.x + type_x.or(mod_x).unwrap_or(width) - COL_GAP,
+                    rect.max.y,
+                ),
+            );
+            painter.with_clip_rect(size_rect).text(
+                egui::pos2(rect.min.x + sx, y),
+                egui::Align2::LEFT_CENTER,
                 size_text,
                 font.clone(),
                 weak,
             );
-            let _ = sx;
         }
 
         if let Some(tx) = type_x {
@@ -379,7 +524,11 @@ impl FileManagerApp {
         }
 
         if let Some(mx) = mod_x {
-            let modified = entry.modified.map(format_local_time).unwrap_or_default();
+            let language = self.i18n.language();
+            let modified = entry
+                .modified
+                .map(|time| format_local_time(time, language))
+                .unwrap_or_default();
             painter.text(
                 egui::pos2(rect.min.x + mx, y),
                 egui::Align2::LEFT_CENTER,
@@ -396,7 +545,9 @@ impl FileManagerApp {
 
     /// Compact list view: icon + name, no columns.
     fn list_row(&mut self, ui: &mut egui::Ui, index: usize, ctx: &egui::Context) {
-        let entry: FileEntry = self.tabs[self.active].entries[index].clone();
+        let Some(entry) = entry_at(&self.tabs[self.active].entries, index) else {
+            return;
+        };
         let width = ui.available_width();
         let (rect, resp) =
             ui.allocate_exact_size(egui::vec2(width, ROW_HEIGHT), egui::Sense::click());
@@ -451,7 +602,9 @@ impl FileManagerApp {
     }
 
     fn grid_tile(&mut self, ui: &mut egui::Ui, index: usize, ctx: &egui::Context) {
-        let entry: FileEntry = self.tabs[self.active].entries[index].clone();
+        let Some(entry) = entry_at(&self.tabs[self.active].entries, index) else {
+            return;
+        };
         let (rect, resp) =
             ui.allocate_exact_size(egui::vec2(104.0, 68.0), egui::Sense::click());
         let selected = self.tabs[self.active].selection.contains(&index);
@@ -576,6 +729,10 @@ impl FileManagerApp {
                 }
                 ui.close();
             }
+            if entry.is_dir && ui.button(self.t("ctx.open_new_tab").to_owned()).clicked() {
+                self.queue_open_path_in_new_tab(entry.path.clone());
+                ui.close();
+            }
             ui.separator();
             if ui.button(self.t("ctx.copy").to_owned()).clicked() {
                 self.act_copy();
@@ -677,7 +834,7 @@ mod tests {
             entry("a.md", false, Some("md")),
         ];
         assert_eq!(
-            table_rows(&entries, false, "Folders", "Files"),
+            table_rows(&entries, false, &[], "Folders", "Files"),
             vec![ListRow::Item(0), ListRow::Item(1), ListRow::Item(2)]
         );
     }
@@ -692,18 +849,18 @@ mod tests {
             entry("a.md", false, Some("md")),
             entry("a.txt", false, Some("txt")),
         ];
-        let rows = table_rows(&entries, true, "Folders", "Files");
+        let rows = table_rows(&entries, true, &[], "Folders", "Files");
         assert_eq!(
             rows,
             vec![
-                ListRow::Header("Folders".into()),
+                ListRow::Header { key: "folder".into(), label: "Folders".into() },
                 ListRow::Item(3),
                 ListRow::Item(1),
-                ListRow::Header("Files".into()),
+                ListRow::Header { key: "file".into(), label: "Files".into() },
                 ListRow::Item(2),
-                ListRow::Header("MD".into()),
+                ListRow::Header { key: "ext:md".into(), label: "MD".into() },
                 ListRow::Item(4),
-                ListRow::Header("TXT".into()),
+                ListRow::Header { key: "ext:txt".into(), label: "TXT".into() },
                 ListRow::Item(5),
                 ListRow::Item(0),
             ]
@@ -713,7 +870,7 @@ mod tests {
             .iter()
             .filter_map(|r| match r {
                 ListRow::Item(i) => Some(*i),
-                ListRow::Header(_) => None,
+                ListRow::Header { .. } => None,
             })
             .collect();
         seen.sort_unstable();
@@ -727,14 +884,58 @@ mod tests {
             entry("lower.txt", false, Some("txt")),
         ];
         assert_eq!(
-            table_rows(&entries, true, "Folders", "Files"),
+            table_rows(&entries, true, &[], "Folders", "Files"),
             vec![
-                ListRow::Header("TXT".into()),
+                ListRow::Header { key: "ext:txt".into(), label: "TXT".into() },
                 ListRow::Item(1),
                 ListRow::Item(0),
             ]
         );
-        assert!(table_rows(&[], true, "Folders", "Files").is_empty());
+        assert!(table_rows(&[], true, &[], "Folders", "Files").is_empty());
+    }
+
+    #[test]
+    fn custom_group_order_overrides_default_and_new_types_keep_default_tail_order() {
+        let entries = vec![
+            entry("folder", true, None),
+            entry("readme", false, None),
+            entry("a.md", false, Some("md")),
+            entry("b.txt", false, Some("txt")),
+        ];
+        let rows = table_rows(
+            &entries,
+            true,
+            &["ext:txt".into(), "folder".into()],
+            "Folders",
+            "Files",
+        );
+        let headers: Vec<(&str, &str)> = rows
+            .iter()
+            .filter_map(|row| match row {
+                ListRow::Header { key, label } => Some((key.as_str(), label.as_str())),
+                ListRow::Item(_) => None,
+            })
+            .collect();
+        assert_eq!(headers, [("ext:txt", "TXT"), ("folder", "Folders"), ("file", "Files"), ("ext:md", "MD")]);
+    }
+
+    #[test]
+    fn moving_a_group_changes_only_group_order() {
+        let keys = vec!["folder".into(), "file".into(), "ext:md".into(), "ext:txt".into()];
+        assert_eq!(
+            move_group_order(&keys, "ext:txt", "folder", false),
+            Some(vec!["ext:txt", "folder", "file", "ext:md"].into_iter().map(str::to_owned).collect())
+        );
+        assert_eq!(move_group_order(&keys, "file", "file", true), None);
+        assert_eq!(move_group_order(&keys, "missing", "folder", false), None);
+    }
+
+    #[test]
+    fn group_drag_starts_only_after_a_real_pointer_move() {
+        let press = egui::pos2(100.0, 20.0);
+        assert!(!group_drag_threshold_crossed(press, egui::pos2(104.0, 20.0)));
+        assert!(!group_drag_threshold_crossed(press, egui::pos2(100.0, 25.0)));
+        assert!(group_drag_threshold_crossed(press, egui::pos2(106.0, 20.0)));
     }
 
     #[test]
@@ -806,5 +1007,13 @@ mod tests {
             ..all
         };
         assert!(column_separator_x(&no_optional_columns, 800.0).is_empty());
+    }
+
+    #[test]
+    fn stale_virtual_row_index_is_ignored_safely() {
+        let entries = vec![entry("still valid.txt", false, Some("txt"))];
+        assert_eq!(entry_at(&entries, 0).unwrap().name, "still valid.txt");
+        assert!(entry_at(&entries, 4).is_none());
+        assert!(entry_at(&[], 0).is_none());
     }
 }

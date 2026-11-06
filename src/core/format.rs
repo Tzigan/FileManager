@@ -1,5 +1,7 @@
 //! Formatting helpers shared by the UI layer.
 
+use crate::core::i18n::Language;
+
 /// Human-readable file size: `512 B`, `1.5 KB`, `2.3 MB`, `4 GB`.
 /// Uses binary units (1024) matching Windows Explorer conventions.
 pub fn format_size(size: u64) -> String {
@@ -20,16 +22,39 @@ pub fn format_size(size: u64) -> String {
     }
 }
 
+/// Formats date/time parts using the user's locale.
+pub fn format_datetime_parts(
+    year: i64,
+    month: u32,
+    day: u32,
+    hour: u32,
+    minute: u32,
+    language: Language,
+) -> String {
+    match language {
+        Language::Ru => format!("{day:02}-{month:02}-{year:04} {hour:02}:{minute:02}"),
+        Language::En => format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}"),
+    }
+}
+
 /// Formats a Unix timestamp (seconds since epoch) as `YYYY-MM-DD HH:MM`
-/// in UTC. Used as a fallback when local-time conversion is unavailable.
+/// in UTC. Used by callers that explicitly need the English/default format.
 pub fn format_unix_utc(secs: u64) -> String {
+    format_unix_utc_for_language(secs, Language::En)
+}
+
+/// UTC fallback for platforms where local-time conversion is unavailable.
+pub fn format_unix_utc_for_language(secs: u64, language: Language) -> String {
     let days = (secs / 86_400) as i64;
     let secs_of_day = secs % 86_400;
     let (year, month, day) = civil_from_days(days);
-    format!(
-        "{year:04}-{month:02}-{day:02} {:02}:{:02}",
-        secs_of_day / 3600,
-        (secs_of_day % 3600) / 60
+    format_datetime_parts(
+        year,
+        month,
+        day,
+        (secs_of_day / 3600) as u32,
+        ((secs_of_day % 3600) / 60) as u32,
+        language,
     )
 }
 
@@ -73,5 +98,29 @@ mod tests {
         // 2026-11-04 00:00 UTC = 1793750400
         assert_eq!(format_unix_utc(1_793_750_400), "2026-11-04 00:00");
         assert_eq!(format_unix_utc(86_399), "1970-01-01 23:59");
+    }
+
+    #[test]
+    fn date_time_order_matches_language() {
+        assert_eq!(
+            format_datetime_parts(2026, 11, 4, 21, 54, Language::En),
+            "2026-11-04 21:54"
+        );
+        assert_eq!(
+            format_datetime_parts(2026, 11, 4, 21, 54, Language::Ru),
+            "04-11-2026 21:54"
+        );
+    }
+
+    #[test]
+    fn utc_fallback_uses_the_requested_language() {
+        assert_eq!(
+            format_unix_utc_for_language(1_793_750_400, Language::Ru),
+            "04-11-2026 00:00"
+        );
+        assert_eq!(
+            format_unix_utc_for_language(1_793_750_400, Language::En),
+            "2026-11-04 00:00"
+        );
     }
 }

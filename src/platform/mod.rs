@@ -26,9 +26,12 @@ mod stubs {
 
     pub fn notify_already_running() {}
 
-    pub fn format_local_time(t: std::time::SystemTime) -> String {
+    pub fn format_local_time(
+        t: std::time::SystemTime,
+        language: crate::core::i18n::Language,
+    ) -> String {
         match t.duration_since(std::time::SystemTime::UNIX_EPOCH) {
-            Ok(d) => crate::core::format::format_unix_utc(d.as_secs()),
+            Ok(d) => crate::core::format::format_unix_utc_for_language(d.as_secs(), language),
             Err(_) => "-".to_string(),
         }
     }

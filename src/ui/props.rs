@@ -48,8 +48,15 @@ impl FileManagerApp {
             }
         };
         let size = entry.size.map(format_size).unwrap_or_default();
-        let created = entry.created.map(format_local_time).unwrap_or_default();
-        let modified = entry.modified.map(format_local_time).unwrap_or_default();
+        let language = self.i18n.language();
+        let created = entry
+            .created
+            .map(|time| format_local_time(time, language))
+            .unwrap_or_default();
+        let modified = entry
+            .modified
+            .map(|time| format_local_time(time, language))
+            .unwrap_or_default();
         let mut attrs = Vec::new();
         if entry.hidden {
             attrs.push(self.t("attr.hidden").to_owned());

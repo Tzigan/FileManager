@@ -73,6 +73,13 @@ impl Tab {
     }
 }
 
+/// Opens a folder as a new tab and returns its index.
+pub(crate) fn append_tab(tabs: &mut Vec<Tab>, path: PathBuf) -> usize {
+    let index = tabs.len();
+    tabs.push(Tab::new(path));
+    index
+}
+
 pub(crate) fn listing_tab_index(tabs: &[Tab], id: u64, generation: u64) -> Option<usize> {
     tabs.iter()
         .position(|tab| tab.id == id && tab.generation == generation)
@@ -206,6 +213,16 @@ mod tests {
     fn title_root_not_empty() {
         let t = Tab::new(PathBuf::from("C:\\"));
         assert!(!t.title().is_empty());
+    }
+
+    #[test]
+    fn opening_folder_in_new_tab_appends_it_without_changing_existing_tabs() {
+        let mut tabs = vec![Tab::new(PathBuf::from("C:\\current"))];
+        let opened = PathBuf::from("D:\\other folder");
+        let index = append_tab(&mut tabs, opened.clone());
+        assert_eq!(index, 1);
+        assert_eq!(tabs[0].path, PathBuf::from("C:\\current"));
+        assert_eq!(tabs[1].path, opened);
     }
 
     fn sel() -> (std::collections::BTreeSet<usize>, Option<usize>) {

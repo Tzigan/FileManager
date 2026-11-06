@@ -44,6 +44,8 @@ pub struct Settings {
     pub col_modified: bool,
     /// Table view: rows grouped by type (folders, then per-extension).
     pub group_by_type: bool,
+    /// Optional user order of stable group keys (`folder`, `file`, `ext:txt`).
+    pub group_order: Vec<String>,
     /// One running instance: new launches forward their path over the pipe.
     #[serde(default = "default_true")]
     pub single_instance: bool,
@@ -67,6 +69,7 @@ impl Default for Settings {
             col_type: true,
             col_modified: true,
             group_by_type: false,
+            group_order: Vec::new(),
             single_instance: true,
         }
     }
@@ -161,6 +164,7 @@ mod tests {
         store.settings.col_type = true;
         store.settings.col_modified = false;
         store.settings.group_by_type = true;
+        store.settings.group_order = vec!["ext:txt".into(), "folder".into()];
         store.settings.single_instance = false;
         store.save().unwrap();
 
@@ -176,6 +180,7 @@ mod tests {
         assert!(loaded.settings.col_type);
         assert!(!loaded.settings.col_modified);
         assert!(loaded.settings.group_by_type);
+        assert_eq!(loaded.settings.group_order, vec!["ext:txt", "folder"]);
         assert!(!loaded.settings.single_instance);
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -196,6 +201,7 @@ mod tests {
         assert_eq!(loaded.settings.view_mode, ViewMode::Table);
         assert!(loaded.settings.col_size && loaded.settings.col_type && loaded.settings.col_modified);
         assert!(!loaded.settings.group_by_type);
+        assert!(loaded.settings.group_order.is_empty());
         assert!(loaded.settings.single_instance);
         std::fs::remove_dir_all(dir).unwrap();
     }

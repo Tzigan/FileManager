@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
@@ -261,7 +261,11 @@ impl FileManagerApp {
 
     pub(crate) fn act_bookmark(&mut self) {
         let path = self.tabs[self.active].path.clone();
-        toggle_bookmark(&mut self.store.settings.bookmarks, &path);
+        self.act_bookmark_path(&path);
+    }
+
+    pub(crate) fn act_bookmark_path(&mut self, path: &Path) {
+        toggle_bookmark(&mut self.store.settings.bookmarks, path);
         self.persist();
     }
 

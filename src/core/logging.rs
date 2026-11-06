@@ -1,4 +1,21 @@
 use std::path::Path;
+use std::sync::Once;
+
+static PANIC_LOG_HOOK: Once = Once::new();
+
+fn install_panic_log_hook() {
+    PANIC_LOG_HOOK.call_once(|| {
+        let default_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            tracing::error!(
+                panic = %info,
+                backtrace = %std::backtrace::Backtrace::force_capture(),
+                "application panic"
+            );
+            default_hook(info);
+        }));
+    });
+}
 
 /// Initializes daily rolling file logging into `<log_dir>/filemanager.log`.
 ///
@@ -16,6 +33,7 @@ pub fn init(log_dir: &Path) -> tracing_appender::non_blocking::WorkerGuard {
         .try_init()
         .ok();
 
+    install_panic_log_hook();
     guard
 }
 

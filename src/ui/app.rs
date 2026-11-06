@@ -1,5 +1,5 @@
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread;
@@ -44,6 +44,9 @@ pub struct FileManagerApp {
     pub(crate) i18n: I18n,
     dirs: AppDirs,
     show_about: bool,
+    about_viewport_placed: bool,
+    show_settings: bool,
+    settings_viewport_placed: bool,
     /// Update offer: (version, exe URL).
     pending_update: Option<(String, String)>,
     update_busy: bool,
@@ -55,6 +58,12 @@ pub struct FileManagerApp {
     tab_press: Option<(usize, egui::Pos2)>,
     /// Path shown in the properties dialog.
     pub(crate) props_target: Option<PathBuf>,
+    props_viewport_placed: bool,
+    /// Tabs requested by widgets while the current frame is rendering.
+    pending_open_tabs: Vec<PathBuf>,
+    /// Drag state for reordering grouped table sections.
+    pub(crate) group_drag: Option<(String, String)>,
+    pub(crate) group_press: Option<(String, String, egui::Pos2)>,
 
     pub(crate) tabs: Vec<Tab>,
     pub(crate) active: usize,
@@ -156,12 +165,19 @@ impl FileManagerApp {
             i18n,
             dirs,
             show_about: false,
+            about_viewport_placed: false,
+            show_settings: false,
+            settings_viewport_placed: false,
             pending_update: None,
             update_busy: false,
             update_err: None,
             tab_drag: None,
             tab_press: None,
             props_target: None,
+            props_viewport_placed: false,
+            pending_open_tabs: Vec::new(),
+            group_drag: None,
+            group_press: None,
             tabs: paths.into_iter().map(|p| { let mut t = Tab::new(p); t.pinned = pins.contains(&t.path); t }).collect(),
             active,
             tree: TreeState::new(drives()),
@@ -191,10 +207,19 @@ impl FileManagerApp {
     }
 
     /// Open `path` in a new tab (pipe-forwarded from another instance).
-    fn open_path_tab(&mut self, path: PathBuf, ctx: &egui::Context) {
-        self.tabs.push(Tab::new(path));
-        self.active = self.tabs.len() - 1;
+    pub(crate) fn open_path_in_new_tab(&mut self, path: PathBuf, ctx: &egui::Context) {
+        self.active = super::tabs::append_tab(&mut self.tabs, path);
         self.navigate_fresh(self.active, ctx);
+    }
+
+    pub(crate) fn queue_open_path_in_new_tab(&mut self, path: PathBuf) {
+        self.pending_open_tabs.push(path);
+    }
+
+    fn flush_pending_open_tabs(&mut self, ctx: &egui::Context) {
+        for path in std::mem::take(&mut self.pending_open_tabs) {
+            self.open_path_in_new_tab(path, ctx);
+        }
     }
 
     pub(crate) fn t<'a>(&'a self, key: &'a str) -> &'a str {
@@ -263,8 +288,15 @@ impl FileManagerApp {
 
         let tx = self.msg_tx.clone();
         let ctx2 = ctx.clone();
+        tracing::info!(tab_id, generation, "folder listing queued");
         thread::spawn(move || {
+            tracing::info!(tab_id, generation, "folder listing started");
             let result = fs::read_dir(&path, &cancel);
+            match &result {
+                Ok(entries) => tracing::info!(tab_id, generation, count = entries.len(), "folder listing completed"),
+                Err(ReadDirError::Cancelled) => tracing::info!(tab_id, generation, "folder listing cancelled"),
+                Err(ReadDirError::Io(error)) => tracing::warn!(tab_id, generation, error = %error, "folder listing failed"),
+            }
             let _ = tx.send(WorkerMsg::Listing { tab_id, generation, result });
             ctx2.request_repaint();
         });
@@ -308,9 +340,7 @@ impl FileManagerApp {
 
     fn new_tab(&mut self, ctx: &egui::Context) {
         let path = self.tabs[self.active].path.clone();
-        self.tabs.push(Tab::new(path));
-        self.active = self.tabs.len() - 1;
-        self.navigate_fresh(self.active, ctx);
+        self.open_path_in_new_tab(path, ctx);
     }
 
     fn close_tab(&mut self, idx: usize, ctx: &egui::Context) {
@@ -416,7 +446,7 @@ impl FileManagerApp {
                 WorkerMsg::TreeChildren { path, result } => {
                     self.tree.complete_children_load(path, result);
                 }
-                WorkerMsg::OpenPath(path) => self.open_path_tab(path, ctx),
+                WorkerMsg::OpenPath(path) => self.open_path_in_new_tab(path, ctx),
                 WorkerMsg::UpdateFound { version, url } => {
                     self.pending_update = Some((version, url));
                     self.update_err = None;
@@ -676,23 +706,31 @@ impl FileManagerApp {
                         (Theme::Light, "theme.light"),
                         (Theme::Dark, "theme.dark"),
                     ] {
-                        let selected = self.store.settings.theme == theme;
-                        if ui.selectable_label(selected, self.t(key).to_owned()).clicked() {
+                        if ui
+                            .selectable_label(self.store.settings.theme == theme, self.t(key).to_owned())
+                            .clicked()
+                        {
                             self.set_theme(theme);
                             ui.close();
                         }
                     }
                 });
                 ui.menu_button(self.t("view.language").to_owned(), |ui| {
-                    for lang in [Language::Ru, Language::En] {
-                        let selected = self.i18n.language() == lang;
-                        if ui.selectable_label(selected, lang.label()).clicked() {
-                            self.set_language(lang);
+                    for language in [Language::Ru, Language::En] {
+                        if ui
+                            .selectable_label(self.i18n.language() == language, language.label())
+                            .clicked()
+                        {
+                            self.set_language(language);
                             ui.close();
                         }
                     }
                 });
             });
+
+            if ui.button(self.t("menu.settings").to_owned()).clicked() {
+                self.show_settings = true;
+            }
 
             ui.menu_button(self.t("menu.help").to_owned(), |ui| {
                 if ui.button(self.t("help.about").to_owned()).clicked() {
@@ -704,7 +742,8 @@ impl FileManagerApp {
     }
 
     fn tab_bar(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
-        ui.horizontal_wrapped(|ui| {
+        configure_tab_scroll_style(ui.style_mut());
+        ui.horizontal(|ui| {
             let mut act: Option<(&str, usize)> = None;
             let mut drop_dst = None;
             let mut drag_src = None;
@@ -716,6 +755,16 @@ impl FileManagerApp {
                     (t.pinned, title)
                 })
                 .collect();
+
+            let scroll_width = (ui.available_width() - 30.0).max(1.0);
+            egui::ScrollArea::horizontal()
+                .id_salt("tab_strip_scroll")
+                .max_width(scroll_width)
+                .auto_shrink([false, true])
+                .scroll_source(tab_scroll_source())
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
             for (i, (pinned, title)) in metas.iter().enumerate() {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 2.0;
@@ -849,6 +898,8 @@ impl FileManagerApp {
                     let _ = resp;
                 });
             }
+                    });
+                });
             if ui.small_button("+").clicked() {
                 self.new_tab(ctx);
             }
@@ -1012,13 +1063,22 @@ impl FileManagerApp {
         let title = self.t("about.title").to_owned();
         let config_label = self.t("label.config_dir").to_owned();
         let log_label = self.t("label.log_dir").to_owned();
-        let mut open = self.show_about;
-        egui::Window::new(title)
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
-            .open(&mut open)
-            .show(ctx, |ui| {
+        let viewport_id = egui::ViewportId::from_hash_of("filemanager-about");
+        let builder = floating_dialog_viewport(
+            ctx,
+            title,
+            egui::vec2(500.0, 240.0),
+            self.about_viewport_placed,
+        );
+        let mut close_requested = false;
+        ctx.show_viewport_immediate(viewport_id, builder, |viewport_ui, _class| {
+            let viewport_ctx = viewport_ui.ctx().clone();
+            if viewport_ctx.input(|i| i.viewport().close_requested()) {
+                viewport_ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                close_requested = true;
+                return;
+            }
+            egui::CentralPanel::default().show(viewport_ui, |ui| {
                 ui.heading(format!("FileManager v{}", env!("CARGO_PKG_VERSION")));
                 ui.label("Rust + egui/eframe");
                 ui.add_space(8.0);
@@ -1026,18 +1086,86 @@ impl FileManagerApp {
                 ui.label(format!("{}: {}", log_label, self.dirs.log_dir.display()));
                 ui.add_space(8.0);
                 if ui.button(self.t("update.check").to_owned()).clicked() {
-                    self.spawn_update_check(ctx);
-                }
-                ui.add_space(4.0);
-                let si_txt = self.t("settings.single_instance").to_owned();
-                if ui
-                    .checkbox(&mut self.store.settings.single_instance, si_txt)
-                    .changed()
-                {
-                    self.persist();
+                    self.spawn_update_check(&viewport_ctx);
                 }
             });
-        self.show_about = open;
+        });
+        self.about_viewport_placed = !close_requested;
+        if close_requested {
+            self.show_about = false;
+        }
+    }
+
+    fn settings_window(&mut self, ctx: &egui::Context) {
+        if !self.show_settings {
+            return;
+        }
+        let title = self.t("menu.settings").to_owned();
+        let viewport_id = egui::ViewportId::from_hash_of("filemanager-settings");
+        let builder = floating_dialog_viewport(
+            ctx,
+            title,
+            egui::vec2(560.0, 205.0),
+            self.settings_viewport_placed,
+        );
+        let mut close_requested = false;
+        ctx.show_viewport_immediate(viewport_id, builder, |viewport_ui, _class| {
+            let viewport_ctx = viewport_ui.ctx().clone();
+            if viewport_ctx.input(|i| i.viewport().close_requested()) {
+                viewport_ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                close_requested = true;
+                return;
+            }
+            egui::CentralPanel::default().show(viewport_ui, |ui| {
+                let content_height = ui.available_height();
+                ui.horizontal(|ui| {
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(150.0, content_height),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            ui.add_space(8.0);
+                            let _ = ui.selectable_label(true, self.t("settings.category.general"));
+                        },
+                    );
+                    let (divider, _) = ui.allocate_exact_size(
+                        egui::vec2(1.0, content_height),
+                        egui::Sense::hover(),
+                    );
+                    ui.painter().vline(
+                        divider.center().x,
+                        divider.y_range(),
+                        egui::Stroke::new(
+                            1.0,
+                            ui.visuals().widgets.noninteractive.bg_stroke.color,
+                        ),
+                    );
+                    ui.add_space(10.0);
+                    ui.vertical(|ui| {
+                        ui.add_space(12.0);
+                        let single_instance_label =
+                            self.t("settings.single_instance").to_owned();
+                        if ui
+                            .checkbox(
+                                &mut self.store.settings.single_instance,
+                                single_instance_label,
+                            )
+                            .changed()
+                        {
+                            self.persist();
+                        }
+                        ui.add_space(8.0);
+                        ui.label(
+                            egui::RichText::new(self.t("settings.single_instance_hint"))
+                                .weak(),
+                        );
+                    });
+                });
+            });
+        });
+        self.settings_viewport_placed = !close_requested;
+        if close_requested {
+            self.show_settings = false;
+        }
     }
 
     fn spawn_update_check(&self, ctx: &egui::Context) {
@@ -1092,15 +1220,24 @@ impl FileManagerApp {
             return;
         };
         let title = self.t("props.title").to_owned();
-        let mut open = true;
         let mut dirty = false;
         let mut apply = None;
-        egui::Window::new(title)
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
-            .open(&mut open)
-            .show(ctx, |ui| {
+        let viewport_id = egui::ViewportId::from_hash_of("filemanager-properties");
+        let builder = floating_dialog_viewport(
+            ctx,
+            title,
+            egui::vec2(560.0, 360.0),
+            self.props_viewport_placed,
+        );
+        let mut close_requested = false;
+        ctx.show_viewport_immediate(viewport_id, builder, |viewport_ui, _class| {
+            let viewport_ctx = viewport_ui.ctx().clone();
+            if viewport_ctx.input(|i| i.viewport().close_requested()) {
+                viewport_ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                close_requested = true;
+                return;
+            }
+            egui::CentralPanel::default().show(viewport_ui, |ui| {
                 let entry = self
                     .tabs[self.active]
                     .entries
@@ -1132,10 +1269,18 @@ impl FileManagerApp {
                         ui.label(format!("{}: {}", self.t("col.size"), crate::core::format::format_size(s)));
                     }
                     if let Some(m) = e.modified {
-                        ui.label(format!("{}: {}", self.t("col.modified"), crate::platform::format_local_time(m)));
+                        ui.label(format!(
+                            "{}: {}",
+                            self.t("col.modified"),
+                            crate::platform::format_local_time(m, self.i18n.language())
+                        ));
                     }
                     if let Some(c) = e.created {
-                        ui.label(format!("{}: {}", self.t("props.created"), crate::platform::format_local_time(c)));
+                        ui.label(format!(
+                            "{}: {}",
+                            self.t("props.created"),
+                            crate::platform::format_local_time(c, self.i18n.language())
+                        ));
                     }
                     ui.separator();
                     let mut ro = e.readonly;
@@ -1151,12 +1296,14 @@ impl FileManagerApp {
                     }
                 }
             });
+        });
+        self.props_viewport_placed = !close_requested;
         if let Some((ro, hi)) = apply {
             if crate::platform::set_attributes(&target, ro, hi).is_ok() {
                 self.refresh(ctx);
             }
         }
-        if !open {
+        if close_requested {
             self.props_target = None;
         }
     }
@@ -1202,6 +1349,28 @@ impl FileManagerApp {
     }
 }
 
+fn floating_dialog_viewport(
+    ctx: &egui::Context,
+    title: String,
+    inner_size: egui::Vec2,
+    already_placed: bool,
+) -> egui::ViewportBuilder {
+    let mut builder = egui::ViewportBuilder::default()
+        .with_title(title)
+        .with_inner_size(inner_size)
+        .with_resizable(false)
+        .with_maximize_button(false)
+        .with_always_on_top();
+    if !already_placed {
+        let parent_rect = ctx
+            .input(|i| i.viewport().outer_rect)
+            .unwrap_or_else(|| ctx.content_rect());
+        let estimated_outer_size = inner_size + egui::vec2(16.0, 40.0);
+        builder = builder.with_position(parent_rect.center() - estimated_outer_size / 2.0);
+    }
+    builder
+}
+
 /// Splits a path into clickable breadcrumb segments:
 /// `C:\a\b` → `[("C:\", C:\), ("a", C:\a), ("b", C:\a\b)]`.
 /// Collects real filesystem paths from egui's dropped-file handles.
@@ -1212,14 +1381,30 @@ pub(crate) fn dropped_paths(files: &[egui::DroppedFileHandle]) -> Vec<PathBuf> {
 fn breadcrumb_segments(path: &Path) -> Vec<(String, PathBuf)> {
     let mut segs = Vec::new();
     let mut acc = PathBuf::new();
-    for comp in path.components() {
-        acc.push(comp.as_os_str());
-        let mut label = comp.as_os_str().to_string_lossy().into_owned();
-        // Show the drive root as "C:\" rather than bare "C:".
-        if segs.is_empty() && label.ends_with(':') {
-            label.push('\\');
+    let mut components = path.components().peekable();
+    while let Some(comp) = components.next() {
+        match comp {
+            Component::Prefix(prefix) => {
+                acc.push(prefix.as_os_str());
+                let mut label = prefix.as_os_str().to_string_lossy().into_owned();
+                // Treat `C:\` as one breadcrumb, and make its target absolute.
+                if matches!(components.peek(), Some(Component::RootDir)) {
+                    if let Some(root) = components.next() {
+                        acc.push(root.as_os_str());
+                    }
+                    label = acc.display().to_string();
+                }
+                segs.push((label, acc.clone()));
+            }
+            Component::RootDir => {
+                acc.push(comp.as_os_str());
+                segs.push((acc.display().to_string(), acc.clone()));
+            }
+            _ => {
+                acc.push(comp.as_os_str());
+                segs.push((comp.as_os_str().to_string_lossy().into_owned(), acc.clone()));
+            }
         }
-        segs.push((label, acc.clone()));
     }
     segs
 }
@@ -1314,7 +1499,9 @@ impl eframe::App for FileManagerApp {
             self.file_list(&ctx, ui);
         });
 
+        self.flush_pending_open_tabs(&ctx);
         self.about_window(&ctx);
+        self.settings_window(&ctx);
         self.update_window(&ctx);
         self.props_window(&ctx);
         self.ops_dialogs(&ctx);
@@ -1330,9 +1517,22 @@ impl eframe::App for FileManagerApp {
 }
 
 
+fn tab_scroll_source() -> egui::scroll_area::ScrollSource {
+    egui::scroll_area::ScrollSource::MOUSE_WHEEL
+}
+
+fn configure_tab_scroll_style(style: &mut egui::Style) {
+    // egui normally requires Shift for vertical wheel input in horizontal-only
+    // areas. The tab strip is the one place where plain wheel maps horizontally.
+    style.always_scroll_the_only_direction = true;
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{breadcrumb_segments, dropped_paths};
+    use super::{
+        breadcrumb_segments, configure_tab_scroll_style, dropped_paths, floating_dialog_viewport,
+        tab_scroll_source,
+    };
     use std::path::{Path, PathBuf};
 
     #[derive(Debug)]
@@ -1364,11 +1564,54 @@ mod tests {
         #[cfg(windows)]
         {
             let segs = breadcrumb_segments(Path::new("C:\\a\\b"));
-            assert!(segs.len() >= 3);
+            assert_eq!(
+                segs.iter().map(|(label, _)| label.as_str()).collect::<Vec<_>>(),
+                vec!["C:\\", "a", "b"]
+            );
             assert_eq!(segs[0].0, "C:\\");
+            assert_eq!(segs[0].1, PathBuf::from("C:\\"));
             let last = segs.last().unwrap();
             assert_eq!(last.0, "b");
             assert!(last.1.ends_with("b"));
+        }
+    }
+
+    #[test]
+    fn tab_strip_uses_mouse_wheel_without_showing_a_scrollbar() {
+        let source = tab_scroll_source();
+        assert!(source.mouse_wheel);
+        assert!(!source.scroll_bar);
+        assert_eq!(source.drag, egui::scroll_area::DragScroll::Never);
+
+        let mut style = egui::Style::default();
+        configure_tab_scroll_style(&mut style);
+        assert!(style.always_scroll_the_only_direction);
+    }
+
+    #[test]
+    fn detached_dialog_viewports_are_topmost_and_keep_user_moved_positions() {
+        let ctx = egui::Context::default();
+        let size = egui::vec2(480.0, 280.0);
+        let initial = floating_dialog_viewport(&ctx, "About".into(), size, false);
+        assert_eq!(initial.window_level, Some(egui::viewport::WindowLevel::AlwaysOnTop));
+        assert_eq!(initial.inner_size, Some(size));
+        assert_eq!(initial.maximize_button, Some(false));
+        assert!(initial.position.is_some());
+
+        let moved = floating_dialog_viewport(&ctx, "About".into(), size, true);
+        assert_eq!(moved.window_level, Some(egui::viewport::WindowLevel::AlwaysOnTop));
+        assert_eq!(moved.maximize_button, Some(false));
+        assert_eq!(moved.position, None);
+    }
+
+    #[test]
+    fn drive_root_is_one_absolute_breadcrumb() {
+        #[cfg(windows)]
+        {
+            let segs = breadcrumb_segments(Path::new("C:\\"));
+            assert_eq!(segs.len(), 1);
+            assert_eq!(segs[0].0, "C:\\");
+            assert_eq!(segs[0].1, PathBuf::from("C:\\"));
         }
     }
 }

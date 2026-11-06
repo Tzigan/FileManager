@@ -93,6 +93,35 @@ mod tests {
     }
 
     #[test]
+    fn new_folder_context_actions_are_localized_in_both_languages() {
+        let ru = I18n::new(Language::Ru);
+        assert_eq!(ru.t("ctx.open_new_tab"), "Открыть в новой вкладке");
+        assert_eq!(ru.t("ctx.add_bookmark"), "Добавить в закладки");
+        assert_eq!(ru.t("tree.expand"), "Развернуть");
+        assert_eq!(ru.t("tree.collapse"), "Свернуть");
+        assert_eq!(ru.t("menu.settings"), "Настройки");
+        assert_eq!(ru.t("settings.category.general"), "Общие");
+        assert_eq!(ru.t("settings.single_instance"), "Один экземпляр приложения");
+        assert_eq!(
+            ru.t("settings.single_instance_hint"),
+            "Повторный запуск откроет папку в уже запущенном окне. Выключите настройку, чтобы разрешить несколько окон."
+        );
+
+        let en = I18n::new(Language::En);
+        assert_eq!(en.t("ctx.open_new_tab"), "Open in new tab");
+        assert_eq!(en.t("ctx.add_bookmark"), "Add to bookmarks");
+        assert_eq!(en.t("tree.expand"), "Expand");
+        assert_eq!(en.t("tree.collapse"), "Collapse");
+        assert_eq!(en.t("menu.settings"), "Settings");
+        assert_eq!(en.t("settings.category.general"), "General");
+        assert_eq!(en.t("settings.single_instance"), "Single instance");
+        assert_eq!(
+            en.t("settings.single_instance_hint"),
+            "New launches open folders in the existing window. Turn this off to allow multiple windows."
+        );
+    }
+
+    #[test]
     fn russian_table_falls_back_to_english_for_a_missing_translation() {
         let i = I18n {
             lang: Language::Ru,
