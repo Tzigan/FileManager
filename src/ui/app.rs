@@ -761,6 +761,7 @@ impl FileManagerApp {
                 .id_salt("tab_strip_scroll")
                 .max_width(scroll_width)
                 .auto_shrink([false, true])
+                .content_margin(tab_strip_content_margin())
                 .scroll_source(tab_scroll_source())
                 .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                 .show(ui, |ui| {
@@ -1450,7 +1451,14 @@ impl eframe::App for FileManagerApp {
         self.handle_dropped_files(&ctx);
 
         egui::Panel::top("menu_bar").show(ui, |ui| self.menu_bar(ui));
-        egui::Panel::top("tab_bar").show(ui, |ui| self.tab_bar(&ctx, ui));
+        egui::Panel::top("tab_bar")
+            .frame(
+                egui::Frame::side_top_panel(ui.style()).inner_margin(egui::Margin::symmetric(
+                    style::FRAME_PADDING_X,
+                    0,
+                )),
+            )
+            .show(ui, |ui| self.tab_bar(&ctx, ui));
         egui::Panel::top("toolbar").show(ui, |ui| self.toolbar(&ctx, ui));
 
         egui::Panel::left("tree_panel")
@@ -1547,17 +1555,23 @@ fn tab_scroll_source() -> egui::scroll_area::ScrollSource {
     egui::scroll_area::ScrollSource::MOUSE_WHEEL
 }
 
+fn tab_strip_content_margin() -> egui::Margin {
+    egui::Margin::symmetric(style::FRAME_PADDING_X, 0)
+}
+
 fn configure_tab_scroll_style(style: &mut egui::Style) {
     // egui normally requires Shift for vertical wheel input in horizontal-only
     // areas. The tab strip is the one place where plain wheel maps horizontally.
     style.always_scroll_the_only_direction = true;
+    // The panel should hug the tab row without resizing the tabs or the plus button.
+    style.spacing.item_spacing.y = super::style::TAB_BAR_VERTICAL_SPACING;
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         breadcrumb_segments, configure_tab_scroll_style, dropped_paths, floating_dialog_viewport,
-        tab_scroll_source,
+        tab_scroll_source, tab_strip_content_margin,
     };
     use std::path::{Path, PathBuf};
 
@@ -1612,6 +1626,15 @@ mod tests {
         let mut style = egui::Style::default();
         configure_tab_scroll_style(&mut style);
         assert!(style.always_scroll_the_only_direction);
+        assert_eq!(
+            style.spacing.item_spacing.y,
+            super::style::TAB_BAR_VERTICAL_SPACING
+        );
+        let margin = tab_strip_content_margin();
+        assert_eq!(margin.left, super::style::FRAME_PADDING_X);
+        assert_eq!(margin.right, super::style::FRAME_PADDING_X);
+        assert_eq!(margin.top, 0);
+        assert_eq!(margin.bottom, 0);
     }
 
     #[test]

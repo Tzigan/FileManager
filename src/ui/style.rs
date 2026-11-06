@@ -6,6 +6,7 @@ pub(crate) const SPACE_SM: f32 = 8.0;
 pub(crate) const SPACE_MD: f32 = 12.0;
 pub(crate) const SPACE_LG: f32 = 16.0;
 pub(crate) const SPACE_EMPTY_STATE: f32 = 60.0;
+pub(crate) const TAB_BAR_VERTICAL_SPACING: f32 = 0.0;
 
 pub(crate) const RADIUS_ICON: f32 = 2.0;
 pub(crate) const RADIUS_ROW: f32 = 4.0;
