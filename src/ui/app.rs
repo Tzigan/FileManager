@@ -750,6 +750,8 @@ impl FileManagerApp {
             let mut act: Option<(&str, usize)> = None;
             let mut drop_dst = None;
             let mut drag_src = None;
+            let mut dragging_tab =
+                is_tab_dragging(self.tab_drag, self.tab_press, ui.ctx().pointer_latest_pos());
             let metas: Vec<(bool, String)> = self
                 .tabs
                 .iter()
@@ -787,12 +789,12 @@ impl FileManagerApp {
                         ui.allocate_exact_size(size, egui::Sense::click());
                     let x_rect =
                         egui::Rect::from_min_max(egui::pos2(rect.max.x - close_w, rect.min.y), rect.max);
-                    let over_x = !*pinned
-                        && ui
-                            .ctx()
-                            .pointer_latest_pos()
-                            .map(|p| x_rect.contains(p))
-                            .unwrap_or(false);
+                    let over_x = tab_close_button_hovered(
+                        dragging_tab,
+                        *pinned,
+                        x_rect,
+                        ui.ctx().pointer_latest_pos(),
+                    );
                     let visuals = ui.visuals();
                     let painter = ui.painter();
                     if i == self.active {
@@ -874,7 +876,7 @@ impl FileManagerApp {
                             ui.close();
                         }
                     });
-                    if resp.clicked() {
+                    if !dragging_tab && resp.clicked() {
                         let in_x = resp
                             .interact_pointer_pos()
                             .map(|p| x_rect.contains(p))
@@ -885,7 +887,7 @@ impl FileManagerApp {
                             act = Some(("switch", i));
                         }
                     }
-                    if resp.middle_clicked() && !*pinned {
+                    if !dragging_tab && resp.middle_clicked() && !*pinned {
                         act = Some(("close", i));
                     }
                     // Manual drag: pressed on this tab and moved past the threshold.
@@ -895,8 +897,9 @@ impl FileManagerApp {
                                 self.tab_press = Some((i, p));
                             }
                             if let Some((si, start)) = self.tab_press {
-                                if si == i && p.distance(start) > 5.0 {
+                                if si == i && p.distance(start) > TAB_DRAG_THRESHOLD {
                                     drag_src = Some(i);
+                                    dragging_tab = true;
                                 }
                             }
                         }
@@ -1555,6 +1558,26 @@ fn tab_scroll_source() -> egui::scroll_area::ScrollSource {
     egui::scroll_area::ScrollSource::MOUSE_WHEEL
 }
 
+const TAB_DRAG_THRESHOLD: f32 = 5.0;
+
+fn is_tab_dragging(
+    active_drag: Option<usize>,
+    press: Option<(usize, egui::Pos2)>,
+    pointer: Option<egui::Pos2>,
+) -> bool {
+    active_drag.is_some()
+        || matches!((press, pointer), (Some((_, start)), Some(pos)) if pos.distance(start) > TAB_DRAG_THRESHOLD)
+}
+
+fn tab_close_button_hovered(
+    dragging: bool,
+    pinned: bool,
+    close_rect: egui::Rect,
+    pointer: Option<egui::Pos2>,
+) -> bool {
+    !dragging && !pinned && pointer.is_some_and(|pos| close_rect.contains(pos))
+}
+
 fn tab_strip_content_margin() -> egui::Margin {
     egui::Margin::symmetric(style::FRAME_PADDING_X, 0)
 }
@@ -1571,7 +1594,7 @@ fn configure_tab_scroll_style(style: &mut egui::Style) {
 mod tests {
     use super::{
         breadcrumb_segments, configure_tab_scroll_style, dropped_paths, floating_dialog_viewport,
-        tab_scroll_source, tab_strip_content_margin,
+        is_tab_dragging, tab_close_button_hovered, tab_scroll_source, tab_strip_content_margin,
     };
     use std::path::{Path, PathBuf};
 
@@ -1635,6 +1658,21 @@ mod tests {
         assert_eq!(margin.right, super::style::FRAME_PADDING_X);
         assert_eq!(margin.top, 0);
         assert_eq!(margin.bottom, 0);
+    }
+
+    #[test]
+    fn dragging_over_another_tabs_close_control_does_not_activate_it() {
+        let close_rect =
+            egui::Rect::from_min_size(egui::pos2(20.0, 10.0), egui::vec2(18.0, 24.0));
+        let pointer = Some(close_rect.center());
+        assert!(tab_close_button_hovered(false, false, close_rect, pointer));
+        assert!(!tab_close_button_hovered(true, false, close_rect, pointer));
+        assert!(!tab_close_button_hovered(false, true, close_rect, pointer));
+
+        let press = Some((0, egui::pos2(10.0, 10.0)));
+        assert!(!is_tab_dragging(None, press, Some(egui::pos2(15.0, 10.0))));
+        assert!(is_tab_dragging(None, press, Some(egui::pos2(16.0, 10.0))));
+        assert!(is_tab_dragging(Some(0), None, None));
     }
 
     #[test]

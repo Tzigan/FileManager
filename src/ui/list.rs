@@ -58,6 +58,10 @@ fn column_separator_x(settings: &crate::core::settings::Settings, width: f32) ->
         .collect()
 }
 
+fn table_rows_content_margin() -> egui::Margin {
+    egui::Margin::symmetric(0, style::SPACE_SM as i8)
+}
+
 fn paint_column_separators(
     painter: &egui::Painter,
     row: egui::Rect,
@@ -206,6 +210,7 @@ impl FileManagerApp {
                 let mut drop_target = None;
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
+                    .content_margin(table_rows_content_margin())
                     .show_rows(ui, ROW_HEIGHT, rows.len(), |ui, range| {
                         for index in range {
                             match &rows[index] {
@@ -1012,6 +1017,15 @@ mod tests {
             ..all
         };
         assert!(column_separator_x(&no_optional_columns, 800.0).is_empty());
+    }
+
+    #[test]
+    fn table_rows_do_not_add_horizontal_scroll_margin_that_shifts_columns() {
+        let margin = table_rows_content_margin();
+        assert_eq!(margin.left, 0);
+        assert_eq!(margin.right, 0);
+        assert_eq!(margin.top, style::SPACE_SM as i8);
+        assert_eq!(margin.bottom, style::SPACE_SM as i8);
     }
 
     #[test]
