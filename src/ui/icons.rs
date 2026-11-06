@@ -139,7 +139,7 @@ fn paint_file_icon(painter: &Painter, rect: Rect, kind: FileIconKind, dark_mode:
         Stroke::new((scale * 0.035).max(0.7), accent),
     );
 
-    if scale >= 26.0 {
+    if should_paint_kind_mark(kind, scale) {
         paint_kind_mark(painter, page, kind, accent);
     } else {
         painter.line_segment(
@@ -150,6 +150,10 @@ fn paint_file_icon(painter: &Painter, rect: Rect, kind: FileIconKind, dark_mode:
             Stroke::new((scale * 0.07).max(1.0), accent),
         );
     }
+}
+
+fn should_paint_kind_mark(kind: FileIconKind, scale: f32) -> bool {
+    scale >= 26.0 || kind == FileIconKind::Executable
 }
 
 fn paint_kind_mark(painter: &Painter, page: Rect, kind: FileIconKind, color: Color32) {
@@ -380,7 +384,9 @@ fn palette(kind: FileIconKind) -> (Color32, Color32) {
 
 #[cfg(test)]
 mod tests {
-    use super::{FileIconKind, classify_extension, fitted_folder_rect};
+    use super::{
+        FileIconKind, classify_extension, fitted_folder_rect, should_paint_kind_mark,
+    };
     use egui::{Rect, pos2, vec2};
 
     #[test]
@@ -415,5 +421,12 @@ mod tests {
             assert!((rect.width() / rect.height() - ratio).abs() < f32::EPSILON * 8.0);
             assert_eq!(rect.center(), pos2(0.0, 0.0));
         }
+    }
+
+    #[test]
+    fn executable_icon_mark_is_drawn_at_table_and_list_sizes() {
+        assert!(should_paint_kind_mark(FileIconKind::Executable, 16.0));
+        assert!(!should_paint_kind_mark(FileIconKind::Generic, 16.0));
+        assert!(should_paint_kind_mark(FileIconKind::Generic, 26.0));
     }
 }
