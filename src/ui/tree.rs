@@ -70,6 +70,7 @@ impl crate::ui::FileManagerApp {
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
+                style::dense_vertical_spacing(ui.style_mut());
                 self.bookmark_section(ctx, ui);
                 ui.separator();
                 let heading = self.t("tree.this_pc").to_owned();

@@ -170,6 +170,7 @@ fn entry_at(entries: &[FileEntry], index: usize) -> Option<FileEntry> {
 impl FileManagerApp {
     /// Virtualized file list: view switcher + header + rows in the current mode.
     pub(crate) fn file_list(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
+        style::dense_vertical_spacing(ui.style_mut());
         ui.horizontal(|ui| {
             for (mode, key) in [
                 (ViewMode::Table, "view.table"),

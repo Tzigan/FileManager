@@ -26,6 +26,10 @@ pub(crate) fn configure(ctx: &Context) {
     ctx.all_styles_mut(configure_style);
 }
 
+pub(crate) fn dense_vertical_spacing(style: &mut Style) {
+    style.spacing.item_spacing.y = SPACE_XXS;
+}
+
 fn configure_style(style: &mut Style) {
     style.spacing.item_spacing = vec2(SPACE_SM, SPACE_SM);
     style.spacing.window_margin = Margin::same(SPACE_LG as i8);
@@ -88,5 +92,16 @@ mod tests {
             );
             assert_eq!(style.visuals.dark_mode, is_dark);
         }
+    }
+
+    #[test]
+    fn dense_layout_reduces_only_vertical_item_spacing() {
+        let mut style = Style::default();
+        style.spacing.item_spacing = vec2(SPACE_LG, SPACE_LG);
+
+        dense_vertical_spacing(&mut style);
+
+        assert_eq!(style.spacing.item_spacing.x, SPACE_LG);
+        assert_eq!(style.spacing.item_spacing.y, SPACE_XXS);
     }
 }
