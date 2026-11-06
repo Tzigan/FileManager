@@ -2,7 +2,7 @@
 mod windows;
 
 #[cfg(windows)]
-pub use self::windows::{acquire_single_instance, drives, format_local_time, free_space, get_clipboard_files, get_clipboard_text, install_context_menu, notify_already_running, open_recycle_bin, open_terminal, pipe_listen, pipe_send, recycle_bin, set_attributes, set_clipboard_files, shell_open, uninstall_context_menu, AcquireResult, SingleInstanceGuard};
+pub use self::windows::{acquire_single_instance, drives, format_local_time, free_space, get_clipboard_files, get_clipboard_text, install_context_menu, launch_updater, notify_already_running, open_recycle_bin, open_terminal, pipe_listen, pipe_send, prepare_update_archive, recycle_bin, set_attributes, set_clipboard_files, shell_open, signal_update_started, uninstall_context_menu, AcquireResult, SingleInstanceGuard};
 
 /// Stubs for non-Windows hosts so the crate still compiles for docs/tests.
 #[cfg(not(windows))]
@@ -60,8 +60,15 @@ mod stubs {
     pub fn shell_open(_p: &std::path::Path) -> std::io::Result<()> { Ok(()) }
     pub fn open_terminal(_p: &std::path::Path) -> std::io::Result<()> { Ok(()) }
     pub fn open_recycle_bin() -> std::io::Result<()> { Ok(()) }
+    pub fn prepare_update_archive(_archive: &std::path::Path, _size: u64, _sha256: &str) -> anyhow::Result<std::path::PathBuf> {
+        anyhow::bail!("automatic updates are supported only on Windows")
+    }
+    pub fn launch_updater(_stage: &std::path::Path, _target: &std::path::Path, _pid: u32) -> anyhow::Result<()> {
+        anyhow::bail!("automatic updates are supported only on Windows")
+    }
+    pub fn signal_update_started() -> anyhow::Result<()> { Ok(()) }
     pub fn set_attributes(_p: &std::path::Path, _r: bool, _h: bool) -> std::io::Result<()> { Ok(()) }
 }
 
 #[cfg(not(windows))]
-pub use stubs::{acquire_single_instance, drives, format_local_time, free_space, get_clipboard_files, get_clipboard_text, install_context_menu, notify_already_running, open_recycle_bin, open_terminal, pipe_listen, pipe_send, recycle_bin, set_attributes, set_clipboard_files, shell_open, uninstall_context_menu, AcquireResult, SingleInstanceGuard};
+pub use stubs::{acquire_single_instance, drives, format_local_time, free_space, get_clipboard_files, get_clipboard_text, install_context_menu, launch_updater, notify_already_running, open_recycle_bin, open_terminal, pipe_listen, pipe_send, prepare_update_archive, recycle_bin, set_attributes, set_clipboard_files, shell_open, signal_update_started, uninstall_context_menu, AcquireResult, SingleInstanceGuard};

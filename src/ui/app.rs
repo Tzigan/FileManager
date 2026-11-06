@@ -4,12 +4,15 @@ use std::sync::atomic::Ordering;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread;
 
+use anyhow::Context;
+
 use super::style;
 use crate::core::fs::{self, FileEntry, ReadDirError, SortKey};
 use crate::core::i18n::{I18n, Language};
 use crate::core::ops::{self, OpEvent, OpJob, OpReply};
 use crate::core::paths::AppDirs;
 use crate::core::settings::{SettingsStore, Theme, ViewMode};
+use crate::core::update::UpdateManifest;
 use crate::platform::{drives, install_context_menu, pipe_listen, uninstall_context_menu};
 use crate::ui::opsui::OpsUi;
 use crate::ui::tabs::{ListStatus, Tab};
@@ -31,8 +34,8 @@ pub(crate) enum WorkerMsg {
     /// A path forwarded by another instance / CLI — open in a new tab.
     OpenPath(PathBuf),
     /// A newer release exists on GitHub (version, exe URL).
-    UpdateFound { version: String, url: String },
-    /// The downloaded exe is ready to apply.
+    UpdateFound { manifest: UpdateManifest },
+    /// The verified update package is staged and ready for the separate updater.
     UpdateReady(PathBuf),
     /// The app is on the latest version (manual check).
     UpdateLatest,
@@ -49,8 +52,9 @@ pub struct FileManagerApp {
     show_settings: bool,
     settings_viewport_placed: bool,
     style_configured: bool,
+    update_startup_signaled: bool,
     /// Update offer: (version, exe URL).
-    pending_update: Option<(String, String)>,
+    pending_update: Option<UpdateManifest>,
     update_busy: bool,
     /// Update status/error text for the update window.
     update_err: Option<String>,
@@ -111,8 +115,7 @@ impl FileManagerApp {
                 if let Ok(r) = crate::core::update::check_latest() {
                     if crate::core::update::version_newer(env!("CARGO_PKG_VERSION"), &r.version) {
                         let _ = msg_tx.send(WorkerMsg::UpdateFound {
-                            version: r.version,
-                            url: r.url,
+                            manifest: r,
                         });
                         ctx.request_repaint();
                     }
@@ -171,6 +174,7 @@ impl FileManagerApp {
             show_settings: false,
             settings_viewport_placed: false,
             style_configured: false,
+            update_startup_signaled: false,
             pending_update: None,
             update_busy: false,
             update_err: None,
@@ -450,15 +454,29 @@ impl FileManagerApp {
                     self.tree.complete_children_load(path, result);
                 }
                 WorkerMsg::OpenPath(path) => self.open_path_in_new_tab(path, ctx),
-                WorkerMsg::UpdateFound { version, url } => {
-                    self.pending_update = Some((version, url));
+                WorkerMsg::UpdateFound { manifest } => {
+                    self.pending_update = Some(manifest);
                     self.update_err = None;
                     ctx.request_repaint();
                 }
-                WorkerMsg::UpdateReady(path) => {
+                WorkerMsg::UpdateReady(stage_dir) => {
                     self.update_busy = false;
-                    if let Err(e) = crate::core::update::apply_and_restart(&path) {
-                        self.update_err = Some(e.to_string());
+                    let launch_result = std::env::current_exe()
+                        .context("locate current FileManager executable")
+                        .and_then(|target| {
+                            crate::platform::launch_updater(
+                                &stage_dir,
+                                &target,
+                                std::process::id(),
+                            )
+                        });
+                    match launch_result {
+                        Ok(()) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+                        Err(e) => {
+                            let _ = std::fs::remove_dir_all(&stage_dir);
+                            self.update_err = Some(e.to_string());
+                            ctx.request_repaint();
+                        }
                     }
                 }
                 WorkerMsg::UpdateLatest => {
@@ -1200,8 +1218,13 @@ impl FileManagerApp {
         let ctx = ctx.clone();
         thread::spawn(move || {
             let msg = match crate::core::update::check_latest() {
-                Ok(r) if crate::core::update::version_newer(env!("CARGO_PKG_VERSION"), &r.version) => {
-                    WorkerMsg::UpdateFound { version: r.version, url: r.url }
+                Ok(manifest)
+                    if crate::core::update::version_newer(
+                        env!("CARGO_PKG_VERSION"),
+                        &manifest.version,
+                    ) =>
+                {
+                    WorkerMsg::UpdateFound { manifest }
                 }
                 Ok(_) => WorkerMsg::UpdateLatest,
                 Err(e) => WorkerMsg::UpdateFailed(e.to_string()),
@@ -1212,16 +1235,29 @@ impl FileManagerApp {
     }
 
     fn start_update_download(&mut self, ctx: &egui::Context) {
-        let Some((_, url)) = &self.pending_update else {
+        let Some(manifest) = self.pending_update.clone() else {
             return;
         };
         self.update_busy = true;
-        let url = url.clone();
+        self.update_err = None;
         let tx = self.msg_tx.clone();
         let ctx = ctx.clone();
         thread::spawn(move || {
-            let msg = match crate::core::update::download(&url) {
-                Ok(p) => WorkerMsg::UpdateReady(p),
+            let msg = match crate::core::update::download(&manifest) {
+                Ok(archive) => {
+                    let stage = crate::platform::prepare_update_archive(
+                        &archive,
+                        manifest.size,
+                        &manifest.sha256,
+                    );
+                    if let Err(e) = std::fs::remove_file(&archive) {
+                        tracing::warn!(path = %archive.display(), "failed to remove downloaded update archive: {e}");
+                    }
+                    match stage {
+                        Ok(stage_dir) => WorkerMsg::UpdateReady(stage_dir),
+                        Err(e) => WorkerMsg::UpdateFailed(e.to_string()),
+                    }
+                }
                 Err(e) => WorkerMsg::UpdateFailed(e.to_string()),
             };
             let _ = tx.send(msg);
@@ -1354,8 +1390,8 @@ impl FileManagerApp {
                         ui.label(self.t("update.downloading").to_owned());
                     });
                 }
-                if let Some((ver, _)) = &found {
-                    ui.label(self.t("update.found").replace("{v}", ver));
+                if let Some(manifest) = &found {
+                    ui.label(self.t("update.found").replace("{v}", &manifest.version));
                     ui.horizontal(|ui| {
                         if ui.add_enabled(!self.update_busy, egui::Button::new(self.t("update.now").to_owned())).clicked() {
                             self.start_update_download(ctx);
@@ -1448,7 +1484,12 @@ impl eframe::App for FileManagerApp {
             super::style::configure(&ctx);
             self.style_configured = true;
         }
-
+        if !self.update_startup_signaled {
+            self.update_startup_signaled = true;
+            if let Err(e) = crate::platform::signal_update_started() {
+                tracing::warn!("failed to signal successful update startup: {e}");
+            }
+        }
         self.drain_messages(&ctx);
         self.drain_ops_events(&ctx);
         self.handle_keys(&ctx);

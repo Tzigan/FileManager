@@ -7,6 +7,7 @@ mod shell;
 mod single_instance;
 mod space;
 mod time_fmt;
+mod update_support;
 
 pub use args_pipe::{listen as pipe_listen, send as pipe_send};
 pub use clipboard::{get_clipboard_files, get_clipboard_text, set_clipboard_files};
@@ -17,3 +18,4 @@ pub use shell::{open_recycle_bin, open_terminal, set_attributes, shell_open};
 pub use space::free_space;
 pub use single_instance::{acquire_single_instance, notify_already_running, AcquireResult, SingleInstanceGuard};
 pub use time_fmt::format_local_time;
+pub use update_support::{launch_updater, prepare_update_archive, signal_update_started};

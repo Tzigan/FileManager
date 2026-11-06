@@ -53,14 +53,44 @@ jobs:
 
       - name: Build
         if: steps.ver.outputs.tag != ''
-        run: cargo build --release --locked
+        run: cargo build --release --bins --locked
 
       - name: Package
         if: steps.ver.outputs.tag != ''
         shell: pwsh
         run: |
+          $tag = "${{ steps.ver.outputs.tag }}"
+          $version = $tag.TrimStart('v')
+          $archiveName = "FileManager-$tag-x64.zip"
+          $package = Join-Path $env:RUNNER_TEMP "filemanager-update-package"
           New-Item -ItemType Directory -Force dist | Out-Null
-          Copy-Item target\release\filemanager.exe "dist\FileManager-${{ steps.ver.outputs.tag }}-x64.exe"
+          New-Item -ItemType Directory -Force $package | Out-Null
+
+          # Keep the legacy exe asset so 0.6.x clients can migrate to the updater release.
+          Copy-Item target\release\filemanager.exe "dist\FileManager-$tag-x64.exe"
+          Copy-Item target\release\filemanager.exe (Join-Path $package "FileManager.exe")
+          Copy-Item target\release\FileManagerUpdater.exe (Join-Path $package "FileManagerUpdater.exe")
+
+          $dist = (Resolve-Path "dist").Path
+          $archivePath = Join-Path $dist $archiveName
+          $packageFiles = Get-ChildItem -Path $package -File | Select-Object -ExpandProperty FullName
+          Compress-Archive -Path $packageFiles -DestinationPath $archivePath -CompressionLevel Optimal
+
+          $sha256 = (Get-FileHash -Path $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
+          $size = (Get-Item -Path $archivePath).Length
+          $manifest = [ordered]@{
+            schema_version = 1
+            version = $version
+            archive_url = "https://github.com/${{ github.repository }}/releases/download/$tag/$archiveName"
+            sha256 = $sha256
+            size = $size
+          }
+          $json = $manifest | ConvertTo-Json -Depth 4
+          [System.IO.File]::WriteAllText(
+            (Join-Path $dist "manifest.json"),
+            $json,
+            [System.Text.UTF8Encoding]::new($false)
+          )
 
       # The tag is created only after a successful build, so a failed run
       # never leaves a tag that would block re-publishing.
