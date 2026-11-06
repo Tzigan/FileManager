@@ -1,18 +1,26 @@
 use std::env;
 use std::fs::{self, File};
 use std::io::Read;
+use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, bail};
-use windows::Win32::Foundation::{CloseHandle, ERROR_INVALID_PARAMETER, NTSTATUS, WAIT_OBJECT_0};
+use windows::Win32::Foundation::{
+    CloseHandle, ERROR_INVALID_PARAMETER, HANDLE, HWND, NTSTATUS, WAIT_OBJECT_0,
+};
 use windows::Win32::Security::Cryptography::{
     BCRYPT_ALG_HANDLE, BCRYPT_HANDLE, BCRYPT_HASH_HANDLE, BCRYPT_OBJECT_LENGTH,
     BCRYPT_OPEN_ALGORITHM_PROVIDER_FLAGS, BCRYPT_SHA256_ALGORITHM, BCryptCloseAlgorithmProvider,
     BCryptCreateHash, BCryptDestroyHash, BCryptFinishHash, BCryptGetProperty, BCryptHashData,
     BCryptOpenAlgorithmProvider,
+};
+use windows::Win32::Security::WinTrust::{
+    WINTRUST_ACTION_GENERIC_VERIFY_V2, WINTRUST_DATA, WINTRUST_FILE_INFO, WTD_CHOICE_FILE,
+    WTD_REVOCATION_CHECK_NONE, WTD_REVOKE_NONE, WTD_STATEACTION_CLOSE, WTD_STATEACTION_VERIFY,
+    WTD_UI_NONE, WTD_UICONTEXT_EXECUTE, WinVerifyTrust,
 };
 use windows::Win32::System::Threading::{
     INFINITE, OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
@@ -58,6 +66,7 @@ pub fn prepare_update_archive(
             );
         }
         validate_stage_files(&stage)?;
+        verify_stage_signatures(&stage)?;
         Ok::<_, anyhow::Error>(())
     })();
 
@@ -211,6 +220,65 @@ pub(crate) fn validate_stage_files(stage: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+pub(crate) fn verify_stage_signatures(stage: &Path) -> anyhow::Result<()> {
+    for name in PACKAGE_FILES {
+        verify_authenticode(&stage.join(name))?;
+    }
+    Ok(())
+}
+
+fn verify_authenticode(path: &Path) -> anyhow::Result<()> {
+    if !path.is_file() {
+        bail!("signed update executable is missing: {}", path.display());
+    }
+    let path_wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    let mut file_info = WINTRUST_FILE_INFO::default();
+    file_info.cbStruct = std::mem::size_of::<WINTRUST_FILE_INFO>() as u32;
+    file_info.pcwszFilePath = windows::core::PCWSTR(path_wide.as_ptr());
+    file_info.hFile = HANDLE::default();
+    file_info.pgKnownSubject = std::ptr::null_mut();
+
+    let mut trust_data = WINTRUST_DATA::default();
+    trust_data.cbStruct = std::mem::size_of::<WINTRUST_DATA>() as u32;
+    trust_data.dwUIChoice = WTD_UI_NONE;
+    trust_data.fdwRevocationChecks = WTD_REVOKE_NONE;
+    trust_data.dwUnionChoice = WTD_CHOICE_FILE;
+    trust_data.Anonymous.pFile = &mut file_info;
+    trust_data.dwStateAction = WTD_STATEACTION_VERIFY;
+    trust_data.dwProvFlags = WTD_REVOCATION_CHECK_NONE;
+    trust_data.dwUIContext = WTD_UICONTEXT_EXECUTE;
+
+    let mut action = WINTRUST_ACTION_GENERIC_VERIFY_V2;
+    let status = unsafe {
+        WinVerifyTrust(
+            HWND::default(),
+            &mut action,
+            (&mut trust_data as *mut WINTRUST_DATA).cast(),
+        )
+    };
+    trust_data.dwStateAction = WTD_STATEACTION_CLOSE;
+    unsafe {
+        let _ = WinVerifyTrust(
+            HWND::default(),
+            &mut action,
+            (&mut trust_data as *mut WINTRUST_DATA).cast(),
+        );
+    }
+    if status != 0 {
+        bail!(
+            "Authenticode verification failed for {} (0x{:08x})",
+            path.display(),
+            status as u32
+        );
+    }
+    Ok(())
+}
+
 fn create_stage_directory() -> anyhow::Result<PathBuf> {
     let id = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
     let path = env::temp_dir().join(format!("{STAGE_PREFIX}{}{id}", std::process::id()));
@@ -360,5 +428,17 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn authenticode_verification_rejects_an_unsigned_file() {
+        let id = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = env::temp_dir().join(format!("filemanager-unsigned-{id}.exe"));
+        fs::write(&path, b"not a signed executable").unwrap();
+        assert!(verify_authenticode(&path).is_err());
+        fs::remove_file(path).unwrap();
     }
 }

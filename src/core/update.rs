@@ -24,6 +24,8 @@ pub struct UpdateManifest {
     pub size: u64,
     #[serde(default)]
     pub minimum_supported_version: Option<String>,
+    /// Reserved for a detached manifest signature; executable Authenticode
+    /// signatures are verified after archive extraction.
     #[serde(default)]
     pub signature: Option<String>,
 }
@@ -56,7 +58,7 @@ impl UpdateManifest {
             bail!("invalid minimum supported version: {minimum}");
         }
         if self.signature.is_some() {
-            bail!("signed update manifests are not supported by this unsigned build");
+            bail!("detached manifest signatures are not supported");
         }
         Ok(())
     }

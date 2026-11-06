@@ -9,7 +9,7 @@ use anyhow::{Context, bail};
 
 use super::update_support::{
     UPDATE_STAGE_ENV, UPDATE_STARTED_MARKER, UPDATE_UPDATER_PID_ENV, validate_stage_files,
-    wait_for_process_exit,
+    verify_stage_signatures, wait_for_process_exit,
 };
 
 const BACKUP_PREFIX: &str = ".filemanager-update-backup-";
@@ -50,6 +50,10 @@ pub fn run() -> anyhow::Result<()> {
     // Never rename the main executable until the process that loaded it is gone.
     wait_for_process_exit(args.process_id)?;
     if let Err(error) = validate_stage_files(&args.stage_dir) {
+        relaunch_previous(&args.target_exe)?;
+        return Err(error);
+    }
+    if let Err(error) = verify_stage_signatures(&args.stage_dir) {
         relaunch_previous(&args.target_exe)?;
         return Err(error);
     }

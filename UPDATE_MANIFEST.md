@@ -19,10 +19,18 @@ values below are placeholders:
 ```
 
 `minimum_supported_version` is optional. If present, clients older than that
-version refuse the automatic update. `signature` is also reserved but omitted:
-the current release pipeline does not sign executables. A manifest containing a
-signature is rejected until signature verification is configured.
+version refuse the automatic update. The release workflow signs both executables
+with Authenticode; the updater verifies both signatures before installation.
+The optional `signature` field is reserved for a detached manifest signature
+and is currently omitted.
+
+The workflow reads the PFX and password from the GitHub Actions secrets
+`WINDOWS_SIGNING_PFX_BASE64` and `WINDOWS_SIGNING_PFX_PASSWORD`. The published
+`v0.6.6` binaries predate this signing step; the next release will be signed.
 
 The archive must contain exactly `FileManager.exe` and
-`FileManagerUpdater.exe` at its root. The release workflow also publishes the
-legacy standalone `.exe` asset so versions using the old updater can migrate.
+`FileManagerUpdater.exe` at its root. `SHA256SUMS.txt` is published beside the
+archive with hashes computed for both executables before compression, the legacy
+standalone `.exe`, and the final archive. Keeping these checksums outside the
+ZIP preserves compatibility with the updater in v0.6.6. The release workflow
+also publishes the legacy standalone `.exe` asset so older clients can migrate.

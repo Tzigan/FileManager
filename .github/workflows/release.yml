@@ -55,6 +55,39 @@ jobs:
         if: steps.ver.outputs.tag != ''
         run: cargo build --release --bins --locked
 
+      - name: Sign executables
+        if: steps.ver.outputs.tag != ''
+        shell: pwsh
+        env:
+          SIGNING_PFX_BASE64: ${{ secrets.WINDOWS_SIGNING_PFX_BASE64 }}
+          SIGNING_PFX_PASSWORD: ${{ secrets.WINDOWS_SIGNING_PFX_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:SIGNING_PFX_BASE64)) {
+            throw "Set the WINDOWS_SIGNING_PFX_BASE64 GitHub Actions secret."
+          }
+          if ([string]::IsNullOrWhiteSpace($env:SIGNING_PFX_PASSWORD)) {
+            throw "Set the WINDOWS_SIGNING_PFX_PASSWORD GitHub Actions secret."
+          }
+
+          $pfxPath = Join-Path $env:RUNNER_TEMP "filemanager-signing.pfx"
+          $pfxBytes = [Convert]::FromBase64String($env:SIGNING_PFX_BASE64)
+          [System.IO.File]::WriteAllBytes($pfxPath, $pfxBytes)
+
+          $sdkRoot = Join-Path ([Environment]::GetFolderPath("ProgramFilesX86")) "Windows Kits\10\bin"
+          $signtool = Get-ChildItem -Path (Join-Path $sdkRoot "*\x64\signtool.exe") |
+            Sort-Object { [version]$_.Directory.Parent.Name } -Descending |
+            Select-Object -First 1
+          if ($null -eq $signtool) {
+            throw "Windows SDK signtool.exe was not found."
+          }
+
+          foreach ($exe in @("target\release\filemanager.exe", "target\release\FileManagerUpdater.exe")) {
+            & $signtool.FullName sign /f $pfxPath /p $env:SIGNING_PFX_PASSWORD /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /v $exe
+            if ($LASTEXITCODE -ne 0) { throw "Authenticode signing failed for $exe." }
+            & $signtool.FullName verify /pa /all /v $exe
+            if ($LASTEXITCODE -ne 0) { throw "Authenticode verification failed for $exe." }
+          }
+
       - name: Package
         if: steps.ver.outputs.tag != ''
         shell: pwsh
@@ -72,17 +105,35 @@ jobs:
           Copy-Item target\release\FileManagerUpdater.exe (Join-Path $package "FileManagerUpdater.exe")
 
           $dist = (Resolve-Path "dist").Path
+          # Record each executable's hash before adding it to the update archive.
+          $legacyExeName = "FileManager-$tag-x64.exe"
+          $legacySha256 = (Get-FileHash -Path (Join-Path $dist $legacyExeName) -Algorithm SHA256).Hash.ToLowerInvariant()
+          $appSha256 = (Get-FileHash -Path (Join-Path $package "FileManager.exe") -Algorithm SHA256).Hash.ToLowerInvariant()
+          $updaterSha256 = (Get-FileHash -Path (Join-Path $package "FileManagerUpdater.exe") -Algorithm SHA256).Hash.ToLowerInvariant()
+
           $archivePath = Join-Path $dist $archiveName
           $packageFiles = Get-ChildItem -Path $package -File | Select-Object -ExpandProperty FullName
           Compress-Archive -Path $packageFiles -DestinationPath $archivePath -CompressionLevel Optimal
 
-          $sha256 = (Get-FileHash -Path $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
+          $archiveSha256 = (Get-FileHash -Path $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
           $size = (Get-Item -Path $archivePath).Length
+          $checksums = @(
+            "$appSha256  FileManager.exe"
+            "$updaterSha256  FileManagerUpdater.exe"
+            "$legacySha256  $legacyExeName"
+            "$archiveSha256  $archiveName"
+          )
+          [System.IO.File]::WriteAllLines(
+            (Join-Path $dist "SHA256SUMS.txt"),
+            $checksums,
+            [System.Text.Encoding]::ASCII
+          )
+
           $manifest = [ordered]@{
             schema_version = 1
             version = $version
             archive_url = "https://github.com/${{ github.repository }}/releases/download/$tag/$archiveName"
-            sha256 = $sha256
+            sha256 = $archiveSha256
             size = $size
           }
           $json = $manifest | ConvertTo-Json -Depth 4
@@ -133,3 +184,12 @@ jobs:
           tag_name: ${{ steps.ver.outputs.tag }}
           files: dist/*
           body_path: CHANGELOG_REL.md
+
+      - name: Remove signing certificate
+        if: always()
+        shell: pwsh
+        run: |
+          $pfxPath = Join-Path $env:RUNNER_TEMP "filemanager-signing.pfx"
+          if (Test-Path -LiteralPath $pfxPath) {
+            Remove-Item -LiteralPath $pfxPath -Force
+          }
