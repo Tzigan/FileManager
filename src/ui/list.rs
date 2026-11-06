@@ -2,6 +2,7 @@ use crate::core::format::format_size;
 use crate::core::fs::{FileEntry, SortKey};
 use crate::core::settings::ViewMode;
 use crate::platform::format_local_time;
+use crate::ui::icons;
 use crate::ui::style;
 use crate::ui::FileManagerApp;
 
@@ -457,7 +458,17 @@ impl FileManagerApp {
             );
         }
 
-        paint_icon(painter, rect, entry.is_dir);
+        let icon_rect = egui::Rect::from_center_size(
+            rect.left_center() + egui::vec2(ICON_WIDTH / 2.0, 0.0),
+            egui::vec2(18.0, 16.0),
+        );
+        icons::paint_entry_icon(
+            painter,
+            icon_rect,
+            entry.is_dir,
+            entry.extension.as_deref(),
+            ui.visuals().dark_mode,
+        );
 
         let font = egui::TextStyle::Body.resolve(ui.style());
         let visuals = ui.visuals();
@@ -571,7 +582,17 @@ impl FileManagerApp {
                 egui::StrokeKind::Inside,
             );
         }
-        paint_icon(painter, rect, entry.is_dir);
+        let icon_rect = egui::Rect::from_center_size(
+            rect.left_center() + egui::vec2(ICON_WIDTH / 2.0, 0.0),
+            egui::vec2(18.0, 16.0),
+        );
+        icons::paint_entry_icon(
+            painter,
+            icon_rect,
+            entry.is_dir,
+            entry.extension.as_deref(),
+            ui.visuals().dark_mode,
+        );
         let font = egui::TextStyle::Body.resolve(ui.style());
         painter.text(
             egui::pos2(rect.min.x + ICON_WIDTH, rect.center().y),
@@ -627,13 +648,16 @@ impl FileManagerApp {
                 egui::StrokeKind::Inside,
             );
         }
-        let icon = if entry.is_dir { "📁" } else { "📄" };
-        painter.text(
-            egui::pos2(rect.center().x, rect.min.y + 20.0),
-            egui::Align2::CENTER_CENTER,
-            icon,
-            egui::TextStyle::Heading.resolve(ui.style()),
-            ui.visuals().text_color(),
+        let icon_rect = egui::Rect::from_center_size(
+            egui::pos2(rect.center().x, rect.min.y + 23.0),
+            egui::vec2(38.0, 40.0),
+        );
+        icons::paint_entry_icon(
+            painter,
+            icon_rect,
+            entry.is_dir,
+            entry.extension.as_deref(),
+            ui.visuals().dark_mode,
         );
         let font = egui::TextStyle::Body.resolve(ui.style());
         painter.with_clip_rect(rect.shrink(4.0)).text(
@@ -782,30 +806,6 @@ impl FileManagerApp {
             index,
             mods.ctrl,
             mods.shift,
-        );
-    }
-}
-
-fn paint_icon(painter: &egui::Painter, row: egui::Rect, is_dir: bool) {
-    let icon = egui::Rect::from_center_size(
-        row.left_center() + egui::vec2(ICON_WIDTH / 2.0, 0.0),
-        egui::vec2(17.0, 15.0),
-    );
-    if is_dir {
-        let back = egui::Color32::from_rgb(226, 152, 52);
-        let front = egui::Color32::from_rgb(255, 199, 90);
-        let tab = egui::Rect::from_min_max(icon.min, egui::pos2(icon.min.x + 7.0, icon.min.y + 4.0));
-        let body = egui::Rect::from_min_max(egui::pos2(icon.min.x, icon.min.y + 4.0), icon.max);
-        painter.rect_filled(tab, style::RADIUS_ICON, back);
-        painter.rect_filled(body, style::RADIUS_ICON, front);
-    } else {
-        let doc = icon.shrink(1.0);
-        painter.rect_filled(doc, style::RADIUS_ICON, egui::Color32::from_rgb(190, 195, 205));
-        painter.rect_stroke(
-            doc,
-            style::RADIUS_ICON,
-            egui::Stroke::new(1.0, egui::Color32::from_rgb(130, 135, 150)),
-            egui::StrokeKind::Inside,
         );
     }
 }

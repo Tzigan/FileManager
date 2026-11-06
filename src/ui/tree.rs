@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use crate::ui::icons;
 use crate::ui::style;
 
 /// Lazy folder tree shown in the left panel.
@@ -144,8 +145,8 @@ impl crate::ui::FileManagerApp {
             } else {
                 ui.add_space(style::TREE_DISCLOSURE_SIZE);
             }
-            paint_tree_icon(ui, depth == 0, expanded, path == self.tabs[self.active].path);
             let is_current = path == self.tabs[self.active].path.as_path();
+            paint_tree_icon(ui, depth == 0, is_current);
             let resp = ui.selectable_label(is_current, name);
             if resp.clicked() {
                 self.navigate(self.active, path.to_path_buf(), ctx);
@@ -308,7 +309,7 @@ fn tree_disclosure_button(ui: &mut egui::Ui, expanded: bool) -> bool {
 }
 
 /// Paints folder/drive icons in vector form instead of relying on emoji fonts.
-fn paint_tree_icon(ui: &mut egui::Ui, is_drive: bool, expanded: bool, current: bool) {
+fn paint_tree_icon(ui: &mut egui::Ui, is_drive: bool, current: bool) {
     let (rect, _) = ui.allocate_exact_size(
         egui::vec2(style::TREE_ICON_WIDTH, style::TREE_ICON_HEIGHT),
         egui::Sense::hover(),
@@ -338,22 +339,5 @@ fn paint_tree_icon(ui: &mut egui::Ui, is_drive: bool, expanded: bool, current: b
         return;
     }
 
-    let back = egui::Color32::from_rgb(226, 152, 52);
-    let front = if current || expanded {
-        egui::Color32::from_rgb(255, 207, 112)
-    } else {
-        egui::Color32::from_rgb(245, 188, 82)
-    };
-    let left = rect.left() + 2.0;
-    let top = rect.top() + 3.0;
-    let tab = egui::Rect::from_min_max(
-        egui::pos2(left, top),
-        egui::pos2(left + 8.0, top + 5.0),
-    );
-    let body = egui::Rect::from_min_max(
-        egui::pos2(left, top + 4.0),
-        egui::pos2(rect.right() - 2.0, rect.bottom() - 2.0),
-    );
-    painter.rect_filled(tab, style::RADIUS_ICON_FINE, back);
-    painter.rect_filled(body, style::RADIUS_ICON_FINE, front);
+    icons::paint_folder_icon(painter, rect);
 }

@@ -1,4 +1,5 @@
 mod app;
+mod icons;
 mod list;
 mod opsui;
 mod props;

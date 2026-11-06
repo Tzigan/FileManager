@@ -753,10 +753,7 @@ impl FileManagerApp {
             let metas: Vec<(bool, String)> = self
                 .tabs
                 .iter()
-                .map(|t| {
-                    let title = if t.pinned { format!("📌 {}", t.title()) } else { t.title() };
-                    (t.pinned, title)
-                })
+                .map(|t| (t.pinned, t.title()))
                 .collect();
 
             let scroll_width = (ui.available_width() - 30.0).max(1.0);
@@ -780,16 +777,15 @@ impl FileManagerApp {
                         ui.visuals().text_color(),
                     );
                     // The × lives inside the tab: right-side strip of the same rect.
-                    let x_w = if *pinned { 0.0 } else { 18.0 };
-                    let size = galley.size() + egui::vec2(14.0 + x_w, 6.0);
+                    let pin_w = if *pinned { 16.0 } else { 0.0 };
+                    let close_w = if *pinned { 0.0 } else { 18.0 };
+                    let size = galley.size() + egui::vec2(14.0 + pin_w + close_w, 6.0);
                     // click (not click_and_drag): a focusable widget would keep keyboard
                     // focus and kill every global shortcut after a tab click.
                     let (rect, resp) =
                         ui.allocate_exact_size(size, egui::Sense::click());
-                    let x_rect = egui::Rect::from_min_max(
-                        egui::pos2(rect.max.x - x_w, rect.min.y),
-                        rect.max,
-                    );
+                    let x_rect =
+                        egui::Rect::from_min_max(egui::pos2(rect.max.x - close_w, rect.min.y), rect.max);
                     let over_x = !*pinned
                         && ui
                             .ctx()
@@ -808,11 +804,23 @@ impl FileManagerApp {
                     } else {
                         visuals.text_color()
                     };
+                    let text_left = rect.left() + 7.0 + pin_w;
+                    let text_right = rect.right() - 7.0 - close_w;
                     painter.galley(
-                        rect.center() - galley.size() / 2.0 - egui::vec2(x_w / 2.0, 0.0),
+                        egui::pos2(
+                            (text_left + text_right - galley.size().x) * 0.5,
+                            rect.center().y - galley.size().y * 0.5,
+                        ),
                         galley,
                         color,
                     );
+                    if *pinned {
+                        let pin_rect = egui::Rect::from_min_size(
+                            egui::pos2(rect.left() + 4.0, rect.center().y - 6.0),
+                            egui::vec2(12.0, 12.0),
+                        );
+                        icon_pin(painter, pin_rect, color);
+                    }
                     if !*pinned {
                         if over_x {
                             painter.rect_filled(
@@ -826,12 +834,20 @@ impl FileManagerApp {
                         } else {
                             visuals.weak_text_color()
                         };
-                        painter.text(
-                            x_rect.center(),
-                            egui::Align2::CENTER_CENTER,
-                            "×",
-                            egui::TextStyle::Button.resolve(ui.style()),
-                            x_color,
+                        let cross = 4.0;
+                        painter.line_segment(
+                            [
+                                x_rect.center() + egui::vec2(-cross, -cross),
+                                x_rect.center() + egui::vec2(cross, cross),
+                            ],
+                            egui::Stroke::new(1.4, x_color),
+                        );
+                        painter.line_segment(
+                            [
+                                x_rect.center() + egui::vec2(-cross, cross),
+                                x_rect.center() + egui::vec2(cross, -cross),
+                            ],
+                            egui::Stroke::new(1.4, x_color),
                         );
                     }
 
@@ -1652,6 +1668,23 @@ fn icon_button(
     let icon_inset = (button_size - style::TOOLBAR_ICON_SIZE) * 0.5;
     draw(painter, rect.shrink(icon_inset), color);
     resp
+}
+
+fn icon_pin(painter: &egui::Painter, rect: egui::Rect, color: egui::Color32) {
+    let x = rect.center().x;
+    let head = egui::pos2(x, rect.top() + 3.0);
+    painter.circle_filled(head, 2.2, color);
+    painter.line_segment(
+        [egui::pos2(x, rect.top() + 5.0), egui::pos2(x, rect.bottom() - 1.0)],
+        egui::Stroke::new(1.3, color),
+    );
+    painter.line_segment(
+        [
+            egui::pos2(x - 3.0, rect.top() + 7.0),
+            egui::pos2(x + 3.0, rect.top() + 7.0),
+        ],
+        egui::Stroke::new(1.3, color),
+    );
 }
 
 /// Arrow glyph: `dir` is the tip direction (unit axis vector).
