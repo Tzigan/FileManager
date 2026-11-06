@@ -30,6 +30,25 @@ impl TreeState {
             self.expanded.insert(ancestor.to_path_buf());
         }
     }
+
+    /// Starts at most one lazy child request for an expanded, uncached node.
+    pub(crate) fn begin_children_load(&mut self, path: &Path) -> bool {
+        if !self.expanded.contains(path)
+            || self.children.contains_key(path)
+            || self.pending.contains(path)
+        {
+            return false;
+        }
+        self.pending.insert(path.to_path_buf());
+        true
+    }
+
+    /// Settles a lazy request. Failed loads are cached as empty so the UI does
+    /// not spin or issue the same failing request on every frame.
+    pub(crate) fn complete_children_load(&mut self, path: PathBuf, result: std::io::Result<Vec<PathBuf>>) {
+        self.pending.remove(&path);
+        self.children.insert(path, result.unwrap_or_default());
+    }
 }
 
 impl crate::ui::FileManagerApp {
@@ -131,9 +150,8 @@ impl crate::ui::FileManagerApp {
                     }
                 }
                 None => {
-                    // Expanded but children not loaded yet — request them.
-                    if !loading {
-                        self.tree.pending.insert(path.to_path_buf());
+                    // Expanded but children not loaded yet - request them.
+                    if self.tree.begin_children_load(path) {
                         let _ = self.tree_req.send(path.to_path_buf());
                     }
                 }
@@ -161,5 +179,40 @@ mod tests {
         assert!(t.expanded.contains(Path::new("C:\\a")));
         assert!(t.expanded.contains(Path::new("C:\\")));
         assert!(!t.expanded.contains(Path::new("C:\\a\\b\\c")));
+    }
+
+    #[test]
+    fn lazy_child_load_is_requested_once_until_it_is_settled() {
+        let root = PathBuf::from("C:\\root");
+        let mut tree = TreeState::new(vec![root.clone()]);
+        assert!(!tree.begin_children_load(&root));
+
+        tree.expanded.insert(root.clone());
+        assert!(tree.begin_children_load(&root));
+        assert!(tree.pending.contains(&root));
+        assert!(!tree.begin_children_load(&root));
+
+        tree.complete_children_load(
+            root.clone(),
+            Ok(vec![root.join("a"), root.join("b")]),
+        );
+        assert!(!tree.pending.contains(&root));
+        assert_eq!(tree.children.get(&root).unwrap().len(), 2);
+        assert!(!tree.begin_children_load(&root));
+    }
+
+    #[test]
+    fn failed_tree_load_is_settled_as_empty_instead_of_retried_forever() {
+        let root = PathBuf::from("C:\\inaccessible");
+        let mut tree = TreeState::new(vec![root.clone()]);
+        tree.expanded.insert(root.clone());
+        assert!(tree.begin_children_load(&root));
+        tree.complete_children_load(
+            root.clone(),
+            Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied")),
+        );
+        assert!(!tree.pending.contains(&root));
+        assert_eq!(tree.children.get(&root), Some(&Vec::new()));
+        assert!(!tree.begin_children_load(&root));
     }
 }

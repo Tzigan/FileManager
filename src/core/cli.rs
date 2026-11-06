@@ -34,9 +34,17 @@ pub fn parse_args(args: &[String]) -> (Option<PathBuf>, Option<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn s(v: &[&str]) -> Vec<String> {
         v.iter().map(|x| x.to_string()).collect()
+    }
+
+    fn temp_dir() -> PathBuf {
+        let id = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let dir = std::env::temp_dir().join(format!("File Manager CLI {id}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
     }
 
     #[test]
@@ -63,5 +71,33 @@ mod tests {
     fn nonexistent_and_flags_ignored() {
         let (path, sel) = parse_args(&s(&["--bogus", "Z:\\no\\such\\dir"]));
         assert!(path.is_none() && sel.is_none());
+    }
+
+    #[test]
+    fn flags_preserve_paths_with_spaces_and_select_the_requested_file() {
+        let dir = temp_dir();
+        let file = dir.join("selected file.txt");
+        std::fs::write(&file, b"fixture").unwrap();
+
+        let folder_arg = dir.to_string_lossy().into_owned();
+        let (folder, selected) = parse_args(&["--folder".into(), folder_arg.clone()]);
+        assert_eq!(folder, Some(dir.clone()));
+        assert_eq!(selected, None);
+
+        let file_arg = file.to_string_lossy().into_owned();
+        let (parent, selected) = parse_args(&["--select".into(), file_arg]);
+        assert_eq!(parent, Some(dir.clone()));
+        assert_eq!(selected.as_deref(), Some("selected file.txt"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn unknown_or_incomplete_flags_do_not_hide_later_valid_paths() {
+        let dir = temp_dir();
+        let arg = dir.to_string_lossy().into_owned();
+        let (path, selected) = parse_args(&["--unknown".into(), arg.clone(), "--folder".into()]);
+        assert_eq!(path, Some(dir.clone()));
+        assert_eq!(selected, None);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

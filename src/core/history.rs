@@ -75,4 +75,13 @@ mod tests {
         assert!(!h.can_forward());
         assert_eq!(h.back(p("x")), Some(p("a")));
     }
+
+    #[test]
+    fn consecutive_navigation_to_same_path_does_not_create_duplicate_back_entries() {
+        let mut h = History::default();
+        h.push(p("a"));
+        h.push(p("a"));
+        assert_eq!(h.back(p("b")), Some(p("a")));
+        assert!(!h.can_back());
+    }
 }

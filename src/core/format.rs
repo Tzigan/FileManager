@@ -62,6 +62,7 @@ mod tests {
         assert_eq!(format_size(5 * 1024 * 1024), "5.0 MB");
         assert_eq!(format_size(3 * 1024 * 1024 * 1024), "3.0 GB");
         assert_eq!(format_size(120 * 1024 * 1024), "120 MB");
+        assert!(format_size(u64::MAX).ends_with("TB"));
     }
 
     #[test]
@@ -71,5 +72,6 @@ mod tests {
         assert_eq!(format_unix_utc(951_827_640), "2000-02-29 12:34");
         // 2026-11-04 00:00 UTC = 1793750400
         assert_eq!(format_unix_utc(1_793_750_400), "2026-11-04 00:00");
+        assert_eq!(format_unix_utc(86_399), "1970-01-01 23:59");
     }
 }

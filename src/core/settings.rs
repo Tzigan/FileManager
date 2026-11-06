@@ -116,6 +116,15 @@ impl SettingsStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_config() -> PathBuf {
+        let n = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("filemanager-settings-{n}"))
+    }
 
     #[test]
     fn defaults_are_safe() {
@@ -135,6 +144,74 @@ mod tests {
         assert_eq!(back.tabs, s.tabs);
         assert_eq!(back.bookmarks, s.bookmarks);
         assert_eq!(back.language, s.language);
+    }
+
+    #[test]
+    fn settings_store_persists_user_preferences_and_open_tabs() {
+        let dir = temp_config();
+        let mut store = SettingsStore::load(&dir);
+        store.settings.tabs = vec![PathBuf::from("C:\\work"), PathBuf::from("D:\\data")];
+        store.settings.active_tab = 1;
+        store.settings.pinned_tabs = vec![PathBuf::from("C:\\work")];
+        store.settings.bookmarks = vec![PathBuf::from("D:\\docs")];
+        store.settings.language = Language::En;
+        store.settings.theme = Theme::Light;
+        store.settings.view_mode = ViewMode::Grid;
+        store.settings.col_size = false;
+        store.settings.col_type = true;
+        store.settings.col_modified = false;
+        store.settings.group_by_type = true;
+        store.settings.single_instance = false;
+        store.save().unwrap();
+
+        let loaded = SettingsStore::load(&dir);
+        assert_eq!(loaded.settings.tabs, store.settings.tabs);
+        assert_eq!(loaded.settings.active_tab, 1);
+        assert_eq!(loaded.settings.pinned_tabs, vec![PathBuf::from("C:\\work")]);
+        assert_eq!(loaded.settings.bookmarks, vec![PathBuf::from("D:\\docs")]);
+        assert_eq!(loaded.settings.language, Language::En);
+        assert_eq!(loaded.settings.theme, Theme::Light);
+        assert_eq!(loaded.settings.view_mode, ViewMode::Grid);
+        assert!(!loaded.settings.col_size);
+        assert!(loaded.settings.col_type);
+        assert!(!loaded.settings.col_modified);
+        assert!(loaded.settings.group_by_type);
+        assert!(!loaded.settings.single_instance);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn legacy_settings_keep_existing_values_and_default_new_preferences() {
+        let dir = temp_config();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("settings.json"),
+            r#"{"tabs":["C:\\work"],"active_tab":0,"bookmarks":["D:\\docs"]}"#,
+        )
+        .unwrap();
+
+        let loaded = SettingsStore::load(&dir);
+        assert_eq!(loaded.settings.tabs, vec![PathBuf::from("C:\\work")]);
+        assert_eq!(loaded.settings.bookmarks, vec![PathBuf::from("D:\\docs")]);
+        assert_eq!(loaded.settings.view_mode, ViewMode::Table);
+        assert!(loaded.settings.col_size && loaded.settings.col_type && loaded.settings.col_modified);
+        assert!(!loaded.settings.group_by_type);
+        assert!(loaded.settings.single_instance);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn malformed_settings_fall_back_to_safe_defaults() {
+        let dir = temp_config();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("settings.json"), "{ definitely not json").unwrap();
+
+        let loaded = SettingsStore::load(&dir);
+        assert!(loaded.settings.tabs.is_empty());
+        assert_eq!(loaded.settings.active_tab, 0);
+        assert!(loaded.settings.single_instance);
+        assert_eq!(loaded.settings.view_mode, ViewMode::Table);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }
 

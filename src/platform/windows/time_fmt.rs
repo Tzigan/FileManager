@@ -40,3 +40,26 @@ fn system_time_to_filetime(t: SystemTime) -> Option<FILETIME> {
         dwHighDateTime: (ft >> 32) as u32,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_timestamp_has_documented_shape() {
+        let value = format_local_time(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1));
+        assert_eq!(value.len(), 16);
+        assert_eq!(&value[4..5], "-");
+        assert_eq!(&value[7..8], "-");
+        assert_eq!(&value[10..11], " ");
+        assert_eq!(&value[13..14], ":");
+    }
+
+    #[test]
+    fn pre_epoch_timestamp_uses_documented_fallback() {
+        assert_eq!(
+            format_local_time(SystemTime::UNIX_EPOCH - std::time::Duration::from_secs(1)),
+            "-"
+        );
+    }
+}

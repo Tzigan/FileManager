@@ -68,6 +68,9 @@ fn main() -> anyhow::Result<()> {
     let options = eframe::NativeOptions {
         viewport,
         persist_window: true,
+        // File shortcuts must reach our app as key events. eframe's default
+        // translation drops Ctrl+V when the clipboard contains CF_HDROP only.
+        clipboard_shortcuts: false,
         ..Default::default()
     };
 

@@ -2,7 +2,7 @@
 mod windows;
 
 #[cfg(windows)]
-pub use self::windows::{acquire_single_instance, drives, format_local_time, free_space, get_clipboard_files, install_context_menu, notify_already_running, open_recycle_bin, pipe_listen, pipe_send, recycle_bin, set_attributes, set_clipboard_files, shell_open, uninstall_context_menu, AcquireResult, SingleInstanceGuard};
+pub use self::windows::{acquire_single_instance, drives, format_local_time, free_space, get_clipboard_files, get_clipboard_text, install_context_menu, notify_already_running, open_recycle_bin, pipe_listen, pipe_send, recycle_bin, set_attributes, set_clipboard_files, shell_open, uninstall_context_menu, AcquireResult, SingleInstanceGuard};
 
 /// Stubs for non-Windows hosts so the crate still compiles for docs/tests.
 #[cfg(not(windows))]
@@ -49,6 +49,7 @@ mod stubs {
     }
     pub fn set_clipboard_files(_p: &[std::path::PathBuf]) -> std::io::Result<()> { Ok(()) }
     pub fn get_clipboard_files() -> Vec<std::path::PathBuf> { Vec::new() }
+    pub fn get_clipboard_text() -> String { String::new() }
     pub fn pipe_listen(_f: impl FnMut(std::path::PathBuf) + Send + 'static) {}
     pub fn pipe_send(_p: &std::path::Path) -> std::io::Result<()> { Ok(()) }
     pub fn install_context_menu(_e: &std::path::Path, _t: &str) -> std::io::Result<()> { Ok(()) }
@@ -59,4 +60,4 @@ mod stubs {
 }
 
 #[cfg(not(windows))]
-pub use stubs::{acquire_single_instance, drives, format_local_time, free_space, get_clipboard_files, install_context_menu, notify_already_running, open_recycle_bin, pipe_listen, pipe_send, recycle_bin, set_attributes, set_clipboard_files, shell_open, uninstall_context_menu, AcquireResult, SingleInstanceGuard};
+pub use stubs::{acquire_single_instance, drives, format_local_time, free_space, get_clipboard_files, get_clipboard_text, install_context_menu, notify_already_running, open_recycle_bin, pipe_listen, pipe_send, recycle_bin, set_attributes, set_clipboard_files, shell_open, uninstall_context_menu, AcquireResult, SingleInstanceGuard};

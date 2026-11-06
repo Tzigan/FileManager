@@ -32,4 +32,13 @@ mod tests {
         let f = free_space(Path::new("C:\\"));
         assert!(f.map(|v| v > 0).unwrap_or(false));
     }
+
+    #[test]
+    fn free_space_uses_an_existing_parent_for_a_new_destination() {
+        let base = std::env::temp_dir().join(format!("fm-space-{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let future = base.join("not-created").join("destination");
+        assert!(free_space(&future).is_some_and(|bytes| bytes > 0));
+        std::fs::remove_dir_all(base).unwrap();
+    }
 }

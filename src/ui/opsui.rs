@@ -6,6 +6,122 @@ use crate::core::format::format_size;
 use crate::core::ops::{ConflictAction, ErrorAction, OpEvent, OpJob, OpKind, OpReply, OpStage};
 use crate::ui::FileManagerApp;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ClipboardCommand {
+    Copy,
+    Cut,
+    Paste,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ClipboardTarget {
+    Files,
+    Text,
+}
+
+/// Keep text-edit clipboard behavior unless selection/clipboard data has a
+/// file-manager meaning.
+pub(super) fn clipboard_target(
+    command: ClipboardCommand,
+    text_edit_focused: bool,
+    has_file_selection: bool,
+    has_file_clipboard: bool,
+) -> ClipboardTarget {
+    if !text_edit_focused
+        || match command {
+            ClipboardCommand::Copy | ClipboardCommand::Cut => has_file_selection,
+            ClipboardCommand::Paste => has_file_clipboard,
+        }
+    {
+        ClipboardTarget::Files
+    } else {
+        ClipboardTarget::Text
+    }
+}
+
+fn paths_for_selection(
+    entries: &[crate::core::fs::FileEntry],
+    selection: &std::collections::BTreeSet<usize>,
+) -> Vec<PathBuf> {
+    selection
+        .iter()
+        .filter_map(|&i| entries.get(i))
+        .map(|e| e.path.clone())
+        .collect()
+}
+
+fn internal_paste_plan(clipboard: &Clipboard, dest: PathBuf) -> (OpKind, bool) {
+    if clipboard.cut {
+        (OpKind::Move { sources: clipboard.paths.clone(), dest }, true)
+    } else {
+        (OpKind::Copy { sources: clipboard.paths.clone(), dest }, false)
+    }
+}
+
+fn external_paste_plan(paths: Vec<PathBuf>, dest: PathBuf) -> Option<OpKind> {
+    (!paths.is_empty()).then_some(OpKind::Copy { sources: paths, dest })
+}
+
+fn delete_confirmation(paths: Vec<PathBuf>, permanent: bool) -> Option<(Vec<PathBuf>, bool)> {
+    (!paths.is_empty()).then_some((paths, !permanent))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeleteDecision {
+    Confirm,
+    Cancel,
+    Pending,
+}
+
+fn confirmed_delete(paths: Vec<PathBuf>, recycle: bool, decision: DeleteDecision) -> Option<OpKind> {
+    if decision != DeleteDecision::Confirm {
+        return None;
+    }
+    Some(if recycle {
+        OpKind::Recycle { sources: paths }
+    } else {
+        OpKind::Delete { sources: paths }
+    })
+}
+
+fn toggle_bookmark(bookmarks: &mut Vec<PathBuf>, path: &std::path::Path) -> bool {
+    if let Some(i) = bookmarks.iter().position(|b| b == path) {
+        bookmarks.remove(i);
+        false
+    } else {
+        bookmarks.push(path.to_path_buf());
+        true
+    }
+}
+
+fn rename_target(from: &std::path::Path, input: &str) -> Option<PathBuf> {
+    let name = input.trim();
+    if name.is_empty() || name == from.file_name().unwrap_or_default() {
+        return None;
+    }
+    Some(from.with_file_name(name))
+}
+
+fn rename_operation(from: PathBuf, input: &str) -> Option<OpKind> {
+    let to = rename_target(&from, input)?;
+    Some(OpKind::Rename { from, to })
+}
+
+fn valid_creation_name(input: &str) -> Option<&str> {
+    let name = input.trim();
+    (!name.is_empty() && !name.contains(['\\', '/', ':', '*', '?', '"', '<', '>', '|']))
+        .then_some(name)
+}
+
+fn creation_operation(parent: &std::path::Path, input: &str, is_dir: bool) -> Option<OpKind> {
+    let path = parent.join(valid_creation_name(input)?);
+    Some(if is_dir {
+        OpKind::CreateDir { path }
+    } else {
+        OpKind::CreateFile { path }
+    })
+}
+
 pub struct JobUi {
     pub id: u64,
     pub label: String,
@@ -20,6 +136,7 @@ pub struct JobUi {
     pub failed: usize,
 }
 
+#[derive(Clone)]
 pub struct Clipboard {
     pub paths: Vec<PathBuf>,
     pub cut: bool,
@@ -72,11 +189,7 @@ impl FileManagerApp {
     /// Selection of the active tab as paths.
     pub(crate) fn selected_paths(&self) -> Vec<PathBuf> {
         let tab = &self.tabs[self.active];
-        tab.selection
-            .iter()
-            .filter_map(|&i| tab.entries.get(i))
-            .map(|e| e.path.clone())
-            .collect()
+        paths_for_selection(&tab.entries, &tab.selection)
     }
 
     // ------------------------------------------------------------------
@@ -86,44 +199,55 @@ impl FileManagerApp {
     pub(crate) fn act_copy(&mut self) {
         let paths = self.selected_paths();
         if !paths.is_empty() {
-            let _ = crate::platform::set_clipboard_files(&paths);
+            if let Err(e) = crate::platform::set_clipboard_files(&paths) {
+                tracing::warn!(error = %e, count = paths.len(), "failed to publish file clipboard data");
+            }
+            tracing::info!(count = paths.len(), "files copied to internal clipboard");
             self.ops_ui.clipboard = Some(Clipboard { paths, cut: false });
+        } else {
+            tracing::info!("copy requested with empty file selection");
         }
     }
 
     pub(crate) fn act_cut(&mut self) {
         let paths = self.selected_paths();
         if !paths.is_empty() {
-            let _ = crate::platform::set_clipboard_files(&paths);
+            if let Err(e) = crate::platform::set_clipboard_files(&paths) {
+                tracing::warn!(error = %e, count = paths.len(), "failed to publish file clipboard data");
+            }
             self.ops_ui.clipboard = Some(Clipboard { paths, cut: true });
         }
     }
 
     pub(crate) fn act_paste(&mut self) {
         // Internal clipboard first (tracks cut-vs-copy), then Explorer's.
-        if let Some(cb) = &self.ops_ui.clipboard {
+        if let Some(cb) = self.ops_ui.clipboard.clone() {
             let dest = self.tabs[self.active].path.clone();
-            if cb.cut {
-                self.enqueue("ops.moving", OpKind::Move { sources: cb.paths.clone(), dest });
-                self.ops_ui.clipboard = None;
+            tracing::info!(count = cb.paths.len(), cut = cb.cut, "pasting internal file clipboard");
+            let (kind, clear_internal) = internal_paste_plan(&cb, dest);
+            if matches!(kind, OpKind::Move { .. }) {
+                self.enqueue("ops.moving", kind);
             } else {
-                self.enqueue("ops.copying", OpKind::Copy { sources: cb.paths.clone(), dest });
+                self.enqueue("ops.copying", kind);
+            }
+            if clear_internal {
+                self.ops_ui.clipboard = None;
             }
             return;
         }
         let ext = crate::platform::get_clipboard_files();
-        if !ext.is_empty() {
-            let dest = self.tabs[self.active].path.clone();
-            self.enqueue("ops.copying", OpKind::Copy { sources: ext, dest });
+        if let Some(kind) = external_paste_plan(ext, self.tabs[self.active].path.clone()) {
+            if let OpKind::Copy { sources, .. } = &kind {
+                tracing::info!(count = sources.len(), "pasting Explorer file clipboard");
+            }
+            self.enqueue("ops.copying", kind);
         }
     }
 
     /// `permanent`: Shift+Delete — bypass the Recycle Bin.
     pub(crate) fn act_delete(&mut self, permanent: bool) {
         let paths = self.selected_paths();
-        if !paths.is_empty() {
-            self.ops_ui.delete_confirm = Some((paths, !permanent));
-        }
+        self.ops_ui.delete_confirm = delete_confirmation(paths, permanent);
     }
 
     pub(crate) fn act_rename(&mut self) {
@@ -137,12 +261,7 @@ impl FileManagerApp {
 
     pub(crate) fn act_bookmark(&mut self) {
         let path = self.tabs[self.active].path.clone();
-        let bms = &mut self.store.settings.bookmarks;
-        if let Some(i) = bms.iter().position(|b| b == &path) {
-            bms.remove(i);
-        } else {
-            bms.push(path);
-        }
+        toggle_bookmark(&mut self.store.settings.bookmarks, &path);
         self.persist();
     }
 
@@ -272,7 +391,7 @@ impl FileManagerApp {
         );
         let ok = self.t("dlg.ok").to_owned();
         let cancel = self.t("dlg.cancel").to_owned();
-        let mut action = 0u8; // 1=delete 2=cancel
+        let mut decision = DeleteDecision::Pending;
         egui::Window::new(title)
             .collapsible(false)
             .resizable(false)
@@ -281,19 +400,18 @@ impl FileManagerApp {
                 ui.label(msg);
                 ui.horizontal(|ui| {
                     if ui.button(ok).clicked() {
-                        action = 1;
+                        decision = DeleteDecision::Confirm;
                     }
                     if ui.button(cancel).clicked() {
-                        action = 2;
+                        decision = DeleteDecision::Cancel;
                     }
                 });
             });
         self.ops_ui.delete_confirm = None;
-        match action {
-            1 if recycle => self.enqueue("ops.deleting", OpKind::Recycle { sources: paths }),
-            1 => self.enqueue("ops.deleting", OpKind::Delete { sources: paths }),
-            0 => self.ops_ui.delete_confirm = Some((paths, recycle)),
-            _ => {}
+        if decision == DeleteDecision::Pending {
+            self.ops_ui.delete_confirm = Some((paths, recycle));
+        } else if let Some(kind) = confirmed_delete(paths, recycle, decision) {
+            self.enqueue("ops.deleting", kind);
         }
     }
 
@@ -323,9 +441,10 @@ impl FileManagerApp {
             });
         if let Some((from, _)) = self.ops_ui.rename.take() {
             match action {
-                1 if !new_name.trim().is_empty() && new_name.trim() != from.file_name().unwrap_or_default() => {
-                    let to = from.with_file_name(new_name.trim());
-                    self.enqueue("ops.creating", OpKind::Rename { from, to });
+                1 => {
+                    if let Some(kind) = rename_operation(from, &new_name) {
+                        self.enqueue("ops.creating", kind);
+                    }
                 }
                 0 => self.ops_ui.rename = Some((from, new_name)),
                 _ => {}
@@ -358,20 +477,15 @@ impl FileManagerApp {
                         action = 2;
                     }
                 });
-            });
+        });
         if let Some((is_dir, _)) = self.ops_ui.create.take() {
-            let name = name.trim().to_owned();
             match action {
-                1 if !name.is_empty() && !name.contains(['\\', '/', ':', '*', '?', '"', '<', '>', '|']) => {
-                    let path = self.tabs[self.active].path.join(&name);
-                    let kind = if is_dir {
-                        OpKind::CreateDir { path }
-                    } else {
-                        OpKind::CreateFile { path }
-                    };
-                    self.enqueue("ops.creating", kind);
+                1 => {
+                    if let Some(kind) = creation_operation(&self.tabs[self.active].path, &name, is_dir) {
+                        self.enqueue("ops.creating", kind);
+                    }
                 }
-                0 => self.ops_ui.create = Some((is_dir, name)),
+                0 => self.ops_ui.create = Some((is_dir, name.trim().to_owned())),
                 _ => {}
             }
         }
@@ -464,5 +578,155 @@ impl FileManagerApp {
                 });
             });
         self.ops_ui.show_journal = open;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(name: &str) -> crate::core::fs::FileEntry {
+        crate::core::fs::FileEntry {
+            name: name.to_owned(),
+            path: PathBuf::from(format!("C:\\data\\{name}")),
+            is_dir: false,
+            is_symlink: false,
+            hidden: false,
+            readonly: false,
+            size: Some(1),
+            modified: None,
+            created: None,
+            extension: None,
+        }
+    }
+
+    #[test]
+    fn file_selection_resolves_to_paths_and_ignores_stale_indices() {
+        let entries = vec![entry("a.txt"), entry("b.txt"), entry("c.txt")];
+        let selection = [0, 2, 99].into_iter().collect();
+        assert_eq!(
+            paths_for_selection(&entries, &selection),
+            vec![PathBuf::from("C:\\data\\a.txt"), PathBuf::from("C:\\data\\c.txt")]
+        );
+    }
+
+    #[test]
+    fn clipboard_shortcuts_choose_file_operations_or_text_by_user_context() {
+        use ClipboardCommand::{Copy, Cut, Paste};
+        use ClipboardTarget::{Files, Text};
+
+        assert_eq!(clipboard_target(Copy, false, false, false), Files);
+        assert_eq!(clipboard_target(Cut, false, false, false), Files);
+        assert_eq!(clipboard_target(Paste, false, false, false), Files);
+
+        assert_eq!(clipboard_target(Copy, true, true, false), Files);
+        assert_eq!(clipboard_target(Cut, true, true, false), Files);
+
+        assert_eq!(clipboard_target(Copy, true, false, false), Text);
+        assert_eq!(clipboard_target(Cut, true, false, false), Text);
+        assert_eq!(clipboard_target(Paste, true, false, false), Text);
+        assert_eq!(clipboard_target(Paste, true, false, true), Files);
+    }
+
+    #[test]
+    fn internal_copy_paste_keeps_clipboard_while_cut_paste_moves_and_clears_it() {
+        let source = PathBuf::from("C:\\data\\source.txt");
+        let dest = PathBuf::from("D:\\target");
+        let copy = Clipboard {
+            paths: vec![source.clone()],
+            cut: false,
+        };
+        let (copy_job, clear_copy) = internal_paste_plan(&copy, dest.clone());
+        assert!(!clear_copy);
+        assert!(matches!(
+            copy_job,
+            OpKind::Copy { sources, dest: d } if sources == vec![source.clone()] && d == dest
+        ));
+
+        let cut = Clipboard {
+            paths: vec![source.clone()],
+            cut: true,
+        };
+        let (move_job, clear_cut) = internal_paste_plan(&cut, dest.clone());
+        assert!(clear_cut);
+        assert!(matches!(
+            move_job,
+            OpKind::Move { sources, dest: d } if sources == vec![source] && d == dest
+        ));
+    }
+
+    #[test]
+    fn explorer_paste_is_copy_and_empty_external_clipboard_is_noop() {
+        let dest = PathBuf::from("D:\\target");
+        let source = PathBuf::from("C:\\source.txt");
+        assert!(external_paste_plan(Vec::new(), dest.clone()).is_none());
+        assert!(matches!(
+            external_paste_plan(vec![source.clone()], dest.clone()),
+            Some(OpKind::Copy { sources, dest: d }) if sources == vec![source] && d == dest
+        ));
+    }
+
+    #[test]
+    fn delete_requires_selection_and_confirmation_and_respects_permanent_choice() {
+        let a = PathBuf::from("C:\\a.txt");
+        let selected = vec![a.clone()];
+        assert!(delete_confirmation(Vec::new(), false).is_none());
+        assert_eq!(delete_confirmation(selected.clone(), false), Some((selected.clone(), true)));
+        assert_eq!(delete_confirmation(selected.clone(), true), Some((selected.clone(), false)));
+
+        assert!(confirmed_delete(selected.clone(), true, DeleteDecision::Pending).is_none());
+        assert!(confirmed_delete(selected.clone(), true, DeleteDecision::Cancel).is_none());
+        assert!(matches!(
+            confirmed_delete(selected.clone(), true, DeleteDecision::Confirm),
+            Some(OpKind::Recycle { sources }) if sources == selected
+        ));
+        assert!(matches!(
+            confirmed_delete(selected.clone(), false, DeleteDecision::Confirm),
+            Some(OpKind::Delete { sources }) if sources == selected
+        ));
+    }
+
+    #[test]
+    fn bookmark_toggle_adds_then_removes_the_folder() {
+        let path = PathBuf::from("C:\\data");
+        let mut bookmarks = Vec::new();
+        assert!(toggle_bookmark(&mut bookmarks, &path));
+        assert_eq!(bookmarks, vec![path.clone()]);
+        assert!(!toggle_bookmark(&mut bookmarks, &path));
+        assert!(bookmarks.is_empty());
+    }
+
+    #[test]
+    fn create_dialog_accepts_trimmed_names_and_rejects_empty_or_windows_separators() {
+        assert_eq!(valid_creation_name("  отчёт 2026.txt  "), Some("отчёт 2026.txt"));
+        assert_eq!(valid_creation_name("   "), None);
+        for invalid in ["a\\b", "a/b", "a:b", "a*b", "a?b", "a\"b", "a<b", "a>b", "a|b"] {
+            assert_eq!(valid_creation_name(invalid), None, "accepted {invalid:?}");
+        }
+        let parent = PathBuf::from("C:\\data");
+        assert!(matches!(
+            creation_operation(&parent, " new folder ", true),
+            Some(OpKind::CreateDir { path }) if path == parent.join("new folder")
+        ));
+        assert!(matches!(
+            creation_operation(&parent, " new file.txt ", false),
+            Some(OpKind::CreateFile { path }) if path == parent.join("new file.txt")
+        ));
+        assert!(creation_operation(&parent, "bad:name", true).is_none());
+    }
+
+    #[test]
+    fn rename_keeps_the_parent_and_ignores_empty_or_unchanged_names() {
+        let from = PathBuf::from("C:\\data\\old name.txt");
+        assert_eq!(
+            rename_target(&from, "  new name.txt "),
+            Some(PathBuf::from("C:\\data\\new name.txt"))
+        );
+        assert_eq!(rename_target(&from, " old name.txt "), None);
+        assert_eq!(rename_target(&from, "   "), None);
+        assert!(matches!(
+            rename_operation(from.clone(), " new name.txt "),
+            Some(OpKind::Rename { from: old, to }) if old == from && to == PathBuf::from("C:\\data\\new name.txt")
+        ));
     }
 }

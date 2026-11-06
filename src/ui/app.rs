@@ -1,6 +1,5 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread;
@@ -19,7 +18,7 @@ use crate::ui::tree::TreeState;
 pub(crate) enum WorkerMsg {
     /// A directory listing finished for a tab.
     Listing {
-        tab: usize,
+        tab_id: u64,
         generation: u64,
         result: Result<Vec<FileEntry>, ReadDirError>,
     },
@@ -52,6 +51,8 @@ pub struct FileManagerApp {
     update_err: Option<String>,
     /// Index of the tab currently being drag-reordered.
     tab_drag: Option<usize>,
+    /// Tab press anchor for manual drag detection (index, press position).
+    tab_press: Option<(usize, egui::Pos2)>,
     /// Path shown in the properties dialog.
     pub(crate) props_target: Option<PathBuf>,
 
@@ -61,7 +62,7 @@ pub struct FileManagerApp {
     /// Scroll the focused row into view next repaint (set by keyboard nav).
     pub(crate) scroll_to_cursor: bool,
     /// `--select` target: select this entry when the listing arrives.
-    pending_select: Option<String>,
+    pending_select: Option<(u64, String)>,
 
     msg_tx: Sender<WorkerMsg>,
     msg_rx: Receiver<WorkerMsg>,
@@ -159,12 +160,13 @@ impl FileManagerApp {
             update_busy: false,
             update_err: None,
             tab_drag: None,
+            tab_press: None,
             props_target: None,
             tabs: paths.into_iter().map(|p| { let mut t = Tab::new(p); t.pinned = pins.contains(&t.path); t }).collect(),
             active,
             tree: TreeState::new(drives()),
             scroll_to_cursor: false,
-            pending_select: initial_select,
+            pending_select: None,
             msg_tx,
             msg_rx,
             tree_req,
@@ -177,6 +179,9 @@ impl FileManagerApp {
         if let Some(p) = initial_path {
             app.tabs.push(Tab::new(p));
             app.active = app.tabs.len() - 1;
+        }
+        if let Some(name) = initial_select {
+            app.pending_select = Some((app.tabs[app.active].id, name));
         }
         for i in 0..app.tabs.len() {
             app.navigate_fresh(i, &cc.egui_ctx);
@@ -239,6 +244,7 @@ impl FileManagerApp {
         let t = &mut self.tabs[tab];
         t.generation += 1;
         let generation = t.generation;
+        let tab_id = t.id;
         t.cancel.store(true, Ordering::Relaxed);
         t.cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let cancel = t.cancel.clone();
@@ -259,7 +265,7 @@ impl FileManagerApp {
         let ctx2 = ctx.clone();
         thread::spawn(move || {
             let result = fs::read_dir(&path, &cancel);
-            let _ = tx.send(WorkerMsg::Listing { tab, generation, result });
+            let _ = tx.send(WorkerMsg::Listing { tab_id, generation, result });
             ctx2.request_repaint();
         });
     }
@@ -308,14 +314,10 @@ impl FileManagerApp {
     }
 
     fn close_tab(&mut self, idx: usize, ctx: &egui::Context) {
-        if self.tabs.len() <= 1 || self.tabs[idx].pinned {
+        let Some(active) = super::tabs::close_tab_state(&mut self.tabs, self.active, idx) else {
             return;
-        }
-        self.tabs[idx].cancel.store(true, Ordering::Relaxed);
-        self.tabs.remove(idx);
-        if self.active >= self.tabs.len() {
-            self.active = self.tabs.len() - 1;
-        }
+        };
+        self.active = active;
         self.persist_tabs();
         ctx.request_repaint();
     }
@@ -338,16 +340,10 @@ impl FileManagerApp {
         if self.tabs.len() <= 1 {
             return;
         }
-        let kept = self.tabs[idx].cancel.clone();
-        let mut i = self.tabs.len();
-        while i > 0 {
-            i -= 1;
-            if i != idx && !self.tabs[i].pinned {
-                self.tabs[i].cancel.store(true, Ordering::Relaxed);
-                self.tabs.remove(i);
-            }
-        }
-        self.active = self.tabs.iter().position(|t| Arc::ptr_eq(&t.cancel, &kept)).unwrap_or(0);
+        let Some(active) = super::tabs::close_other_tabs_state(&mut self.tabs, idx) else {
+            return;
+        };
+        self.active = active;
         self.persist_tabs();
         ctx.request_repaint();
     }
@@ -358,24 +354,17 @@ impl FileManagerApp {
     }
 
     fn move_tab(&mut self, src: usize, dst: usize) {
-        if src == dst || src >= self.tabs.len() {
+        let Some(dst) = super::tabs::move_to_drop_slot(&mut self.tabs, src, dst) else {
             return;
-        }
-        let t = self.tabs.remove(src);
-        let dst = dst.min(self.tabs.len());
-        self.tabs.insert(dst, t);
+        };
         self.active = dst;
         self.persist_tabs();
     }
 
     pub(crate) fn sort_col(&mut self, key: SortKey) {
         let tab = &mut self.tabs[self.active];
-        if tab.sort_key == key {
-            tab.sort_desc = !tab.sort_desc;
-        } else {
-            tab.sort_key = key;
-            tab.sort_desc = false;
-        }
+        (tab.sort_key, tab.sort_desc) =
+            super::list::next_sort_order(tab.sort_key, tab.sort_desc, key);
         let (k, d) = (tab.sort_key, tab.sort_desc);
         fs::sort_entries_by(&mut tab.entries, k, d);
         tab.clear_selection();
@@ -393,16 +382,18 @@ impl FileManagerApp {
     fn drain_messages(&mut self, ctx: &egui::Context) {
         while let Ok(msg) = self.msg_rx.try_recv() {
             match msg {
-                WorkerMsg::Listing { tab, generation, result } => {
-                    if self.tabs[tab].generation != generation {
+                WorkerMsg::Listing { tab_id, generation, result } => {
+                    let Some(tab) = super::tabs::listing_tab_index(&self.tabs, tab_id, generation) else {
                         continue;
-                    }
+                    };
                     match result {
                         Ok(entries) => {
+                            let pending_name =
+                                super::tabs::take_pending_selection(&mut self.pending_select, tab_id);
                             let t = &mut self.tabs[tab];
                             t.entries = entries;
                             t.status = ListStatus::Ready;
-                            if let Some(name) = self.pending_select.take() {
+                            if let Some(name) = pending_name {
                                 if let Some(i) = t.entries.iter().position(|e| e.name == name) {
                                     t.selection.insert(i);
                                     t.cursor = i;
@@ -423,12 +414,7 @@ impl FileManagerApp {
                     }
                 }
                 WorkerMsg::TreeChildren { path, result } => {
-                    self.tree.pending.remove(&path);
-                    if let Ok(kids) = result {
-                        self.tree.children.insert(path, kids);
-                    } else {
-                        self.tree.children.insert(path, Vec::new());
-                    }
+                    self.tree.complete_children_load(path, result);
                 }
                 WorkerMsg::OpenPath(path) => self.open_path_tab(path, ctx),
                 WorkerMsg::UpdateFound { version, url } => {
@@ -464,11 +450,70 @@ impl FileManagerApp {
     }
 
     fn handle_keys(&mut self, ctx: &egui::Context) {
-        if ctx.egui_wants_keyboard_input() {
+        let text_edit_focused = ctx.text_edit_focused();
+        let mods = ctx.input(|i| i.modifiers);
+        let input = |i: &egui::InputState| i.clone();
+
+        // Prefer file operations when a file selection/internal file clipboard
+        // exists. This also recovers if the address TextEdit retained focus after
+        // the user clicked a file row; without a file selection normal text-edit
+        // shortcuts (copy/paste in the address bar) remain untouched.
+        if mods.ctrl && ctx.input(|i| i.key_pressed(egui::Key::C)) {
+            match super::opsui::clipboard_target(
+                super::opsui::ClipboardCommand::Copy,
+                text_edit_focused,
+                !self.selected_paths().is_empty(),
+                false,
+            ) {
+                super::opsui::ClipboardTarget::Files => {
+                    tracing::info!("Ctrl+C shortcut received");
+                    self.act_copy();
+                }
+                super::opsui::ClipboardTarget::Text => {
+                    ctx.input_mut(|i| i.events.push(egui::Event::Copy));
+                }
+            }
             return;
         }
-        let input = |i: &egui::InputState| i.clone();
-        let mods = ctx.input(|i| i.modifiers);
+        if mods.ctrl && ctx.input(|i| i.key_pressed(egui::Key::X)) {
+            match super::opsui::clipboard_target(
+                super::opsui::ClipboardCommand::Cut,
+                text_edit_focused,
+                !self.selected_paths().is_empty(),
+                false,
+            ) {
+                super::opsui::ClipboardTarget::Files => self.act_cut(),
+                super::opsui::ClipboardTarget::Text => {
+                    ctx.input_mut(|i| i.events.push(egui::Event::Cut));
+                }
+            }
+            return;
+        }
+        if mods.ctrl && ctx.input(|i| i.key_pressed(egui::Key::V)) {
+            let has_file_clipboard = self.ops_ui.clipboard.is_some()
+                || !crate::platform::get_clipboard_files().is_empty();
+            match super::opsui::clipboard_target(
+                super::opsui::ClipboardCommand::Paste,
+                text_edit_focused,
+                false,
+                has_file_clipboard,
+            ) {
+                super::opsui::ClipboardTarget::Files => {
+                    tracing::info!("Ctrl+V shortcut received");
+                    self.act_paste();
+                }
+                super::opsui::ClipboardTarget::Text => {
+                    let text = crate::platform::get_clipboard_text();
+                    if !text.is_empty() {
+                        ctx.input_mut(|i| i.events.push(egui::Event::Paste(text)));
+                    }
+                }
+            }
+            return;
+        }
+        if text_edit_focused {
+            return;
+        }
 
         // Tab management.
         if mods.ctrl && ctx.input(|i| i.key_pressed(egui::Key::T)) {
@@ -490,19 +535,6 @@ impl FileManagerApp {
             return;
         }
 
-        // Clipboard / file operations.
-        if mods.ctrl && ctx.input(|i| i.key_pressed(egui::Key::C)) {
-            self.act_copy();
-            return;
-        }
-        if mods.ctrl && ctx.input(|i| i.key_pressed(egui::Key::X)) {
-            self.act_cut();
-            return;
-        }
-        if mods.ctrl && ctx.input(|i| i.key_pressed(egui::Key::V)) {
-            self.act_paste();
-            return;
-        }
         if ctx.input(|i| i.key_pressed(egui::Key::Delete)) {
             self.act_delete(mods.shift);
             return;
@@ -591,23 +623,16 @@ impl FileManagerApp {
     fn move_cursor(&mut self, target: usize, extend: bool) {
         let tab = &mut self.tabs[self.active];
         let len = tab.entries.len();
-        if len == 0 {
+        let Some(target) = super::tabs::apply_cursor_move(
+            &mut tab.selection,
+            &mut tab.anchor,
+            tab.cursor,
+            len,
+            target,
+            extend,
+        ) else {
             return;
-        }
-        let target = target.min(len - 1);
-        if extend {
-            let anchor = *tab.anchor.get_or_insert(tab.cursor);
-            let (lo, hi) = if anchor <= target {
-                (anchor, target)
-            } else {
-                (target, anchor)
-            };
-            tab.selection.extend(lo..=hi);
-        } else {
-            tab.selection.clear();
-            tab.selection.insert(target);
-            tab.anchor = Some(target);
-        }
+        };
         tab.cursor = target;
         self.scroll_to_cursor = true;
     }
@@ -705,8 +730,10 @@ impl FileManagerApp {
                     // The × lives inside the tab: right-side strip of the same rect.
                     let x_w = if *pinned { 0.0 } else { 18.0 };
                     let size = galley.size() + egui::vec2(14.0 + x_w, 6.0);
+                    // click (not click_and_drag): a focusable widget would keep keyboard
+                    // focus and kill every global shortcut after a tab click.
                     let (rect, resp) =
-                        ui.allocate_exact_size(size, egui::Sense::click_and_drag());
+                        ui.allocate_exact_size(size, egui::Sense::click());
                     let x_rect = egui::Rect::from_min_max(
                         egui::pos2(rect.max.x - x_w, rect.min.y),
                         rect.max,
@@ -792,8 +819,18 @@ impl FileManagerApp {
                     if resp.middle_clicked() && !*pinned {
                         act = Some(("close", i));
                     }
-                    if resp.dragged() {
-                        drag_src = Some(i);
+                    // Manual drag: pressed on this tab and moved past the threshold.
+                    if resp.is_pointer_button_down_on() {
+                        if let Some(p) = ui.ctx().pointer_latest_pos() {
+                            if self.tab_press.is_none() {
+                                self.tab_press = Some((i, p));
+                            }
+                            if let Some((si, start)) = self.tab_press {
+                                if si == i && p.distance(start) > 5.0 {
+                                    drag_src = Some(i);
+                                }
+                            }
+                        }
                     }
                     if drag_src.is_some() || self.tab_drag.is_some() {
                         if let Some(pos) = ui.ctx().pointer_latest_pos() {
@@ -809,6 +846,7 @@ impl FileManagerApp {
                             }
                         }
                     }
+                    let _ = resp;
                 });
             }
             if ui.small_button("+").clicked() {
@@ -818,7 +856,7 @@ impl FileManagerApp {
                 // Floating chip under the pointer while a tab is dragged.
                 if let Some(pos) = ui.ctx().pointer_latest_pos() {
                     if let Some((_, title)) = metas.get(src) {
-                        egui::Area::new(egui::Id::new("tab_drag_chip"))
+                        egui::Area::new(ui.scope_id().with("tab_drag_chip"))
                             .order(egui::Order::Foreground)
                             .current_pos(pos + egui::vec2(10.0, -16.0))
                             .show(ui.ctx(), |ui| {
@@ -837,11 +875,14 @@ impl FileManagerApp {
             if let Some(src) = drag_src {
                 self.tab_drag = Some(src);
             }
-            if self.tab_drag.is_some() && ui.ctx().input(|i| i.pointer.any_released()) {
-                if let (Some(src), Some(dst)) = (self.tab_drag, drop_dst) {
-                    self.move_tab(src, dst);
+            if ui.ctx().input(|i| i.pointer.any_released()) {
+                if self.tab_drag.is_some() {
+                    if let (Some(src), Some(dst)) = (self.tab_drag, drop_dst) {
+                        self.move_tab(src, dst);
+                    }
+                    self.tab_drag = None;
                 }
-                self.tab_drag = None;
+                self.tab_press = None;
             }
             if let Some((what, i)) = act {
                 match what {
@@ -940,6 +981,11 @@ impl FileManagerApp {
                 egui::TextEdit::singleline(&mut self.tabs[self.active].address_input)
                     .desired_width(f32::INFINITY),
             );
+            // A click anywhere outside the address bar releases its keyboard focus
+            // (TextEdit focus is otherwise sticky and blocks every file shortcut).
+            if resp.clicked_elsewhere() {
+                resp.surrender_focus();
+            }
             if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 let path = PathBuf::from(self.tabs[self.active].address_input.trim());
                 self.navigate(self.active, path, ctx);
@@ -970,6 +1016,7 @@ impl FileManagerApp {
         egui::Window::new(title)
             .collapsible(false)
             .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
             .open(&mut open)
             .show(ctx, |ui| {
                 ui.heading(format!("FileManager v{}", env!("CARGO_PKG_VERSION")));
@@ -1051,6 +1098,7 @@ impl FileManagerApp {
         egui::Window::new(title)
             .collapsible(false)
             .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
             .open(&mut open)
             .show(ctx, |ui| {
                 let entry = self
@@ -1123,6 +1171,7 @@ impl FileManagerApp {
         egui::Window::new(title)
             .collapsible(false)
             .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
             .open(&mut open)
             .show(ctx, |ui| {
                 if self.update_busy {

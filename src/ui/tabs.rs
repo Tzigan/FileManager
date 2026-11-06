@@ -1,10 +1,12 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::core::fs::{FileEntry, SortKey};
 use crate::core::history::History;
+
+static NEXT_TAB_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum ListStatus {
@@ -14,6 +16,8 @@ pub enum ListStatus {
 
 /// State of a single explorer tab: location, listing, selection and history.
 pub struct Tab {
+    /// Stable identity for background results; vector indices change on close/reorder.
+    pub id: u64,
     pub path: PathBuf,
     pub address_input: String,
     pub entries: Vec<FileEntry>,
@@ -36,6 +40,7 @@ pub struct Tab {
 impl Tab {
     pub fn new(path: PathBuf) -> Self {
         Self {
+            id: NEXT_TAB_ID.fetch_add(1, Ordering::Relaxed),
             address_input: path.display().to_string(),
             path,
             entries: Vec::new(),
@@ -68,9 +73,66 @@ impl Tab {
     }
 }
 
+pub(crate) fn listing_tab_index(tabs: &[Tab], id: u64, generation: u64) -> Option<usize> {
+    tabs.iter()
+        .position(|tab| tab.id == id && tab.generation == generation)
+}
+
+pub(crate) fn take_pending_selection(pending: &mut Option<(u64, String)>, tab_id: u64) -> Option<String> {
+    if pending.as_ref().is_some_and(|(id, _)| *id == tab_id) {
+        pending.take().map(|(_, name)| name)
+    } else {
+        None
+    }
+}
+
+/// Close an unpinned tab unless it is the last one. Returns the new active tab
+/// index when a close happened; callers persist settings only on `Some`.
+pub(crate) fn close_tab_state(tabs: &mut Vec<Tab>, active: usize, index: usize) -> Option<usize> {
+    if tabs.len() <= 1 || index >= tabs.len() || tabs[index].pinned {
+        return None;
+    }
+    tabs[index].cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+    tabs.remove(index);
+    Some(if index < active {
+        active - 1
+    } else if index == active {
+        active.min(tabs.len() - 1)
+    } else {
+        active
+    })
+}
+
+/// Close every unpinned tab except the requested one; pinned tabs survive.
+/// Returns the target tab's new index.
+pub(crate) fn close_other_tabs_state(tabs: &mut Vec<Tab>, index: usize) -> Option<usize> {
+    let keep = tabs.get(index)?.cancel.clone();
+    let mut i = tabs.len();
+    while i > 0 {
+        i -= 1;
+        if i != index && !tabs[i].pinned {
+            tabs[i].cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            tabs.remove(i);
+        }
+    }
+    tabs.iter().position(|t| Arc::ptr_eq(&t.cancel, &keep))
+}
+
 /// Range (lo, hi) between anchor and target (Explorer shift semantics).
 pub(crate) fn range_from(anchor: usize, target: usize) -> (usize, usize) {
     if anchor <= target { (anchor, target) } else { (target, anchor) }
+}
+
+/// Move an item to a drop slot in the original list (`0..=len`).
+/// Returns its final index; invalid slots leave the list untouched.
+pub(crate) fn move_to_drop_slot<T>(items: &mut Vec<T>, source: usize, slot: usize) -> Option<usize> {
+    if source >= items.len() || slot > items.len() {
+        return None;
+    }
+    let item = items.remove(source);
+    let target = if slot > source { slot - 1 } else { slot };
+    items.insert(target, item);
+    Some(target)
 }
 
 /// Click selection honoring Ctrl/Shift modifiers (Explorer semantics).
@@ -101,9 +163,38 @@ pub(crate) fn apply_click(
     index
 }
 
+/// Applies keyboard cursor movement and its selection semantics.
+/// Shift-selection always represents the current anchor-to-cursor range, not a
+/// union with the previously selected range.
+pub(crate) fn apply_cursor_move(
+    selection: &mut BTreeSet<usize>,
+    anchor: &mut Option<usize>,
+    current: usize,
+    len: usize,
+    target: usize,
+    extend: bool,
+) -> Option<usize> {
+    if len == 0 {
+        return None;
+    }
+    let target = target.min(len - 1);
+    if extend {
+        let anchor = *anchor.get_or_insert(current.min(len - 1));
+        let (lo, hi) = range_from(anchor, target);
+        selection.clear();
+        selection.extend(lo..=hi);
+    } else {
+        selection.clear();
+        selection.insert(target);
+        *anchor = Some(target);
+    }
+    Some(target)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     #[test]
     fn title_uses_folder_name() {
@@ -170,5 +261,145 @@ mod tests {
         let mut s = std::collections::BTreeSet::new();
         for i in 0..50 { s.insert(i); }
         assert_eq!(s.len(), 50);
+    }
+
+    #[test]
+    fn drag_drop_slot_is_relative_to_original_order() {
+        let mut tabs = vec!["A", "B", "C", "D"];
+
+        // Dropping A on the right half of B means immediately after B, not end.
+        assert_eq!(move_to_drop_slot(&mut tabs, 0, 2), Some(1));
+        assert_eq!(tabs, ["B", "A", "C", "D"]);
+
+        // Dropping D before B places it at the beginning.
+        assert_eq!(move_to_drop_slot(&mut tabs, 3, 0), Some(0));
+        assert_eq!(tabs, ["D", "B", "A", "C"]);
+    }
+
+    #[test]
+    fn dragging_to_either_edge_of_same_tab_is_a_noop() {
+        let mut tabs = vec!["A", "B", "C"];
+        assert_eq!(move_to_drop_slot(&mut tabs, 1, 1), Some(1));
+        assert_eq!(tabs, ["A", "B", "C"]);
+        assert_eq!(move_to_drop_slot(&mut tabs, 1, 2), Some(1));
+        assert_eq!(tabs, ["A", "B", "C"]);
+    }
+
+    #[test]
+    fn invalid_drag_drop_slot_does_not_mutate_tabs() {
+        let mut tabs = vec!["A", "B"];
+        assert_eq!(move_to_drop_slot(&mut tabs, 2, 0), None);
+        assert_eq!(move_to_drop_slot(&mut tabs, 0, 3), None);
+        assert_eq!(tabs, ["A", "B"]);
+    }
+
+    #[test]
+    fn closing_a_tab_preserves_another_active_tab_and_cancels_the_removed_one() {
+        let mut tabs = vec![
+            Tab::new(PathBuf::from("C:\\a")),
+            Tab::new(PathBuf::from("C:\\b")),
+            Tab::new(PathBuf::from("C:\\c")),
+        ];
+        let removed_cancel = tabs[0].cancel.clone();
+        assert_eq!(close_tab_state(&mut tabs, 2, 0), Some(1));
+        assert_eq!(tabs[1].path, PathBuf::from("C:\\c"));
+        assert!(removed_cancel.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    #[test]
+    fn closing_active_tab_selects_the_next_or_previous_survivor() {
+        let mut tabs = vec![
+            Tab::new(PathBuf::from("C:\\a")),
+            Tab::new(PathBuf::from("C:\\b")),
+            Tab::new(PathBuf::from("C:\\c")),
+        ];
+        assert_eq!(close_tab_state(&mut tabs, 1, 1), Some(1));
+        assert_eq!(tabs[1].path, PathBuf::from("C:\\c"));
+        assert_eq!(close_tab_state(&mut tabs, 1, 1), Some(0));
+        assert_eq!(tabs[0].path, PathBuf::from("C:\\a"));
+    }
+
+    #[test]
+    fn last_or_pinned_tab_cannot_be_closed() {
+        let mut one = vec![Tab::new(PathBuf::from("C:\\only"))];
+        assert_eq!(close_tab_state(&mut one, 0, 0), None);
+        assert_eq!(one.len(), 1);
+
+        let mut pinned = vec![Tab::new(PathBuf::from("C:\\pin")), Tab::new(PathBuf::from("C:\\other"))];
+        pinned[0].pinned = true;
+        let cancel = pinned[0].cancel.clone();
+        assert_eq!(close_tab_state(&mut pinned, 1, 0), None);
+        assert_eq!(pinned.len(), 2);
+        assert!(!cancel.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    #[test]
+    fn close_others_keeps_target_and_pinned_tabs_and_cancels_removed_tabs() {
+        let mut tabs = vec![
+            Tab::new(PathBuf::from("C:\\a")),
+            Tab::new(PathBuf::from("C:\\b")),
+            Tab::new(PathBuf::from("C:\\pin")),
+            Tab::new(PathBuf::from("C:\\d")),
+        ];
+        tabs[2].pinned = true;
+        let removed_a = tabs[0].cancel.clone();
+        let kept_target = tabs[1].cancel.clone();
+        let removed_d = tabs[3].cancel.clone();
+
+        assert_eq!(close_other_tabs_state(&mut tabs, 1), Some(0));
+        assert_eq!(
+            tabs.iter().map(|t| t.path.as_path()).collect::<Vec<_>>(),
+            vec![Path::new("C:\\b"), Path::new("C:\\pin")]
+        );
+        assert!(std::sync::Arc::ptr_eq(&tabs[0].cancel, &kept_target));
+        assert!(removed_a.load(std::sync::atomic::Ordering::Relaxed));
+        assert!(removed_d.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    #[test]
+    fn late_listing_is_ignored_after_tab_close_and_reorder() {
+        let mut tabs = vec![
+            Tab::new(PathBuf::from("C:\\a")),
+            Tab::new(PathBuf::from("C:\\b")),
+        ];
+        let closed_id = tabs[0].id;
+        let surviving_id = tabs[1].id;
+        tabs.remove(0);
+
+        assert_eq!(listing_tab_index(&tabs, closed_id, 0), None);
+        assert_eq!(listing_tab_index(&tabs, surviving_id, 0), Some(0));
+        assert_eq!(listing_tab_index(&tabs, surviving_id, 99), None);
+    }
+
+    #[test]
+    fn selection_requested_for_one_tab_survives_other_tabs_loading_first() {
+        let mut pending = Some((41, "wanted.txt".to_owned()));
+        assert_eq!(take_pending_selection(&mut pending, 12), None);
+        assert_eq!(pending, Some((41, "wanted.txt".to_owned())));
+        assert_eq!(take_pending_selection(&mut pending, 41), Some("wanted.txt".to_owned()));
+        assert_eq!(pending, None);
+    }
+
+    #[test]
+    fn keyboard_shift_selection_tracks_current_range_in_both_directions() {
+        let mut selection = BTreeSet::from([2]);
+        let mut anchor = Some(2);
+        assert_eq!(apply_cursor_move(&mut selection, &mut anchor, 2, 8, 5, true), Some(5));
+        assert_eq!(selection, BTreeSet::from([2, 3, 4, 5]));
+
+        assert_eq!(apply_cursor_move(&mut selection, &mut anchor, 5, 8, 3, true), Some(3));
+        assert_eq!(selection, BTreeSet::from([2, 3]));
+    }
+
+    #[test]
+    fn keyboard_selection_clamps_cursor_and_empty_lists_are_unchanged() {
+        let mut selection = BTreeSet::from([1]);
+        let mut anchor = Some(1);
+        assert_eq!(apply_cursor_move(&mut selection, &mut anchor, 1, 3, 99, false), Some(2));
+        assert_eq!(selection, BTreeSet::from([2]));
+        assert_eq!(anchor, Some(2));
+
+        assert_eq!(apply_cursor_move(&mut selection, &mut anchor, 2, 0, 0, true), None);
+        assert_eq!(selection, BTreeSet::from([2]));
     }
 }

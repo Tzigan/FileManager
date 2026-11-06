@@ -79,4 +79,26 @@ mod tests {
         let i = I18n::new(Language::Ru);
         assert_eq!(i.t("no.such.key"), "no.such.key");
     }
+
+    #[test]
+    fn switching_language_changes_existing_translation() {
+        let mut i = I18n::new(Language::Ru);
+        let russian = i.t("menu.file").to_owned();
+        i.set_language(Language::En);
+        let english = i.t("menu.file").to_owned();
+        assert_ne!(russian, english);
+        assert_eq!(i.language(), Language::En);
+        assert_eq!(Language::Ru.label(), "RU");
+        assert_eq!(Language::En.label(), "EN");
+    }
+
+    #[test]
+    fn russian_table_falls_back_to_english_for_a_missing_translation() {
+        let i = I18n {
+            lang: Language::Ru,
+            ru: HashMap::new(),
+            en: HashMap::from([("fallback".to_owned(), "English text".to_owned())]),
+        };
+        assert_eq!(i.t("fallback"), "English text");
+    }
 }

@@ -278,49 +278,97 @@ impl<'a> Worker<'a> {
             if is_move {
                 self.move_entry(job, src, &dst, &mut done_bytes, &mut done_files, total_bytes, total_files);
             } else {
-                self.copy_entry(job, src, &dst, &mut done_bytes, &mut done_files, total_bytes, total_files);
+                let _ = self.copy_entry(job, src, &dst, &mut done_bytes, &mut done_files, total_bytes, total_files);
             }
         }
         Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn copy_entry(&mut self, job: &OpJob, src: &Path, dst: &Path, done_b: &mut u64, done_f: &mut usize, total_b: u64, total_f: usize) {
+    fn copy_entry(&mut self, job: &OpJob, src: &Path, dst: &Path, done_b: &mut u64, done_f: &mut usize, total_b: u64, total_f: usize) -> bool {
         if self.cancelled(job) {
-            return;
+            return false;
         }
-        let meta = match fs::symlink_metadata(src) {
-            Ok(m) => m,
-            Err(e) => {
-                self.failed += 1;
-                let _ = self.ask_error(job, src, &e);
-                return;
+        let meta = loop {
+            match fs::symlink_metadata(src) {
+                Ok(m) => break m,
+                Err(e) => match self.ask_error(job, src, &e) {
+                    ErrorAction::Retry => continue,
+                    ErrorAction::Skip => {
+                        self.failed += 1;
+                        return false;
+                    }
+                    ErrorAction::Cancel => {
+                        job.cancel.store(true, Ordering::Relaxed);
+                        return false;
+                    }
+                },
             }
         };
         if meta.is_dir() {
-            match self.ensure_dir(job, dst) {
-                true => {
-                    if let Ok(items) = fs::read_dir(src) {
-                        for item in items.flatten() {
-                            if self.cancelled(job) {
-                                return;
+            if !self.ensure_dir(job, dst) {
+                self.failed += 1;
+                return false;
+            }
+            let items = loop {
+                match fs::read_dir(src) {
+                    Ok(items) => break items,
+                    Err(e) => match self.ask_error(job, src, &e) {
+                        ErrorAction::Retry => continue,
+                        ErrorAction::Skip => {
+                            self.failed += 1;
+                            return false;
+                        }
+                        ErrorAction::Cancel => {
+                            job.cancel.store(true, Ordering::Relaxed);
+                            return false;
+                        }
+                    },
+                }
+            };
+            let mut complete = true;
+            for item in items {
+                let item = match item {
+                    Ok(item) => item,
+                    Err(e) => {
+                        match self.ask_error(job, src, &e) {
+                            ErrorAction::Retry => {
+                                return self.copy_entry(job, src, dst, done_b, done_f, total_b, total_f);
                             }
-                            self.copy_entry(job, &item.path(), &dst.join(item.file_name()), done_b, done_f, total_b, total_f);
+                            ErrorAction::Skip => {
+                                self.failed += 1;
+                                complete = false;
+                                continue;
+                            }
+                            ErrorAction::Cancel => {
+                                job.cancel.store(true, Ordering::Relaxed);
+                                return false;
+                            }
                         }
                     }
+                };
+                if !self.copy_entry(
+                    job,
+                    &item.path(),
+                    &dst.join(item.file_name()),
+                    done_b,
+                    done_f,
+                    total_b,
+                    total_f,
+                ) {
+                    complete = false;
                 }
-                false => self.failed += 1,
             }
-            return;
+            return complete;
         }
         // File: resolve overwrite conflict first.
         if dst.exists() {
             match self.ask_conflict(job, src, dst) {
                 ConflictAction::Cancel => {
                     job.cancel.store(true, Ordering::Relaxed);
-                    return;
+                    return false;
                 }
-                ConflictAction::Skip => return,
+                ConflictAction::Skip => return false,
                 _ => {}
             }
         }
@@ -329,19 +377,22 @@ impl<'a> Worker<'a> {
                 *done_b += written;
             }, job) {
                 Ok(()) => {
+                    if self.cancelled(job) {
+                        return false;
+                    }
                     *done_f += 1;
                     self.progress(job, OpStage::Copying, src, *done_b, total_b, *done_f, total_f);
-                    return;
+                    return true;
                 }
                 Err(e) => match self.ask_error(job, src, &e) {
                     ErrorAction::Retry => continue,
                     ErrorAction::Skip => {
                         self.failed += 1;
-                        return;
+                        return false;
                     }
                     ErrorAction::Cancel => {
                         job.cancel.store(true, Ordering::Relaxed);
-                        return;
+                        return false;
                     }
                 },
             }
@@ -373,9 +424,11 @@ impl<'a> Worker<'a> {
             }
             Err(e) if is_cross_volume(&e) => {
                 // copy → verify → delete; source is removed only on success.
-                self.copy_entry(job, src, dst, done_b, done_f, total_b, total_f);
-                if !self.cancelled(job) && dst.exists() {
-                    if let Err(e) = remove_any(src) {
+                let copied = self.copy_entry(job, src, dst, done_b, done_f, total_b, total_f);
+                match remove_move_source_after_copy(src, dst, copied, self.cancelled(job)) {
+                    Ok(true) => {}
+                    Ok(false) => {}
+                    Err(e) => {
                         self.failed += 1;
                         let _ = self.ask_error(job, src, &e);
                     }
@@ -585,6 +638,22 @@ fn remove_any(path: &Path) -> io::Result<()> {
     }
 }
 
+/// A move fallback may remove its source only when copying completed and the
+/// destination exists. Destination existence alone is not evidence of success:
+/// a partial tree or a skipped overwrite can leave it behind.
+fn remove_move_source_after_copy(
+    src: &Path,
+    dst: &Path,
+    copy_complete: bool,
+    cancelled: bool,
+) -> io::Result<bool> {
+    if !copy_complete || cancelled || !dst.exists() {
+        return Ok(false);
+    }
+    remove_any(src)?;
+    Ok(true)
+}
+
 /// Windows: a locked file is worth a Retry; transient sharing errors too.
 fn is_retryable(e: &io::Error) -> bool {
     match e.raw_os_error() {
@@ -678,6 +747,31 @@ mod tests {
         j.cancel.store(true, Ordering::Relaxed);
         copy_file_stream(&src, &dst, &mut |_| {}, &j).unwrap();
         assert!(!dst.exists());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn cancellation_after_a_written_chunk_removes_partial_destination() {
+        let dir = tmpdir("mid-copy-cancel");
+        let src = dir.join("large.bin");
+        let dst = dir.join("partial.bin");
+        fs::write(&src, vec![0x5a; 4 * 1024 * 1024]).unwrap();
+        let job = job();
+        let mut copied_bytes = 0;
+        copy_file_stream(
+            &src,
+            &dst,
+            &mut |n| {
+                copied_bytes += n;
+                job.cancel.store(true, Ordering::Relaxed);
+            },
+            &job,
+        )
+        .unwrap();
+
+        assert!(copied_bytes > 0);
+        assert!(!dst.exists());
+        assert_eq!(fs::metadata(&src).unwrap().len(), 4 * 1024 * 1024);
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -857,7 +951,7 @@ mod tests_v04 {
         fs::create_dir(dir.join("src")).unwrap();
         for i in 0..10 { fs::write(dir.join("src").join(format!("f{i}")), b"xx").unwrap(); }
         let (_rtx, rrx) = channel();
-        let (etx, erx) = channel();
+        let (etx, _erx) = channel();
         let mut w = worker(&rrx, &etx);
         let j = OpJob {
             id: 1,
@@ -865,10 +959,6 @@ mod tests_v04 {
             cancel: Arc::new(AtomicBool::new(true)),
         };
         w.run(&j);
-        let mut failed = None;
-        while let Ok(ev) = erx.try_recv() {
-            if let OpEvent::Done { failed: f, .. } = ev { failed = Some(f); }
-        }
         let copied = dir.join("out").join("src");
         let n = fs::read_dir(&copied).map(|r| r.count()).unwrap_or(0);
         assert!(n < 10, "cancelled job copied {n}/10 files");
@@ -914,7 +1004,7 @@ mod tests_v04 {
         fs::write(dst.join("a"), b"y").unwrap();
         let (rtx, rrx) = channel();
         rtx.send(OpReply::Conflict { id: 1, action: ConflictAction::Cancel }).unwrap();
-        let (etx, erx) = channel();
+        let (etx, _erx) = channel();
         worker(&rrx, &etx).run(&job(OpKind::Copy { sources: vec![dir.join("a")], dest: dst.clone() }));
         assert_eq!(fs::read_to_string(dst.join("a")).unwrap(), "y");
         fs::remove_dir_all(&dir).ok();
@@ -1036,6 +1126,36 @@ mod tests_acc04 {
     }
 
     #[test]
+    fn recursive_copy_preserves_nested_contents_and_empty_directories() {
+        let d = tmp("nested-shape");
+        let source = d.join("source");
+        let empty = source.join("empty child");
+        let nested = source.join("nested").join("deeper");
+        fs::create_dir_all(&empty).unwrap();
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join("payload.bin"), [0, 1, 2, 255]).unwrap();
+
+        let (_reply_tx, reply_rx) = channel();
+        let (event_tx, _event_rx) = channel();
+        w(&reply_rx, &event_tx).run(&OpJob {
+            id: 1,
+            kind: OpKind::Copy {
+                sources: vec![source.clone()],
+                dest: d.join("destination"),
+            },
+            cancel: Arc::new(AtomicBool::new(false)),
+        });
+
+        let copied = d.join("destination").join("source");
+        assert!(copied.join("empty child").is_dir());
+        assert_eq!(
+            fs::read(copied.join("nested/deeper/payload.bin")).unwrap(),
+            [0, 1, 2, 255]
+        );
+        fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
     fn error_event_has_message() {
         let d = tmp("errmsg");
         let (rtx, rrx) = channel();
@@ -1128,5 +1248,318 @@ mod tests_samefolder {
         assert!(dir.join("a — копия (2).txt").exists());
         assert_eq!(fs::read_to_string(dir.join("a.txt")).unwrap(), "data");
         fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[cfg(test)]
+mod tests_move_safety {
+    use super::*;
+    use std::sync::mpsc::channel;
+
+    fn temp_dir() -> PathBuf {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("fm-move-safety-{stamp}"));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn partial_or_cancelled_copy_never_removes_move_source() {
+        let dir = temp_dir();
+        let src = dir.join("source.bin");
+        let dst = dir.join("partial.bin");
+        fs::write(&src, b"original data").unwrap();
+        fs::write(&dst, b"partial").unwrap();
+
+        assert!(!remove_move_source_after_copy(&src, &dst, false, false).unwrap());
+        assert!(src.exists());
+        assert_eq!(fs::read(&src).unwrap(), b"original data");
+        assert!(!remove_move_source_after_copy(&src, &dst, true, true).unwrap());
+        assert!(src.exists());
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn complete_copy_removes_source_only_if_destination_exists() {
+        let dir = temp_dir();
+        let src = dir.join("source.bin");
+        let dst = dir.join("destination.bin");
+        fs::write(&src, b"verified").unwrap();
+
+        assert!(!remove_move_source_after_copy(&src, &dst, true, false).unwrap());
+        assert!(src.exists());
+
+        fs::write(&dst, b"verified").unwrap();
+        assert!(remove_move_source_after_copy(&src, &dst, true, false).unwrap());
+        assert!(!src.exists());
+        assert_eq!(fs::read(&dst).unwrap(), b"verified");
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn failed_locked_file_move_keeps_original_source() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::sync::mpsc::channel;
+
+        let dir = temp_dir();
+        let src = dir.join("locked.bin");
+        let dest = dir.join("destination");
+        fs::create_dir(&dest).unwrap();
+        fs::write(&src, b"source must survive a failed move").unwrap();
+        let lock = fs::OpenOptions::new().read(true).share_mode(0).open(&src).unwrap();
+
+        let (reply_tx, reply_rx) = channel();
+        let (event_tx, event_rx) = channel();
+        let responder = std::thread::spawn(move || {
+            while let Ok(event) = event_rx.recv() {
+                if let OpEvent::AskError { id, .. } = event {
+                    let _ = reply_tx.send(OpReply::Error {
+                        id,
+                        action: ErrorAction::Skip,
+                    });
+                }
+            }
+        });
+        let mut worker = Worker {
+            reply_rx: &reply_rx,
+            events: &event_tx,
+            overwrite_all: false,
+            skip_all: false,
+            failed: 0,
+        };
+        worker.run(&OpJob {
+            id: 17,
+            kind: OpKind::Move {
+                sources: vec![src.clone()],
+                dest: dest.clone(),
+            },
+            cancel: Arc::new(AtomicBool::new(false)),
+        });
+        assert!(src.exists());
+        assert!(!dest.join("locked.bin").exists());
+        assert_eq!(worker.failed, 1);
+
+        drop(worker);
+        drop(event_tx);
+        drop(lock);
+        responder.join().unwrap();
+        assert_eq!(fs::read(&src).unwrap(), b"source must survive a failed move");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn incomplete_recursive_move_keeps_the_entire_source_tree() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let dir = temp_dir();
+        let src_dir = dir.join("source-tree");
+        let dest = dir.join("destination");
+        fs::create_dir_all(&src_dir).unwrap();
+        fs::create_dir(&dest).unwrap();
+        let locked = src_dir.join("locked.txt");
+        let good = src_dir.join("good.txt");
+        fs::write(&locked, b"locked source data").unwrap();
+        fs::write(&good, b"good source data").unwrap();
+        let lock = fs::OpenOptions::new().read(true).share_mode(0).open(&locked).unwrap();
+
+        let (reply_tx, reply_rx) = channel();
+        let (event_tx, event_rx) = channel();
+        let responder = std::thread::spawn(move || {
+            while let Ok(event) = event_rx.recv() {
+                if let OpEvent::AskError { id, .. } = event {
+                    let _ = reply_tx.send(OpReply::Error { id, action: ErrorAction::Skip });
+                }
+            }
+        });
+        let mut w = Worker {
+            reply_rx: &reply_rx,
+            events: &event_tx,
+            overwrite_all: false,
+            skip_all: false,
+            failed: 0,
+        };
+        w.run(&OpJob {
+            id: 18,
+            kind: OpKind::Move { sources: vec![src_dir.clone()], dest: dest.clone() },
+            cancel: Arc::new(AtomicBool::new(false)),
+        });
+
+        assert!(src_dir.is_dir());
+        assert!(locked.exists() && good.exists());
+        assert_eq!(w.failed, 1);
+        drop(w);
+        drop(event_tx);
+        drop(lock);
+        responder.join().unwrap();
+        assert_eq!(fs::read(&locked).unwrap(), b"locked source data");
+        assert_eq!(fs::read(&good).unwrap(), b"good source data");
+        fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod tests_operation_decisions {
+    use super::*;
+    use std::sync::mpsc::channel;
+
+    fn temp_dir() -> PathBuf {
+        let n = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("fm-op-decisions-{n}"));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn worker<'a>(reply_rx: &'a Receiver<OpReply>, events: &'a Sender<OpEvent>) -> Worker<'a> {
+        Worker {
+            reply_rx,
+            events,
+            overwrite_all: false,
+            skip_all: false,
+            failed: 0,
+        }
+    }
+
+    #[test]
+    fn overwrite_all_replaces_all_collisions_after_one_confirmation() {
+        let dir = temp_dir();
+        let a = dir.join("a.txt");
+        let b = dir.join("b.txt");
+        let dest = dir.join("dest");
+        fs::create_dir(&dest).unwrap();
+        fs::write(&a, b"new-a").unwrap();
+        fs::write(&b, b"new-b").unwrap();
+        fs::write(dest.join("a.txt"), b"old-a").unwrap();
+        fs::write(dest.join("b.txt"), b"old-b").unwrap();
+
+        let (reply_tx, reply_rx) = channel();
+        reply_tx.send(OpReply::Conflict { id: 1, action: ConflictAction::OverwriteAll }).unwrap();
+        let (event_tx, event_rx) = channel();
+        worker(&reply_rx, &event_tx).run(&OpJob {
+            id: 1,
+            kind: OpKind::Copy { sources: vec![a, b], dest: dest.clone() },
+            cancel: Arc::new(AtomicBool::new(false)),
+        });
+
+        assert_eq!(fs::read(dest.join("a.txt")).unwrap(), b"new-a");
+        assert_eq!(fs::read(dest.join("b.txt")).unwrap(), b"new-b");
+        assert_eq!(
+            event_rx.try_iter().filter(|e| matches!(e, OpEvent::AskConflict { .. })).count(),
+            1
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn unrelated_conflict_reply_cannot_change_the_copy_decision() {
+        let dir = temp_dir();
+        let src = dir.join("source.txt");
+        let dest = dir.join("dest");
+        fs::create_dir(&dest).unwrap();
+        fs::write(&src, b"new").unwrap();
+        fs::write(dest.join("source.txt"), b"old").unwrap();
+        let (reply_tx, reply_rx) = channel();
+        reply_tx.send(OpReply::Conflict { id: 999, action: ConflictAction::Skip }).unwrap();
+        reply_tx.send(OpReply::Conflict { id: 1, action: ConflictAction::Overwrite }).unwrap();
+        let (event_tx, _event_rx) = channel();
+
+        worker(&reply_rx, &event_tx).run(&OpJob {
+            id: 1,
+            kind: OpKind::Copy { sources: vec![src], dest: dest.clone() },
+            cancel: Arc::new(AtomicBool::new(false)),
+        });
+        assert_eq!(fs::read(dest.join("source.txt")).unwrap(), b"new");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn skip_all_preserves_every_colliding_destination() {
+        let dir = temp_dir();
+        let a = dir.join("a.txt");
+        let b = dir.join("b.txt");
+        let dest = dir.join("dest");
+        fs::create_dir(&dest).unwrap();
+        fs::write(&a, b"new-a").unwrap();
+        fs::write(&b, b"new-b").unwrap();
+        fs::write(dest.join("a.txt"), b"old-a").unwrap();
+        fs::write(dest.join("b.txt"), b"old-b").unwrap();
+
+        let (reply_tx, reply_rx) = channel();
+        reply_tx.send(OpReply::Conflict { id: 1, action: ConflictAction::SkipAll }).unwrap();
+        let (event_tx, event_rx) = channel();
+        worker(&reply_rx, &event_tx).run(&OpJob {
+            id: 1,
+            kind: OpKind::Copy { sources: vec![a, b], dest: dest.clone() },
+            cancel: Arc::new(AtomicBool::new(false)),
+        });
+
+        assert_eq!(fs::read(dest.join("a.txt")).unwrap(), b"old-a");
+        assert_eq!(fs::read(dest.join("b.txt")).unwrap(), b"old-b");
+        assert_eq!(
+            event_rx.try_iter().filter(|e| matches!(e, OpEvent::AskConflict { .. })).count(),
+            1
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn retry_after_source_becomes_available_completes_copy() {
+        let dir = temp_dir();
+        let src = dir.join("arrives-after-retry.txt");
+        let dest = dir.join("dest");
+        fs::create_dir(&dest).unwrap();
+        let (reply_tx, reply_rx) = channel();
+        let (event_tx, event_rx) = channel();
+        let source_for_responder = src.clone();
+        let responder = std::thread::spawn(move || {
+            while let Ok(event) = event_rx.recv() {
+                if let OpEvent::AskError { id, .. } = event {
+                    fs::write(&source_for_responder, b"arrived").unwrap();
+                    reply_tx.send(OpReply::Error { id, action: ErrorAction::Retry }).unwrap();
+                    break;
+                }
+            }
+        });
+
+        worker(&reply_rx, &event_tx).run(&OpJob {
+            id: 1,
+            kind: OpKind::Copy { sources: vec![src.clone()], dest: dest.clone() },
+            cancel: Arc::new(AtomicBool::new(false)),
+        });
+        drop(event_tx);
+        responder.join().unwrap();
+        assert_eq!(fs::read(dest.join("arrives-after-retry.txt")).unwrap(), b"arrived");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn pre_cancelled_delete_leaves_every_source_untouched() {
+        let dir = temp_dir();
+        let first = dir.join("first.txt");
+        let second = dir.join("second.txt");
+        fs::write(&first, b"1").unwrap();
+        fs::write(&second, b"2").unwrap();
+        let (_reply_tx, reply_rx) = channel();
+        let (event_tx, _event_rx) = channel();
+        worker(&reply_rx, &event_tx).run(&OpJob {
+            id: 1,
+            kind: OpKind::Delete {
+                sources: vec![first.clone(), second.clone()],
+            },
+            cancel: Arc::new(AtomicBool::new(true)),
+        });
+
+        assert_eq!(fs::read(&first).unwrap(), b"1");
+        assert_eq!(fs::read(&second).unwrap(), b"2");
+        fs::remove_dir_all(dir).unwrap();
     }
 }

@@ -1,4 +1,4 @@
-use ::windows::core::w;
+use ::windows::core::{w, HSTRING, PCWSTR};
 use ::windows::Win32::Foundation::{
     CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE, WIN32_ERROR,
 };
@@ -45,7 +45,11 @@ pub enum AcquireResult {
 /// just shows a message and exits; forwarding the requested path to the running
 /// instance over an IPC channel is planned for v0.5.
 pub fn acquire_single_instance() -> anyhow::Result<AcquireResult> {
-    let handle = unsafe { CreateMutexW(None, true, MUTEX_NAME)? };
+    acquire_named_instance(MUTEX_NAME)
+}
+
+fn acquire_named_instance(name: PCWSTR) -> anyhow::Result<AcquireResult> {
+    let handle = unsafe { CreateMutexW(None, true, name)? };
     if unsafe { GetLastError() } == WIN32_ERROR(ERROR_ALREADY_EXISTS.0) {
         unsafe {
             let _ = CloseHandle(handle);
@@ -64,5 +68,28 @@ pub fn notify_already_running() {
             w!("FileManager"),
             MESSAGEBOX_STYLE(MB_OK.0 | MB_ICONINFORMATION.0),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn named_instance_guard_blocks_a_second_owner_and_releases_on_drop() {
+        let name = HSTRING::from(format!(
+            "Local\\FileManager.Test.{}.{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("unnamed")
+        ));
+        let first = acquire_named_instance(PCWSTR(name.as_ptr())).unwrap();
+        assert!(matches!(&first, AcquireResult::Acquired(_)));
+
+        let second = acquire_named_instance(PCWSTR(name.as_ptr())).unwrap();
+        assert!(matches!(second, AcquireResult::AlreadyRunning));
+        drop(first);
+
+        let third = acquire_named_instance(PCWSTR(name.as_ptr())).unwrap();
+        assert!(matches!(&third, AcquireResult::Acquired(_)));
     }
 }

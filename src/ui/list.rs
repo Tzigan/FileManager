@@ -5,9 +5,18 @@ use crate::platform::format_local_time;
 use crate::ui::FileManagerApp;
 
 /// A row in the table view: either a file entry or a group label.
+#[derive(Debug, PartialEq, Eq)]
 enum ListRow {
     Header(String),
     Item(usize),
+}
+
+#[derive(Debug, PartialEq)]
+struct ColumnPositions {
+    name_start: f32,
+    size_start: Option<f32>,
+    type_start: Option<f32>,
+    modified_start: Option<f32>,
 }
 
 pub(crate) const ROW_HEIGHT: f32 = 24.0;
@@ -16,6 +25,93 @@ const SIZE_COL: f32 = 90.0;
 const TYPE_COL: f32 = 110.0;
 const MODIFIED_COL: f32 = 140.0;
 const COL_GAP: f32 = 8.0;
+
+fn column_positions(settings: &crate::core::settings::Settings, width: f32) -> ColumnPositions {
+    let mut x = width;
+    let mut slot = |w: f32, visible: bool| {
+        if visible {
+            x -= w;
+            Some(x)
+        } else {
+            None
+        }
+    };
+    let modified_start = slot(MODIFIED_COL, settings.col_modified);
+    let type_start = slot(TYPE_COL, settings.col_type);
+    let size_start = slot(SIZE_COL, settings.col_size);
+    ColumnPositions {
+        name_start: ICON_WIDTH,
+        size_start,
+        type_start,
+        modified_start,
+    }
+}
+
+fn column_separator_x(settings: &crate::core::settings::Settings, width: f32) -> Vec<f32> {
+    let p = column_positions(settings, width);
+    [p.size_start, p.type_start, p.modified_start]
+        .into_iter()
+        .flatten()
+        .map(|start| start - COL_GAP / 2.0)
+        .collect()
+}
+
+fn paint_column_separators(
+    painter: &egui::Painter,
+    row: egui::Rect,
+    settings: &crate::core::settings::Settings,
+    color: egui::Color32,
+) {
+    let stroke = egui::Stroke::new(1.0, color.gamma_multiply(0.45));
+    for x in column_separator_x(settings, row.width()) {
+        painter.vline(row.min.x + x, row.y_range(), stroke);
+    }
+}
+
+pub(super) fn next_sort_order(current: SortKey, descending: bool, requested: SortKey) -> (SortKey, bool) {
+    if current == requested {
+        (current, !descending)
+    } else {
+        (requested, false)
+    }
+}
+
+fn table_rows(entries: &[FileEntry], group: bool, folders_label: &str, files_label: &str) -> Vec<ListRow> {
+    if !group {
+        return (0..entries.len()).map(ListRow::Item).collect();
+    }
+    let mut order: Vec<usize> = (0..entries.len()).collect();
+    order.sort_by_key(|&i| {
+        let e = &entries[i];
+        (
+            !e.is_dir,
+            e.extension
+                .as_deref()
+                .unwrap_or_default()
+                .to_lowercase(),
+            e.name.to_lowercase(),
+        )
+    });
+    let mut rows = Vec::new();
+    let mut last: Option<String> = None;
+    for i in order {
+        let e = &entries[i];
+        let group_name = if e.is_dir {
+            folders_label.to_owned()
+        } else {
+            e.extension
+                .as_deref()
+                .map(str::to_uppercase)
+                .unwrap_or_else(|| files_label.to_owned())
+        };
+        if last.as_deref() != Some(group_name.as_str()) {
+            rows.push(ListRow::Header(group_name.clone()));
+            last = Some(group_name);
+        }
+        rows.push(ListRow::Item(i));
+    }
+    rows
+}
 
 impl FileManagerApp {
     /// Virtualized file list: view switcher + header + rows in the current mode.
@@ -38,7 +134,7 @@ impl FileManagerApp {
         // Background hit-test under the whole list: rows drawn later win their
         // rects, empty space falls through to this response.
         let bg = ui.available_rect_before_wrap();
-        let bg_resp = ui.interact(bg, ui.id().with("empty_list_area"), egui::Sense::click());
+        let bg_resp = ui.interact(bg, ui.scope_id().with("empty_list_area"), egui::Sense::click());
         match self.store.settings.view_mode {
             ViewMode::Table => {
                 self.list_header(ui);
@@ -70,26 +166,14 @@ impl FileManagerApp {
                     .show(ui, |ui| self.grid_view(ui, ctx));
             }
         }
-        self.empty_area_menu(&bg_resp, ui, ctx);
+        self.empty_area_menu(&bg_resp, ctx);
         self.scroll_to_cursor = false;
     }
 
     /// Column x-origins; hidden columns come out `None`. Visible ones pack right.
     fn column_x(&self, width: f32) -> (f32, Option<f32>, Option<f32>, Option<f32>) {
-        let s = &self.store.settings;
-        let mut x = width;
-        let mut slot = |w: f32, vis: bool| {
-            if vis {
-                x -= w;
-                Some(x)
-            } else {
-                None
-            }
-        };
-        let mod_x = slot(MODIFIED_COL, s.col_modified);
-        let type_x = slot(TYPE_COL, s.col_type);
-        let size_x = slot(SIZE_COL, s.col_size);
-        (ICON_WIDTH, size_x, type_x, mod_x)
+        let p = column_positions(&self.store.settings, width);
+        (p.name_start, p.size_start, p.type_start, p.modified_start)
     }
 
     fn list_header(&mut self, ui: &mut egui::Ui) {
@@ -135,12 +219,19 @@ impl FileManagerApp {
                 egui::pos2(rect.min.x + x0, rect.min.y),
                 egui::pos2(rect.min.x + x1, rect.max.y),
             );
-            let col_resp = ui.interact(col_rect, ui.id().with(i18n_key), egui::Sense::click());
+            let col_resp = ui.interact(col_rect, ui.scope_id().with(i18n_key), egui::Sense::click());
             if col_resp.clicked() {
                 self.sort_col(k);
             }
             self.column_menu(&col_resp);
         }
+
+        paint_column_separators(
+            painter,
+            rect,
+            &self.store.settings,
+            ui.visuals().weak_text_color(),
+        );
 
         // Header gaps (right of the last column) get the same menu.
         self.column_menu(&hr);
@@ -149,38 +240,12 @@ impl FileManagerApp {
     /// Table rows: either a flat item index list, or group headers + items
     /// (folders first, then per-extension, name-sorted inside a group).
     fn build_rows(&self) -> Vec<ListRow> {
-        let entries = &self.tabs[self.active].entries;
-        if !self.store.settings.group_by_type {
-            return (0..entries.len()).map(ListRow::Item).collect();
-        }
-        let mut order: Vec<usize> = (0..entries.len()).collect();
-        order.sort_by_key(|&i| {
-            let e = &entries[i];
-            (
-                !e.is_dir,
-                e.extension.clone().unwrap_or_default(),
-                e.name.to_lowercase(),
-            )
-        });
-        let mut rows = Vec::new();
-        let mut last: Option<String> = None;
-        for i in order {
-            let e = &entries[i];
-            let g = if e.is_dir {
-                self.t("type.folder").to_owned()
-            } else {
-                e.extension
-                    .as_deref()
-                    .map(|x| x.to_uppercase())
-                    .unwrap_or_else(|| self.t("type.file").to_owned())
-            };
-            if last.as_deref() != Some(g.as_str()) {
-                rows.push(ListRow::Header(g.clone()));
-                last = Some(g);
-            }
-            rows.push(ListRow::Item(i));
-        }
-        rows
+        table_rows(
+            &self.tabs[self.active].entries,
+            self.store.settings.group_by_type,
+            self.t("type.folder"),
+            self.t("type.file"),
+        )
     }
 
     fn group_header(&self, ui: &mut egui::Ui, label: &str) {
@@ -323,6 +388,7 @@ impl FileManagerApp {
                 weak,
             );
         }
+        paint_column_separators(painter, rect, &self.store.settings, weak);
 
         let _ = focused;
         self.entry_actions(&resp, index, &entry, ui, ctx);
@@ -425,8 +491,13 @@ impl FileManagerApp {
 
     /// Empty space below the rows: left-click clears the selection, right-click
     /// shows the folder menu (Explorer semantics).
-    fn empty_area_menu(&mut self, resp: &egui::Response, ui: &mut egui::Ui, ctx: &egui::Context) {
+    fn empty_area_menu(&mut self, resp: &egui::Response, ctx: &egui::Context) {
         if resp.clicked() {
+            ctx.memory_mut(|m| {
+                if let Some(id) = m.focused() {
+                    m.surrender_focus(id);
+                }
+            });
             let tab = &mut self.tabs[self.active];
             tab.selection.clear();
             tab.anchor = None;
@@ -469,6 +540,12 @@ impl FileManagerApp {
         ctx: &egui::Context,
     ) {
         if resp.clicked() {
+            // Clicking the list drops text-field focus (address bar) so shortcuts work.
+            ctx.memory_mut(|m| {
+                if let Some(id) = m.focused() {
+                    m.surrender_focus(id);
+                }
+            });
             self.select_click(index, ui.input(|i| i.modifiers));
         }
         // Explorer semantics: right-click on an unselected row selects just it.
@@ -569,5 +646,165 @@ fn paint_icon(painter: &egui::Painter, row: egui::Rect, is_dir: bool) {
             egui::Stroke::new(1.0, egui::Color32::from_rgb(130, 135, 150)),
             egui::StrokeKind::Inside,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn entry(name: &str, is_dir: bool, extension: Option<&str>) -> FileEntry {
+        FileEntry {
+            name: name.to_owned(),
+            path: PathBuf::from(name),
+            is_dir,
+            is_symlink: false,
+            hidden: false,
+            readonly: false,
+            size: None,
+            modified: None,
+            created: None,
+            extension: extension.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn ungrouped_table_keeps_all_rows_in_input_order() {
+        let entries = vec![
+            entry("z.txt", false, Some("txt")),
+            entry("folder", true, None),
+            entry("a.md", false, Some("md")),
+        ];
+        assert_eq!(
+            table_rows(&entries, false, "Folders", "Files"),
+            vec![ListRow::Item(0), ListRow::Item(1), ListRow::Item(2)]
+        );
+    }
+
+    #[test]
+    fn grouped_table_keeps_every_item_once_and_groups_folders_then_extensions() {
+        let entries = vec![
+            entry("z.txt", false, Some("txt")),
+            entry("B folder", true, None),
+            entry("readme", false, None),
+            entry("A folder", true, None),
+            entry("a.md", false, Some("md")),
+            entry("a.txt", false, Some("txt")),
+        ];
+        let rows = table_rows(&entries, true, "Folders", "Files");
+        assert_eq!(
+            rows,
+            vec![
+                ListRow::Header("Folders".into()),
+                ListRow::Item(3),
+                ListRow::Item(1),
+                ListRow::Header("Files".into()),
+                ListRow::Item(2),
+                ListRow::Header("MD".into()),
+                ListRow::Item(4),
+                ListRow::Header("TXT".into()),
+                ListRow::Item(5),
+                ListRow::Item(0),
+            ]
+        );
+
+        let mut seen: Vec<usize> = rows
+            .iter()
+            .filter_map(|r| match r {
+                ListRow::Item(i) => Some(*i),
+                ListRow::Header(_) => None,
+            })
+            .collect();
+        seen.sort_unstable();
+        assert_eq!(seen, (0..entries.len()).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn grouping_merges_extension_case_and_handles_empty_directory() {
+        let entries = vec![
+            entry("UPPER.TXT", false, Some("TXT")),
+            entry("lower.txt", false, Some("txt")),
+        ];
+        assert_eq!(
+            table_rows(&entries, true, "Folders", "Files"),
+            vec![
+                ListRow::Header("TXT".into()),
+                ListRow::Item(1),
+                ListRow::Item(0),
+            ]
+        );
+        assert!(table_rows(&[], true, "Folders", "Files").is_empty());
+    }
+
+    #[test]
+    fn hidden_table_columns_leave_remaining_columns_packed_without_overlap() {
+        let settings = crate::core::settings::Settings::default();
+        let all = column_positions(&settings, 800.0);
+        assert_eq!(all.size_start, Some(460.0));
+        assert_eq!(all.type_start, Some(550.0));
+        assert_eq!(all.modified_start, Some(660.0));
+
+        let partial = crate::core::settings::Settings {
+            col_size: false,
+            ..settings.clone()
+        };
+        let p = column_positions(&partial, 800.0);
+        assert_eq!(p.size_start, None);
+        assert_eq!(p.type_start, Some(550.0));
+        assert_eq!(p.modified_start, Some(660.0));
+
+        let none = crate::core::settings::Settings {
+            col_size: false,
+            col_type: false,
+            col_modified: false,
+            ..settings
+        };
+        let p = column_positions(&none, 800.0);
+        assert_eq!(p.size_start, None);
+        assert_eq!(p.type_start, None);
+        assert_eq!(p.modified_start, None);
+        assert_eq!(p.name_start, ICON_WIDTH);
+    }
+
+    #[test]
+    fn selecting_a_sort_column_starts_ascending_and_repeated_clicks_toggle() {
+        let (key, desc) = next_sort_order(SortKey::Name, false, SortKey::Size);
+        assert_eq!(key, SortKey::Size);
+        assert!(!desc);
+
+        let (key, desc) = next_sort_order(key, desc, SortKey::Size);
+        assert_eq!(key, SortKey::Size);
+        assert!(desc);
+
+        let (key, desc) = next_sort_order(key, desc, SortKey::Modified);
+        assert_eq!(key, SortKey::Modified);
+        assert!(!desc);
+    }
+
+    #[test]
+    fn separators_follow_only_visible_column_boundaries() {
+        let all = crate::core::settings::Settings::default();
+        assert_eq!(column_separator_x(&all, 800.0), vec![456.0, 546.0, 656.0]);
+
+        let without_size = crate::core::settings::Settings {
+            col_size: false,
+            ..all.clone()
+        };
+        assert_eq!(column_separator_x(&without_size, 800.0), vec![546.0, 656.0]);
+
+        let without_type = crate::core::settings::Settings {
+            col_type: false,
+            ..all.clone()
+        };
+        assert_eq!(column_separator_x(&without_type, 800.0), vec![566.0, 656.0]);
+
+        let no_optional_columns = crate::core::settings::Settings {
+            col_size: false,
+            col_type: false,
+            col_modified: false,
+            ..all
+        };
+        assert!(column_separator_x(&no_optional_columns, 800.0).is_empty());
     }
 }

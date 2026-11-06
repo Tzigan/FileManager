@@ -254,6 +254,26 @@ mod tests_extra {
         assert!(dir.is_dir && dir.size.is_none());
         stdfs::remove_dir_all(&d).ok();
     }
+
+    #[test]
+    fn extensions_are_lowercase_and_absent_for_extensionless_files() {
+        let d = tmp("extensions");
+        stdfs::write(d.join("ARCHIVE.TAR.GZ"), b"x").unwrap();
+        stdfs::write(d.join("README"), b"x").unwrap();
+        stdfs::write(d.join(".profile"), b"x").unwrap();
+        let entries = read_dir(&d, &AtomicBool::new(false)).unwrap();
+
+        assert_eq!(
+            entries.iter().find(|e| e.name == "ARCHIVE.TAR.GZ").unwrap().extension.as_deref(),
+            Some("gz")
+        );
+        assert_eq!(entries.iter().find(|e| e.name == "README").unwrap().extension, None);
+        assert_eq!(
+            entries.iter().find(|e| e.name == ".profile").unwrap().extension,
+            None
+        );
+        stdfs::remove_dir_all(&d).ok();
+    }
 }
 
 
@@ -342,6 +362,28 @@ mod tests_acc {
         stdfs::write(&f, b"x").unwrap();
         assert!(read_dir(&f, &cancel()).is_err());
         stdfs::remove_dir_all(&d).ok();
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests_windows_metadata {
+    use super::*;
+
+    #[test]
+    fn directory_listing_reports_hidden_and_readonly_windows_attributes() {
+        let dir = std::env::temp_dir().join(format!("fm-windows-metadata-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("attributes.txt");
+        fs::write(&file, b"metadata").unwrap();
+        crate::platform::set_attributes(&file, true, true).unwrap();
+
+        let entries = read_dir(&dir, &AtomicBool::new(false)).unwrap();
+        let item = entries.iter().find(|e| e.name == "attributes.txt").unwrap();
+        assert!(item.hidden);
+        assert!(item.readonly);
+
+        crate::platform::set_attributes(&file, false, false).unwrap();
+        fs::remove_dir_all(dir).unwrap();
     }
 }
 
