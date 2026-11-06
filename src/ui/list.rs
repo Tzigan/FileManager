@@ -2,6 +2,7 @@ use crate::core::format::format_size;
 use crate::core::fs::{FileEntry, SortKey};
 use crate::core::settings::ViewMode;
 use crate::platform::format_local_time;
+use crate::ui::style;
 use crate::ui::FileManagerApp;
 
 /// A row in the table view: either a file entry or a group label.
@@ -24,7 +25,7 @@ pub(crate) const ICON_WIDTH: f32 = 26.0;
 const SIZE_COL: f32 = 90.0;
 const TYPE_COL: f32 = 110.0;
 const MODIFIED_COL: f32 = 140.0;
-const COL_GAP: f32 = 8.0;
+const COL_GAP: f32 = style::SPACE_SM;
 
 fn column_positions(settings: &crate::core::settings::Settings, width: f32) -> ColumnPositions {
     let mut x = width;
@@ -252,8 +253,11 @@ impl FileManagerApp {
                 .show(ctx, |ui| {
                     egui::Frame::new()
                         .fill(ui.visuals().extreme_bg_color)
-                        .corner_radius(4.0)
-                        .inner_margin(egui::Margin::symmetric(10, 4))
+                        .corner_radius(style::RADIUS_ROW)
+                        .inner_margin(egui::Margin::symmetric(
+                            style::FRAME_PADDING_X,
+                            style::FRAME_PADDING_Y,
+                        ))
                         .stroke(egui::Stroke::new(1.0, ui.visuals().selection.stroke.color))
                         .show(ui, |ui| {
                             ui.label(label);
@@ -440,9 +444,9 @@ impl FileManagerApp {
             .unwrap_or(false);
         let painter = ui.painter();
         if selected {
-            painter.rect_filled(rect, 2.0, ui.visuals().selection.bg_fill);
+            painter.rect_filled(rect, style::RADIUS_ROW, ui.visuals().selection.bg_fill);
         } else if resp.hovered() {
-            painter.rect_filled(rect, 2.0, ui.visuals().widgets.hovered.bg_fill);
+            painter.rect_filled(rect, style::RADIUS_ROW, ui.visuals().widgets.hovered.bg_fill);
         }
         if focused {
             painter.rect_stroke(
@@ -555,9 +559,9 @@ impl FileManagerApp {
         let focused = self.tabs[self.active].cursor == index;
         let painter = ui.painter();
         if selected {
-            painter.rect_filled(rect, 2.0, ui.visuals().selection.bg_fill);
+            painter.rect_filled(rect, style::RADIUS_ROW, ui.visuals().selection.bg_fill);
         } else if resp.hovered() {
-            painter.rect_filled(rect, 2.0, ui.visuals().widgets.hovered.bg_fill);
+            painter.rect_filled(rect, style::RADIUS_ROW, ui.visuals().widgets.hovered.bg_fill);
         }
         if focused {
             painter.rect_stroke(
@@ -586,7 +590,7 @@ impl FileManagerApp {
         let mut index = 0usize;
         egui::Grid::new("file_grid")
             .num_columns(cols)
-            .spacing([8.0, 8.0])
+            .spacing([style::SPACE_SM, style::SPACE_SM])
             .show(ui, |ui| {
                 for _row in 0..count.div_ceil(cols) {
                     for _ in 0..cols {
@@ -611,14 +615,14 @@ impl FileManagerApp {
         let focused = self.tabs[self.active].cursor == index;
         let painter = ui.painter();
         if selected {
-            painter.rect_filled(rect, 4.0, ui.visuals().selection.bg_fill);
+            painter.rect_filled(rect, style::RADIUS_ROW, ui.visuals().selection.bg_fill);
         } else if resp.hovered() {
-            painter.rect_filled(rect, 4.0, ui.visuals().widgets.hovered.bg_fill);
+            painter.rect_filled(rect, style::RADIUS_ROW, ui.visuals().widgets.hovered.bg_fill);
         }
         if focused {
             painter.rect_stroke(
                 rect.shrink(1.0),
-                4.0,
+                style::RADIUS_ROW,
                 egui::Stroke::new(1.0, ui.visuals().selection.stroke.color),
                 egui::StrokeKind::Inside,
             );
@@ -792,14 +796,14 @@ fn paint_icon(painter: &egui::Painter, row: egui::Rect, is_dir: bool) {
         let front = egui::Color32::from_rgb(255, 199, 90);
         let tab = egui::Rect::from_min_max(icon.min, egui::pos2(icon.min.x + 7.0, icon.min.y + 4.0));
         let body = egui::Rect::from_min_max(egui::pos2(icon.min.x, icon.min.y + 4.0), icon.max);
-        painter.rect_filled(tab, 1.5, back);
-        painter.rect_filled(body, 1.5, front);
+        painter.rect_filled(tab, style::RADIUS_ICON, back);
+        painter.rect_filled(body, style::RADIUS_ICON, front);
     } else {
         let doc = icon.shrink(1.0);
-        painter.rect_filled(doc, 1.0, egui::Color32::from_rgb(190, 195, 205));
+        painter.rect_filled(doc, style::RADIUS_ICON, egui::Color32::from_rgb(190, 195, 205));
         painter.rect_stroke(
             doc,
-            1.0,
+            style::RADIUS_ICON,
             egui::Stroke::new(1.0, egui::Color32::from_rgb(130, 135, 150)),
             egui::StrokeKind::Inside,
         );

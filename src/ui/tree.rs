@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use crate::ui::style;
+
 /// Lazy folder tree shown in the left panel.
 ///
 /// Roots are the system drives. A node's children are loaded on demand by a
@@ -71,7 +73,7 @@ impl crate::ui::FileManagerApp {
                 ui.separator();
                 let heading = self.t("tree.this_pc").to_owned();
                 ui.label(egui::RichText::new(heading).strong());
-                ui.add_space(4.0);
+                ui.add_space(style::SPACE_XS);
                 let roots = self.tree.roots.clone();
                 for root in roots {
                     let name = root.display().to_string();
@@ -83,7 +85,7 @@ impl crate::ui::FileManagerApp {
     fn bookmark_section(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
         let heading = self.t("tree.bookmarks").to_owned();
         ui.label(egui::RichText::new(heading).strong());
-        ui.add_space(4.0);
+        ui.add_space(style::SPACE_XS);
         let bookmarks = self.store.settings.bookmarks.clone();
         for bm in bookmarks {
             let name = bm
@@ -126,7 +128,7 @@ impl crate::ui::FileManagerApp {
         if depth > 24 {
             return;
         }
-        let indent = depth as f32 * 14.0;
+        let indent = depth as f32 * style::TREE_INDENT;
         let expanded = self.tree.expanded.contains(path);
         let kids = self.tree.children.get(path).cloned();
         let loading = self.tree.pending.contains(path);
@@ -140,7 +142,7 @@ impl crate::ui::FileManagerApp {
                     self.tree.toggle_expanded(path);
                 }
             } else {
-                ui.add_space(18.0);
+                ui.add_space(style::TREE_DISCLOSURE_SIZE);
             }
             paint_tree_icon(ui, depth == 0, expanded, path == self.tabs[self.active].path);
             let is_current = path == self.tabs[self.active].path.as_path();
@@ -275,7 +277,10 @@ mod tests {
 /// support for Unicode arrow glyphs.
 fn tree_disclosure_button(ui: &mut egui::Ui, expanded: bool) -> bool {
     let (rect, response) =
-        ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::click());
+        ui.allocate_exact_size(
+            egui::vec2(style::TREE_DISCLOSURE_SIZE, style::TREE_DISCLOSURE_SIZE),
+            egui::Sense::click(),
+        );
     let color = if response.hovered() {
         ui.visuals().strong_text_color()
     } else {
@@ -304,7 +309,10 @@ fn tree_disclosure_button(ui: &mut egui::Ui, expanded: bool) -> bool {
 
 /// Paints folder/drive icons in vector form instead of relying on emoji fonts.
 fn paint_tree_icon(ui: &mut egui::Ui, is_drive: bool, expanded: bool, current: bool) {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(20.0, 18.0), egui::Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(style::TREE_ICON_WIDTH, style::TREE_ICON_HEIGHT),
+        egui::Sense::hover(),
+    );
     let painter = ui.painter();
     if is_drive {
         let frame = egui::Rect::from_center_size(rect.center(), egui::vec2(16.0, 11.0));
@@ -313,18 +321,18 @@ fn paint_tree_icon(ui: &mut egui::Ui, is_drive: bool, expanded: bool, current: b
         } else {
             egui::Color32::from_rgb(105, 122, 139)
         };
-        painter.rect_filled(frame, 2.0, fill);
+        painter.rect_filled(frame, style::RADIUS_ICON, fill);
         painter.rect_filled(
             egui::Rect::from_min_max(
                 egui::pos2(frame.left() + 2.0, frame.top() + 2.0),
                 egui::pos2(frame.right() - 2.0, frame.bottom() - 3.0),
             ),
-            1.0,
+            style::RADIUS_ICON,
             egui::Color32::from_rgb(45, 57, 69),
         );
         painter.circle_filled(
             egui::pos2(frame.right() - 3.0, frame.bottom() - 1.5),
-            1.0,
+            style::RADIUS_ICON * 0.5,
             egui::Color32::from_rgb(125, 218, 140),
         );
         return;
@@ -346,6 +354,6 @@ fn paint_tree_icon(ui: &mut egui::Ui, is_drive: bool, expanded: bool, current: b
         egui::pos2(left, top + 4.0),
         egui::pos2(rect.right() - 2.0, rect.bottom() - 2.0),
     );
-    painter.rect_filled(tab, 1.5, back);
-    painter.rect_filled(body, 1.5, front);
+    painter.rect_filled(tab, style::RADIUS_ICON_FINE, back);
+    painter.rect_filled(body, style::RADIUS_ICON_FINE, front);
 }

@@ -4,6 +4,7 @@ use std::sync::atomic::Ordering;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread;
 
+use super::style;
 use crate::core::fs::{self, FileEntry, ReadDirError, SortKey};
 use crate::core::i18n::{I18n, Language};
 use crate::core::ops::{self, OpEvent, OpJob, OpReply};
@@ -47,6 +48,7 @@ pub struct FileManagerApp {
     about_viewport_placed: bool,
     show_settings: bool,
     settings_viewport_placed: bool,
+    style_configured: bool,
     /// Update offer: (version, exe URL).
     pending_update: Option<(String, String)>,
     update_busy: bool,
@@ -168,6 +170,7 @@ impl FileManagerApp {
             about_viewport_placed: false,
             show_settings: false,
             settings_viewport_placed: false,
+            style_configured: false,
             pending_update: None,
             update_busy: false,
             update_err: None,
@@ -767,7 +770,7 @@ impl FileManagerApp {
                     ui.horizontal(|ui| {
             for (i, (pinned, title)) in metas.iter().enumerate() {
                 ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 2.0;
+                    ui.spacing_mut().item_spacing.x = style::SPACE_XXS;
 
                     // Hand-rolled tab widget: click-and-drag sense so a plain click
                     // stays a click (arrow cursor), while press+drag reorders.
@@ -796,9 +799,9 @@ impl FileManagerApp {
                     let visuals = ui.visuals();
                     let painter = ui.painter();
                     if i == self.active {
-                        painter.rect_filled(rect, 3.0, visuals.selection.bg_fill);
+                        painter.rect_filled(rect, style::RADIUS_ROW, visuals.selection.bg_fill);
                     } else if resp.hovered() {
-                        painter.rect_filled(rect, 3.0, visuals.widgets.hovered.bg_fill);
+                        painter.rect_filled(rect, style::RADIUS_ROW, visuals.widgets.hovered.bg_fill);
                     }
                     let color = if i == self.active {
                         visuals.strong_text_color()
@@ -814,7 +817,7 @@ impl FileManagerApp {
                         if over_x {
                             painter.rect_filled(
                                 x_rect.shrink(2.0),
-                                3.0,
+                                style::RADIUS_ROW,
                                 visuals.error_fg_color.gamma_multiply(0.25),
                             );
                         }
@@ -913,8 +916,11 @@ impl FileManagerApp {
                             .show(ui.ctx(), |ui| {
                                 egui::Frame::new()
                                     .fill(ui.visuals().extreme_bg_color)
-                                    .corner_radius(4.0)
-                                    .inner_margin(egui::Margin::symmetric(10, 4))
+                                    .corner_radius(style::RADIUS_ROW)
+                                    .inner_margin(egui::Margin::symmetric(
+                                        style::FRAME_PADDING_X,
+                                        style::FRAME_PADDING_Y,
+                                    ))
                                     .stroke(egui::Stroke::new(1.0, ui.visuals().selection.stroke.color))
                                     .show(ui, |ui| {
                                         ui.label(title.clone());
@@ -1046,7 +1052,7 @@ impl FileManagerApp {
         // Breadcrumbs row.
         let path = self.tabs[self.active].path.clone();
         ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing.x = 2.0;
+            ui.spacing_mut().item_spacing.x = style::SPACE_XXS;
             for (label, seg_path) in breadcrumb_segments(&path) {
                 if ui.selectable_label(false, label).clicked() {
                     self.navigate(self.active, seg_path, ctx);
@@ -1081,10 +1087,10 @@ impl FileManagerApp {
             egui::CentralPanel::default().show(viewport_ui, |ui| {
                 ui.heading(format!("FileManager v{}", env!("CARGO_PKG_VERSION")));
                 ui.label("Rust + egui/eframe");
-                ui.add_space(8.0);
+                ui.add_space(style::SPACE_SM);
                 ui.label(format!("{}: {}", config_label, self.dirs.config_dir.display()));
                 ui.label(format!("{}: {}", log_label, self.dirs.log_dir.display()));
-                ui.add_space(8.0);
+                ui.add_space(style::SPACE_SM);
                 if ui.button(self.t("update.check").to_owned()).clicked() {
                     self.spawn_update_check(&viewport_ctx);
                 }
@@ -1123,7 +1129,7 @@ impl FileManagerApp {
                         egui::vec2(150.0, content_height),
                         egui::Layout::top_down(egui::Align::Min),
                         |ui| {
-                            ui.add_space(8.0);
+                            ui.add_space(style::SPACE_SM);
                             let _ = ui.selectable_label(true, self.t("settings.category.general"));
                         },
                     );
@@ -1139,9 +1145,9 @@ impl FileManagerApp {
                             ui.visuals().widgets.noninteractive.bg_stroke.color,
                         ),
                     );
-                    ui.add_space(10.0);
+                    ui.add_space(style::SPACE_SM);
                     ui.vertical(|ui| {
-                        ui.add_space(12.0);
+                        ui.add_space(style::SPACE_MD);
                         let single_instance_label =
                             self.t("settings.single_instance").to_owned();
                         if ui
@@ -1153,7 +1159,7 @@ impl FileManagerApp {
                         {
                             self.persist();
                         }
-                        ui.add_space(8.0);
+                        ui.add_space(style::SPACE_SM);
                         ui.label(
                             egui::RichText::new(self.t("settings.single_instance_hint"))
                                 .weak(),
@@ -1417,6 +1423,10 @@ impl eframe::App for FileManagerApp {
             Theme::Light => egui::ThemePreference::Light,
             Theme::Dark => egui::ThemePreference::Dark,
         });
+        if !self.style_configured {
+            super::style::configure(&ctx);
+            self.style_configured = true;
+        }
 
         self.drain_messages(&ctx);
         self.drain_ops_events(&ctx);
@@ -1475,9 +1485,9 @@ impl eframe::App for FileManagerApp {
             };
             if let Some(err) = error {
                 ui.vertical_centered(|ui| {
-                    ui.add_space(60.0);
+                    ui.add_space(style::SPACE_EMPTY_STATE);
                     ui.colored_label(ui.visuals().error_fg_color, err);
-                    ui.add_space(12.0);
+                    ui.add_space(style::SPACE_MD);
                     if ui.button(self.t("toolbar.up").to_owned()).clicked() {
                         self.go_up(&ctx);
                     }
@@ -1486,7 +1496,7 @@ impl eframe::App for FileManagerApp {
             }
             if empty {
                 ui.vertical_centered(|ui| {
-                    ui.add_space(60.0);
+                    ui.add_space(style::SPACE_EMPTY_STATE);
                     if loading {
                         ui.spinner();
                         ui.label(self.t("status.loading").to_owned());
@@ -1624,12 +1634,13 @@ fn icon_button(
     draw: impl FnOnce(&egui::Painter, egui::Rect, egui::Color32),
 ) -> egui::Response {
     let sense = if enabled { egui::Sense::click() } else { egui::Sense::hover() };
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(26.0, 26.0), sense);
+    let button_size = style::TOOLBAR_BUTTON_SIZE;
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(button_size, button_size), sense);
     let resp = resp.on_hover_text(hover);
     let visuals = ui.visuals();
     let painter = ui.painter();
     if enabled && resp.hovered() {
-        painter.rect_filled(rect, 5.0, visuals.widgets.hovered.bg_fill);
+        painter.rect_filled(rect, style::RADIUS_CONTROL, visuals.widgets.hovered.bg_fill);
     }
     let color = if !enabled {
         visuals.weak_text_color().gamma_multiply(0.4)
@@ -1638,7 +1649,8 @@ fn icon_button(
     } else {
         visuals.text_color()
     };
-    draw(painter, rect.shrink(7.0), color);
+    let icon_inset = (button_size - style::TOOLBAR_ICON_SIZE) * 0.5;
+    draw(painter, rect.shrink(icon_inset), color);
     resp
 }
 
