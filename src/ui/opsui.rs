@@ -95,8 +95,13 @@ fn toggle_bookmark(bookmarks: &mut Vec<PathBuf>, path: &std::path::Path) -> bool
 }
 
 fn rename_target(from: &std::path::Path, input: &str) -> Option<PathBuf> {
-    let name = input.trim();
-    if name.is_empty() || name == from.file_name().unwrap_or_default() {
+    let name = valid_creation_name(input)?;
+    let normalized = name.trim_end_matches(|c| c == ' ' || c == '.');
+    if normalized.is_empty()
+        || normalized == "."
+        || normalized == ".."
+        || name == from.file_name().unwrap_or_default()
+    {
         return None;
     }
     Some(from.with_file_name(name))
@@ -728,6 +733,9 @@ mod tests {
         );
         assert_eq!(rename_target(&from, " old name.txt "), None);
         assert_eq!(rename_target(&from, "   "), None);
+        for invalid in [r"C:\outside.txt", r"..\outside.txt", "../outside.txt", ".", ".."] {
+            assert_eq!(rename_target(&from, invalid), None);
+        }
         assert!(matches!(
             rename_operation(from.clone(), " new name.txt "),
             Some(OpKind::Rename { from: old, to }) if old == from && to == PathBuf::from("C:\\data\\new name.txt")

@@ -20,6 +20,7 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
 
 static NEXT_COPY_TEMP_ID: AtomicU64 = AtomicU64::new(0);
+static NEXT_RENAME_BACKUP_ID: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug)]
 pub enum OpKind {
@@ -557,17 +558,33 @@ impl<'a> Worker<'a> {
 
     fn rename(&mut self, job: &OpJob, from: &Path, to: &Path) -> io::Result<()> {
         self.progress(job, OpStage::Creating, from, 0, 1, 0, 1);
-        if to.exists() {
+        let same_parent = from
+            .parent()
+            .zip(to.parent())
+            .is_some_and(|(from_parent, to_parent)| same_existing_path(from_parent, to_parent));
+        if !same_parent {
+            let error = io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "rename target must stay in the same folder",
+            );
+            match self.ask_error(job, from, &error) {
+                ErrorAction::Skip | ErrorAction::Retry => self.failed += 1,
+                ErrorAction::Cancel => {}
+            }
+            return Ok(());
+        }
+
+        let overwrite_confirmed = if to.exists() {
             match self.ask_conflict(job, from, to) {
                 ConflictAction::Cancel => return Ok(()),
                 ConflictAction::Skip => return Ok(()),
-                _ => {
-                    let _ = remove_any(to);
-                }
+                _ => true,
             }
-        }
+        } else {
+            false
+        };
         loop {
-            match fs::rename(from, to) {
+            match rename_with_overwrite(from, to, overwrite_confirmed) {
                 Ok(()) => return Ok(()),
                 Err(e) => match self.ask_error(job, from, &e) {
                     ErrorAction::Retry => continue,
@@ -601,6 +618,77 @@ impl<'a> Worker<'a> {
             Ok(())
         }
     }
+}
+
+fn rename_with_overwrite(from: &Path, to: &Path, overwrite_confirmed: bool) -> io::Result<()> {
+    let from = long_path(from);
+    let to = long_path(to);
+    if !to.exists() {
+        return fs::rename(&from, &to);
+    }
+    if !overwrite_confirmed {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "destination appeared before rename",
+        ));
+    }
+
+    let from_meta = fs::symlink_metadata(&from)?;
+    let to_meta = fs::symlink_metadata(&to)?;
+    if from_meta.is_file() && to_meta.is_file() {
+        return crate::platform::replace_file(&from, &to);
+    }
+
+    let backup_dir = create_rename_backup_dir(&to)?;
+    let backup_target = long_path(&backup_dir.join("previous"));
+    if let Err(error) = fs::rename(&to, &backup_target) {
+        let _ = fs::remove_dir(&backup_dir);
+        return Err(error);
+    }
+
+    match fs::rename(&from, &to) {
+        Ok(()) => {
+            let _ = remove_any(&backup_target);
+            let _ = fs::remove_dir(&backup_dir);
+            Ok(())
+        }
+        Err(rename_error) => match fs::rename(&backup_target, &to) {
+            Ok(()) => {
+                let _ = fs::remove_dir(&backup_dir);
+                Err(rename_error)
+            }
+            Err(restore_error) => Err(io::Error::new(
+                io::ErrorKind::Other,
+                format!(
+                    "rename failed: {rename_error}; previous destination retained at {} because restore failed: {restore_error}",
+                    backup_target.display()
+                ),
+            )),
+        },
+    }
+}
+
+fn create_rename_backup_dir(destination: &Path) -> io::Result<PathBuf> {
+    let parent = destination
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    for _ in 0..128 {
+        let id = NEXT_RENAME_BACKUP_ID.fetch_add(1, Ordering::Relaxed);
+        let backup_dir = long_path(&parent.join(format!(
+            ".filemanager-rename-{}-{id}",
+            std::process::id()
+        )));
+        match fs::create_dir(&backup_dir) {
+            Ok(()) => return Ok(backup_dir),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "could not allocate a rename backup directory",
+    ))
 }
 
 // ----------------------------------------------------------------------
@@ -1779,5 +1867,122 @@ mod tests_copy_destination {
             OpEvent::AskError { id: 42, .. }
         ));
         fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod tests_rename_safety {
+    use super::*;
+    use std::sync::mpsc::channel;
+
+    fn temp_dir() -> PathBuf {
+        let id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("fm-rename-safety-{id}"));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn rename_rejects_destination_outside_source_folder() {
+        let root = temp_dir();
+        let source_dir = root.join("source");
+        let other_dir = root.join("other");
+        fs::create_dir_all(&source_dir).unwrap();
+        fs::create_dir_all(&other_dir).unwrap();
+        let source = source_dir.join("old.txt");
+        let destination = other_dir.join("existing.txt");
+        fs::write(&source, b"source").unwrap();
+        fs::write(&destination, b"destination").unwrap();
+
+        let (reply_tx, reply_rx) = channel();
+        reply_tx
+            .send(OpReply::Error {
+                id: 7,
+                action: ErrorAction::Skip,
+            })
+            .unwrap();
+        let (event_tx, event_rx) = channel();
+        let mut worker = Worker {
+            reply_rx: &reply_rx,
+            events: &event_tx,
+            overwrite_all: false,
+            skip_all: false,
+            failed: 0,
+        };
+        worker.run(&OpJob {
+            id: 7,
+            kind: OpKind::Rename {
+                from: source.clone(),
+                to: destination.clone(),
+            },
+            cancel: Arc::new(AtomicBool::new(false)),
+        });
+
+        assert_eq!(worker.failed, 1);
+        assert_eq!(fs::read(&source).unwrap(), b"source");
+        assert_eq!(fs::read(&destination).unwrap(), b"destination");
+        assert!(event_rx
+            .try_iter()
+            .any(|event| matches!(event, OpEvent::AskError { id: 7, .. })));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_overwrite_rename_keeps_existing_destination() {
+        let dir = temp_dir();
+        let missing_source = dir.join("missing.txt");
+        let destination = dir.join("existing.txt");
+        fs::write(&destination, b"destination").unwrap();
+
+        let (reply_tx, reply_rx) = channel();
+        reply_tx
+            .send(OpReply::Conflict {
+                id: 9,
+                action: ConflictAction::Overwrite,
+            })
+            .unwrap();
+        reply_tx
+            .send(OpReply::Error {
+                id: 9,
+                action: ErrorAction::Skip,
+            })
+            .unwrap();
+        let (event_tx, _event_rx) = channel();
+        let mut worker = Worker {
+            reply_rx: &reply_rx,
+            events: &event_tx,
+            overwrite_all: false,
+            skip_all: false,
+            failed: 0,
+        };
+        worker.run(&OpJob {
+            id: 9,
+            kind: OpKind::Rename {
+                from: missing_source,
+                to: destination.clone(),
+            },
+            cancel: Arc::new(AtomicBool::new(false)),
+        });
+
+        assert_eq!(worker.failed, 1);
+        assert_eq!(fs::read(&destination).unwrap(), b"destination");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn successful_overwrite_rename_replaces_destination() {
+        let dir = temp_dir();
+        let source = dir.join("source.txt");
+        let destination = dir.join("destination.txt");
+        fs::write(&source, b"source").unwrap();
+        fs::write(&destination, b"old destination").unwrap();
+
+        rename_with_overwrite(&source, &destination, true).unwrap();
+        assert!(!source.exists());
+        assert_eq!(fs::read(&destination).unwrap(), b"source");
+        fs::remove_dir_all(dir).unwrap();
     }
 }
