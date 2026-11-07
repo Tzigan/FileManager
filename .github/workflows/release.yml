@@ -193,7 +193,17 @@ jobs:
         run: |
           foreach ($exe in @("target\release\filemanager.exe", "target\release\FileManagerUpdater.exe")) {
             & target\release\FileManagerUpdater.exe --verify-file $exe
-            if ($LASTEXITCODE -ne 0) { throw "Pinned Authenticode verification failed for $exe." }
+            $verifyExitCode = $LASTEXITCODE
+            if ($verifyExitCode -ne 0) {
+              $signature = Get-AuthenticodeSignature -LiteralPath $exe
+              $actualFingerprint = "<none>"
+              if ($null -ne $signature.SignerCertificate) {
+                $actualFingerprint = $signature.SignerCertificate.GetCertHashString(
+                  [System.Security.Cryptography.HashAlgorithmName]::SHA256
+                ).ToUpperInvariant()
+              }
+              throw "Pinned Authenticode verification failed for $exe (status: $($signature.Status); expected SHA-256: $env:FILEMANAGER_SIGNER_SHA256; actual: $actualFingerprint)."
+            }
           }
 
       - name: Package
