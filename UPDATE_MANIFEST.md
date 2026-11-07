@@ -35,7 +35,7 @@ The workflow reads the PFX and password from the GitHub Actions secrets
 
 The archive must contain exactly `FileManager.exe` and
 `FileManagerUpdater.exe` at its root. `SHA256SUMS.txt` is published beside the
-archive with hashes computed for both executables before compression, the legacy
-standalone `.exe`, and the final archive. Keeping these checksums outside the
-ZIP preserves compatibility with the updater in v0.6.6. The release workflow
-also publishes the legacy standalone `.exe` asset so older clients can migrate.
+archive with hashes computed for both executables before compression and for the
+final archive. The release publishes the ZIP, manifest, and checksum file, but
+no standalone `.exe`. Versions before v0.6.6 that use the legacy executable
+updater will need a manual upgrade to move to ZIP-based updates.

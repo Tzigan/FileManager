@@ -128,15 +128,11 @@ jobs:
           New-Item -ItemType Directory -Force dist | Out-Null
           New-Item -ItemType Directory -Force $package | Out-Null
 
-          # Keep the legacy exe asset so 0.6.x clients can migrate to the updater release.
-          Copy-Item target\release\filemanager.exe "dist\FileManager-$tag-x64.exe"
           Copy-Item target\release\filemanager.exe (Join-Path $package "FileManager.exe")
           Copy-Item target\release\FileManagerUpdater.exe (Join-Path $package "FileManagerUpdater.exe")
 
           $dist = (Resolve-Path "dist").Path
           # Record each executable's hash before adding it to the update archive.
-          $legacyExeName = "FileManager-$tag-x64.exe"
-          $legacySha256 = (Get-FileHash -Path (Join-Path $dist $legacyExeName) -Algorithm SHA256).Hash.ToLowerInvariant()
           $appSha256 = (Get-FileHash -Path (Join-Path $package "FileManager.exe") -Algorithm SHA256).Hash.ToLowerInvariant()
           $updaterSha256 = (Get-FileHash -Path (Join-Path $package "FileManagerUpdater.exe") -Algorithm SHA256).Hash.ToLowerInvariant()
 
@@ -149,7 +145,6 @@ jobs:
           $checksums = @(
             "$appSha256  FileManager.exe"
             "$updaterSha256  FileManagerUpdater.exe"
-            "$legacySha256  $legacyExeName"
             "$archiveSha256  $archiveName"
           )
           [System.IO.File]::WriteAllLines(
