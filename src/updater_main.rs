@@ -10,6 +10,26 @@ mod updater;
 
 #[cfg(windows)]
 fn main() {
+    let mut args = std::env::args_os().skip(1);
+    if args
+        .next()
+        .is_some_and(|arg| arg.to_string_lossy() == "--verify-file")
+    {
+        let Some(path) = args.next().map(std::path::PathBuf::from) else {
+            eprintln!("--verify-file requires a path");
+            std::process::exit(2);
+        };
+        if args.next().is_some() {
+            eprintln!("unexpected argument after --verify-file path");
+            std::process::exit(2);
+        }
+        if let Err(error) = update_support::verify_release_executable(&path) {
+            eprintln!("{error:#}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     if let Err(error) = updater::run() {
         updater::show_error(&format!("{error:#}"));
         std::process::exit(1);
