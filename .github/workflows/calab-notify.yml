@@ -1,6 +1,6 @@
 name: Calab Notify
 
-# Sends a Calab room message for every commit that reaches origin/main.
+# Sends a Calab room message for each non-merge commit that reaches origin/main.
 # Replaces the local .git/hooks/reference-transaction hook: the bot token
 # lives in GitHub Secrets (never in a file), and the Linux runner has no
 # Windows codepage/UTF-8 transcoding issues.
@@ -30,7 +30,7 @@ jobs:
         run: |
           set +e
           RANGE="${{ github.event.before }}..${{ github.event.after }}"
-          for sha in $(git rev-list --reverse "$RANGE"); do
+          for sha in $(git rev-list --no-merges --reverse "$RANGE"); do
             subject=$(git log -1 --format=%s "$sha")
             author=$(git log -1 --format=%an "$sha")
             short=$(git rev-parse --short "$sha")
