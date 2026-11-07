@@ -80,12 +80,15 @@ jobs:
           if (-not $certificate.HasPrivateKey) {
             throw "The PFX does not contain a signing certificate with a private key."
           }
-          $thumbprint = $certificate.Thumbprint.Replace(" ", "").ToUpperInvariant()
-          if ($thumbprint -notmatch '^[0-9A-F]{40}$') {
-            throw "The signing certificate has an invalid SHA-1 thumbprint."
+          $certificateHash = $certificate.GetCertHashString(
+            [System.Security.Cryptography.HashAlgorithmName]::SHA256
+          )
+          $fingerprint = $certificateHash.Replace(" ", "").ToUpperInvariant()
+          if ($fingerprint -notmatch '^[0-9A-F]{64}$') {
+            throw "The signing certificate has an invalid SHA-256 fingerprint."
           }
           $certificate.Dispose()
-          "FILEMANAGER_SIGNER_THUMBPRINT=$thumbprint" >> $env:GITHUB_ENV
+          "FILEMANAGER_SIGNER_SHA256=$fingerprint" >> $env:GITHUB_ENV
 
       - name: Build
         run: cargo build --release --bins --locked
