@@ -1,9 +1,9 @@
 use std::env;
-use std::fs::{self, File};
-use std::io::Read;
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Write};
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -31,6 +31,7 @@ use windows::Win32::System::Threading::{
 pub const UPDATE_STAGE_ENV: &str = "FILEMANAGER_UPDATE_STAGE";
 pub const UPDATE_UPDATER_PID_ENV: &str = "FILEMANAGER_UPDATE_UPDATER_PID";
 const STAGE_PREFIX: &str = "FileManager-update-stage-";
+const MAX_UNCOMPRESSED_ARCHIVE_SIZE: u64 = 256 * 1024 * 1024;
 pub(crate) const UPDATE_STARTED_MARKER: &str = ".update-started";
 pub(crate) const PACKAGE_FILES: [&str; 2] = ["FileManager.exe", "FileManagerUpdater.exe"];
 const EXPECTED_SIGNER_THUMBPRINT: Option<&str> = option_env!("FILEMANAGER_SIGNER_THUMBPRINT");
@@ -55,20 +56,9 @@ pub fn prepare_update_archive(
 
     let stage = create_stage_directory()?;
     let result = (|| {
-        let tar = crate::system_tools::system_executable("tar.exe")
-            .context("locate Windows archive extractor")?;
-        let output = Command::new(tar)
-            .args(["-xf"])
-            .arg(archive)
-            .arg("-C")
-            .arg(&stage)
-            .output()
-            .context("launch Windows archive extractor (tar.exe)")?;
-        if !output.status.success() {
-            bail!(
-                "failed to extract update archive: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
+        let mut total_uncompressed = 0;
+        for member in PACKAGE_FILES {
+            extract_archive_member(archive, &stage, member, &mut total_uncompressed)?;
         }
         validate_stage_files(&stage)?;
         verify_stage_signatures(&stage)?;
@@ -188,6 +178,81 @@ fn validate_archive_members(archive: &Path) -> anyhow::Result<()> {
         .map(str::to_owned)
         .collect();
     validate_member_names(members)
+}
+
+fn extract_archive_member(
+    archive: &Path,
+    stage: &Path,
+    member: &str,
+    total_uncompressed: &mut u64,
+) -> anyhow::Result<()> {
+    let destination = stage.join(member);
+    let mut output = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&destination)
+        .with_context(|| format!("create staged update file {}", destination.display()))?;
+    let tar = crate::system_tools::system_executable("tar.exe")
+        .context("locate Windows archive extractor")?;
+    let mut child = Command::new(tar)
+        .args(["-xOf"])
+        .arg(archive)
+        .arg(member)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("launch Windows archive extractor")?;
+    let Some(mut stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        bail!("archive extractor did not provide output");
+    };
+
+    if let Err(error) = copy_with_limit(
+        &mut stdout,
+        &mut output,
+        total_uncompressed,
+        MAX_UNCOMPRESSED_ARCHIVE_SIZE,
+    ) {
+        drop(stdout);
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error).with_context(|| format!("extract update archive member {member}"));
+    }
+    drop(stdout);
+    let status = child.wait().context("wait for Windows archive extractor")?;
+    if !status.success() {
+        bail!("failed to extract update archive member {member}");
+    }
+    output
+        .sync_all()
+        .context("flush extracted update executable")?;
+    Ok(())
+}
+
+fn copy_with_limit(
+    reader: &mut impl Read,
+    writer: &mut impl Write,
+    total_uncompressed: &mut u64,
+    limit: u64,
+) -> anyhow::Result<()> {
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let bytes_read = reader.read(&mut buffer).context("read extracted update data")?;
+        if bytes_read == 0 {
+            return Ok(());
+        }
+        let next_total = total_uncompressed
+            .checked_add(bytes_read as u64)
+            .context("update archive uncompressed size overflow")?;
+        if next_total > limit {
+            bail!("update archive exceeds the uncompressed size limit");
+        }
+        writer
+            .write_all(&buffer[..bytes_read])
+            .context("write extracted update data")?;
+        *total_uncompressed = next_total;
+    }
 }
 
 fn validate_member_names(mut members: Vec<String>) -> anyhow::Result<()> {
@@ -457,6 +522,27 @@ impl Drop for HashGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
+
+    struct ChunkedReader<R>(R);
+
+    impl<R: Read> Read for ChunkedReader<R> {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            let chunk_size = buffer.len().min(4);
+            self.0.read(&mut buffer[..chunk_size])
+        }
+    }
+
+    #[test]
+    fn extraction_stops_before_writing_past_uncompressed_limit() {
+        let mut reader = ChunkedReader(Cursor::new(b"abcdef"));
+        let mut output = Vec::new();
+        let mut total = 0;
+
+        assert!(copy_with_limit(&mut reader, &mut output, &mut total, 5).is_err());
+        assert_eq!(output, b"abcd");
+        assert_eq!(total, 4);
+    }
 
     #[test]
     fn cng_sha256_matches_the_standard_known_vector() {
