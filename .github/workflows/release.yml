@@ -4,55 +4,93 @@ on:
   push:
     branches:
       - main
-    tags:
-      - "v*"
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  build-release:
+  resolve-release:
     runs-on: windows-latest
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.ver.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           fetch-tags: true
+          persist-credentials: false
 
-      # Resolve the release tag. On a tag push — use it. On a push to main —
-      # read the version from Cargo.toml; if its tag doesn't exist yet,
-      # create and push it (GITHUB_TOKEN pushes don't retrigger workflows).
       - name: Resolve release tag
         id: ver
         shell: pwsh
         run: |
-          if ("${{ github.ref_type }}" -eq "tag") {
-            "tag=${{ github.ref_name }}" >> $env:GITHUB_OUTPUT
-            exit 0
-          }
           $v = (Select-String -Path Cargo.toml -Pattern '^version = "([^"]+)"').Matches[0].Groups[1].Value
           $tag = "v$v"
           if (git tag -l $tag) {
-            Write-Output "Tag $tag already released — nothing to do."
+            Write-Output "Tag $tag already released - nothing to do."
             exit 0
           }
           "tag=$tag" >> $env:GITHUB_OUTPUT
 
+  build-release:
+    needs: resolve-release
+    if: needs.resolve-release.outputs.tag != ''
+    runs-on: windows-latest
+    environment: release
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
       - name: Install Rust
-        if: steps.ver.outputs.tag != ''
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache cargo
-        if: steps.ver.outputs.tag != ''
         uses: Swatinem/rust-cache@v2
 
       # Tests gate the release: a red suite blocks tag creation and publish.
       - name: Test
-        if: steps.ver.outputs.tag != ''
         run: cargo test --locked
 
       - name: Prepare signing certificate
-        if: steps.ver.outputs.tag != ''
+        shell: pwsh
+        env:
+          SIGNING_PFX_BASE64: ${{ secrets.WINDOWS_SIGNING_PFX_BASE64 }}
+          SIGNING_PFX_PASSWORD: ${{ secrets.WINDOWS_SIGNING_PFX_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:SIGNING_PFX_BASE64)) {
+            throw "Set the WINDOWS_SIGNING_PFX_BASE64 GitHub Actions secret."
+          }
+          if ([string]::IsNullOrWhiteSpace($env:SIGNING_PFX_PASSWORD)) {
+            throw "Set the WINDOWS_SIGNING_PFX_PASSWORD GitHub Actions secret."
+          }
+
+          $pfxBytes = [Convert]::FromBase64String($env:SIGNING_PFX_BASE64)
+          $certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
+            $pfxBytes,
+            $env:SIGNING_PFX_PASSWORD,
+            [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::EphemeralKeySet
+          )
+          if (-not $certificate.HasPrivateKey) {
+            throw "The PFX does not contain a signing certificate with a private key."
+          }
+          $thumbprint = $certificate.Thumbprint.Replace(" ", "").ToUpperInvariant()
+          if ($thumbprint -notmatch '^[0-9A-F]{40}$') {
+            throw "The signing certificate has an invalid SHA-1 thumbprint."
+          }
+          $certificate.Dispose()
+          "FILEMANAGER_SIGNER_THUMBPRINT=$thumbprint" >> $env:GITHUB_ENV
+
+      - name: Build
+        run: cargo build --release --bins --locked
+
+      - name: Sign executables
         shell: pwsh
         env:
           SIGNING_PFX_BASE64: ${{ secrets.WINDOWS_SIGNING_PFX_BASE64 }}
@@ -70,37 +108,6 @@ jobs:
             $pfxPath,
             [Convert]::FromBase64String($env:SIGNING_PFX_BASE64)
           )
-          $certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
-            $pfxPath,
-            $env:SIGNING_PFX_PASSWORD,
-            [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::EphemeralKeySet
-          )
-          if (-not $certificate.HasPrivateKey) {
-            throw "The PFX does not contain a signing certificate with a private key."
-          }
-          $thumbprint = $certificate.Thumbprint.Replace(" ", "").ToUpperInvariant()
-          if ($thumbprint -notmatch '^[0-9A-F]{40}$') {
-            throw "The signing certificate has an invalid SHA-1 thumbprint."
-          }
-          "SIGNING_PFX_PATH=$pfxPath" >> $env:GITHUB_ENV
-          "FILEMANAGER_SIGNER_THUMBPRINT=$thumbprint" >> $env:GITHUB_ENV
-
-      - name: Build
-        if: steps.ver.outputs.tag != ''
-        run: cargo build --release --bins --locked
-
-      - name: Sign executables
-        if: steps.ver.outputs.tag != ''
-        shell: pwsh
-        env:
-          SIGNING_PFX_PASSWORD: ${{ secrets.WINDOWS_SIGNING_PFX_PASSWORD }}
-        run: |
-          if ([string]::IsNullOrWhiteSpace($env:SIGNING_PFX_PASSWORD)) {
-            throw "Set the WINDOWS_SIGNING_PFX_PASSWORD GitHub Actions secret."
-          }
-          if ([string]::IsNullOrWhiteSpace($env:SIGNING_PFX_PATH)) {
-            throw "The signing certificate was not prepared."
-          }
 
           $sdkRoot = Join-Path ([Environment]::GetFolderPath("ProgramFilesX86")) "Windows Kits\10\bin"
           $signtool = Get-ChildItem -Path (Join-Path $sdkRoot "*\x64\signtool.exe") |
@@ -111,17 +118,33 @@ jobs:
           }
 
           foreach ($exe in @("target\release\filemanager.exe", "target\release\FileManagerUpdater.exe")) {
-            & $signtool.FullName sign /f $env:SIGNING_PFX_PATH /p $env:SIGNING_PFX_PASSWORD /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /v $exe
+            & $signtool.FullName sign /f $pfxPath /p $env:SIGNING_PFX_PASSWORD /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /v $exe
             if ($LASTEXITCODE -ne 0) { throw "Authenticode signing failed for $exe." }
+          }
+
+      - name: Remove signing certificate
+        if: always()
+        shell: pwsh
+        run: |
+          $pfxPath = Join-Path $env:RUNNER_TEMP "filemanager-signing.pfx"
+          if (Test-Path -LiteralPath $pfxPath) {
+            Remove-Item -LiteralPath $pfxPath -Force
+          }
+
+      - name: Verify signed executables
+        shell: pwsh
+        run: |
+          foreach ($exe in @("target\release\filemanager.exe", "target\release\FileManagerUpdater.exe")) {
             & target\release\FileManagerUpdater.exe --verify-file $exe
             if ($LASTEXITCODE -ne 0) { throw "Pinned Authenticode verification failed for $exe." }
           }
 
       - name: Package
-        if: steps.ver.outputs.tag != ''
         shell: pwsh
+        env:
+          RELEASE_TAG: ${{ needs.resolve-release.outputs.tag }}
         run: |
-          $tag = "${{ steps.ver.outputs.tag }}"
+          $tag = $env:RELEASE_TAG
           $version = $tag.TrimStart('v')
           $archiveName = "FileManager-$tag-x64.zip"
           $package = Join-Path $env:RUNNER_TEMP "filemanager-update-package"
@@ -167,27 +190,16 @@ jobs:
             [System.Text.UTF8Encoding]::new($false)
           )
 
-      # The tag is created only after a successful build, so a failed run
-      # never leaves a tag that would block re-publishing.
-      - name: Create and push tag
-        if: steps.ver.outputs.tag != ''
-        shell: pwsh
-        run: |
-          $tag = "${{ steps.ver.outputs.tag }}"
-          if (git tag -l $tag) { exit 0 }
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag $tag
-          git push origin $tag
-
       - name: Build changelog from commit messages
-        if: steps.ver.outputs.tag != ''
         shell: pwsh
+        env:
+          RELEASE_TAG: ${{ needs.resolve-release.outputs.tag }}
         run: |
           [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+          $tag = $env:RELEASE_TAG
           $tags = git tag -l "v*" | Sort-Object { [version]($_.TrimStart('v')) }
-          $prev = ($tags | Where-Object { $_ -lt "${{ steps.ver.outputs.tag }}" } | Select-Object -Last 1)
-          $range = if ($prev) { "$prev..${{ steps.ver.outputs.tag }}" } else { "HEAD" }
+          $prev = ($tags | Where-Object { $_ -lt $tag } | Select-Object -Last 1)
+          $range = if ($prev) { "$prev..HEAD" } else { "HEAD" }
           # Only commits that touch the program itself (not CI/docs/infra),
           # and not test-only commits.
           $shas = git log $range --pretty=format:"%H" -- src i18n resources build.rs app.manifest app.rc Cargo.toml
@@ -201,19 +213,53 @@ jobs:
           }
           $out | Out-File -Encoding utf8 CHANGELOG_REL.md
 
+      - name: Upload release files
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-files
+          path: |
+            dist/
+            CHANGELOG_REL.md
+          if-no-files-found: error
+
+  publish-release:
+    needs: [resolve-release, build-release]
+    if: needs.resolve-release.outputs.tag != ''
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-files
+
+      - name: Create and push tag
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.resolve-release.outputs.tag }}
+        run: |
+          $tag = $env:RELEASE_TAG
+          if (git tag -l $tag) { exit 0 }
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag $tag
+          $auth = [Convert]::ToBase64String(
+            [System.Text.Encoding]::ASCII.GetBytes("x-access-token:$env:GH_TOKEN")
+          )
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push origin $tag
+          if ($LASTEXITCODE -ne 0) { throw "Failed to push release tag." }
+
       - name: Publish release
-        if: steps.ver.outputs.tag != ''
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.ver.outputs.tag }}
+          tag_name: ${{ needs.resolve-release.outputs.tag }}
+          target_commitish: ${{ github.sha }}
           files: dist/*
           body_path: CHANGELOG_REL.md
-
-      - name: Remove signing certificate
-        if: always()
-        shell: pwsh
-        run: |
-          $pfxPath = Join-Path $env:RUNNER_TEMP "filemanager-signing.pfx"
-          if (Test-Path -LiteralPath $pfxPath) {
-            Remove-Item -LiteralPath $pfxPath -Force
-          }
