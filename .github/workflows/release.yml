@@ -15,6 +15,7 @@ jobs:
       contents: read
     outputs:
       tag: ${{ steps.ver.outputs.tag }}
+      target_sha: ${{ steps.ver.outputs.target_sha }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -25,14 +26,66 @@ jobs:
       - name: Resolve release tag
         id: ver
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          RELEASE_SHA: ${{ github.sha }}
         run: |
-          $v = (Select-String -Path Cargo.toml -Pattern '^version = "([^"]+)"').Matches[0].Groups[1].Value
+          $versionMatch = Select-String -Path Cargo.toml -Pattern '^version = "([^"]+)"'
+          if (-not $versionMatch) { throw "Could not read package version from Cargo.toml." }
+          $v = $versionMatch.Matches[0].Groups[1].Value
           $tag = "v$v"
-          if (git tag -l $tag) {
-            Write-Output "Tag $tag already released - nothing to do."
-            exit 0
+          $targetSha = $env:RELEASE_SHA
+          $existingTag = git tag -l $tag
+          if ($LASTEXITCODE -ne 0) { throw "Could not check for existing release tag." }
+
+          if ($existingTag) {
+            $tagCommit = (git rev-parse "${tag}^{commit}").Trim()
+            if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($tagCommit)) {
+              throw "Could not resolve existing tag $tag to a commit."
+            }
+            git merge-base --is-ancestor $tagCommit origin/main
+            if ($LASTEXITCODE -ne 0) {
+              throw "Existing release tag $tag must point to a commit reachable from main."
+            }
+            $tagCargo = git show "${tagCommit}:Cargo.toml"
+            if ($LASTEXITCODE -ne 0) { throw "Could not read Cargo.toml from tag $tag." }
+            $tagVersionMatch = $tagCargo | Select-String -Pattern '^version = "([^"]+)"'
+            if (-not $tagVersionMatch -or $tagVersionMatch.Matches[0].Groups[1].Value -ne $v) {
+              throw "Existing tag $tag does not point to a commit with version $v."
+            }
+            $targetSha = $tagCommit
+
+            $headers = @{
+              Authorization = "Bearer $env:GH_TOKEN"
+              Accept = "application/vnd.github+json"
+              "X-GitHub-Api-Version" = "2022-11-28"
+            }
+            $release = $null
+            try {
+              $release = Invoke-RestMethod `
+                -Method Get `
+                -Uri "https://api.github.com/repos/$env:REPOSITORY/releases/tags/$tag" `
+                -Headers $headers
+            } catch {
+              $response = $_.Exception.Response
+              $statusCode = if ($null -ne $response) { [int]$response.StatusCode } else { 0 }
+              if ($statusCode -ne 404) { throw }
+            }
+
+            if ($null -ne $release -and -not $release.draft) {
+              $expectedAssets = @("FileManager-$tag-x64.zip", "manifest.json", "SHA256SUMS.txt")
+              $existingAssets = @($release.assets | ForEach-Object { $_.name })
+              $missingAssets = @($expectedAssets | Where-Object { $existingAssets -notcontains $_ })
+              if ($missingAssets.Count -eq 0) {
+                Write-Output "Release $tag is already published with all assets - nothing to do."
+                exit 0
+              }
+              Write-Output "Release $tag is incomplete; retrying missing assets: $($missingAssets -join ', ')"
+            }
           }
           "tag=$tag" >> $env:GITHUB_OUTPUT
+          "target_sha=$targetSha" >> $env:GITHUB_OUTPUT
 
   build-release:
     needs: resolve-release
@@ -44,6 +97,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ needs.resolve-release.outputs.target_sha }}
           fetch-depth: 0
           fetch-tags: true
           persist-credentials: false
@@ -231,6 +285,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ needs.resolve-release.outputs.target_sha }}
           fetch-depth: 0
           fetch-tags: true
           persist-credentials: false
@@ -244,12 +299,21 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.resolve-release.outputs.tag }}
+          TARGET_SHA: ${{ needs.resolve-release.outputs.target_sha }}
         run: |
           $tag = $env:RELEASE_TAG
-          if (git tag -l $tag) { exit 0 }
+          $existingTag = git tag -l $tag
+          if ($LASTEXITCODE -ne 0) { throw "Could not check for existing release tag." }
+          if ($existingTag) {
+            $tagCommit = (git rev-parse "${tag}^{commit}").Trim()
+            if ($LASTEXITCODE -ne 0 -or $tagCommit -ne $env:TARGET_SHA) {
+              throw "Existing release tag $tag points to a different commit."
+            }
+            exit 0
+          }
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag $tag
+          git tag $tag $env:TARGET_SHA
           $auth = [Convert]::ToBase64String(
             [System.Text.Encoding]::ASCII.GetBytes("x-access-token:$env:GH_TOKEN")
           )
@@ -260,6 +324,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.resolve-release.outputs.tag }}
-          target_commitish: ${{ github.sha }}
+          target_commitish: ${{ needs.resolve-release.outputs.target_sha }}
           files: dist/*
           body_path: CHANGELOG_REL.md
+          overwrite_files: true
