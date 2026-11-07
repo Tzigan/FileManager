@@ -9,6 +9,8 @@ fn main() {
     }
 
     if std::env::var_os("CARGO_CFG_WINDOWS").is_some() {
-        let _ = embed_resource::compile("app.rc", embed_resource::NONE);
+        embed_resource::compile("app.rc", embed_resource::NONE)
+            .manifest_required()
+            .expect("failed to compile required Windows resources from app.rc");
     }
 }
