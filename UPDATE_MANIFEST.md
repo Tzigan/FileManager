@@ -21,11 +21,12 @@ values below are placeholders:
 `minimum_supported_version` is optional. If present, clients older than that
 version refuse the automatic update. The release workflow signs both executables
 with Authenticode; the updater verifies both signatures before installation.
-The build embeds the PFX certificate thumbprint. It accepts a valid signature
-from that pinned self-signed certificate even when Windows does not trust its
-root; other invalid signatures are rejected. Windows may still display an
-unknown-publisher warning, and signing cannot guarantee a Defender false positive
-will disappear.
+The build embeds the SHA-256 fingerprint of the PFX certificate and accepts a
+valid signature only from that pinned self-signed certificate, even when Windows
+does not trust its root; other invalid signatures are rejected. This changes
+only the pin's digest algorithm, not the certificate or signing key. Windows may
+still display an unknown-publisher warning, and signing cannot guarantee a
+Defender false positive will disappear.
 The optional `signature` field is reserved for a detached manifest signature
 and is currently omitted.
 

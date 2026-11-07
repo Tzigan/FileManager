@@ -16,7 +16,7 @@ use windows::Win32::Security::Cryptography::{
     BCRYPT_ALG_HANDLE, BCRYPT_HANDLE, BCRYPT_HASH_HANDLE, BCRYPT_OBJECT_LENGTH,
     BCRYPT_OPEN_ALGORITHM_PROVIDER_FLAGS, BCRYPT_SHA256_ALGORITHM, BCryptCloseAlgorithmProvider,
     BCryptCreateHash, BCryptDestroyHash, BCryptFinishHash, BCryptGetProperty, BCryptHashData,
-    BCryptOpenAlgorithmProvider, CERT_SHA1_HASH_PROP_ID, CertGetCertificateContextProperty,
+    BCryptOpenAlgorithmProvider, CERT_SHA256_HASH_PROP_ID, CertGetCertificateContextProperty,
 };
 use windows::Win32::Security::WinTrust::{
     WINTRUST_ACTION_GENERIC_VERIFY_V2, WINTRUST_DATA, WINTRUST_FILE_INFO, WTD_CHOICE_FILE,
@@ -34,7 +34,7 @@ const STAGE_PREFIX: &str = "FileManager-update-stage-";
 const MAX_UNCOMPRESSED_ARCHIVE_SIZE: u64 = 256 * 1024 * 1024;
 pub(crate) const UPDATE_STARTED_MARKER: &str = ".update-started";
 pub(crate) const PACKAGE_FILES: [&str; 2] = ["FileManager.exe", "FileManagerUpdater.exe"];
-const EXPECTED_SIGNER_THUMBPRINT: Option<&str> = option_env!("FILEMANAGER_SIGNER_THUMBPRINT");
+const EXPECTED_SIGNER_SHA256: Option<&str> = option_env!("FILEMANAGER_SIGNER_SHA256");
 
 pub fn prepare_update_archive(
     archive: &Path,
@@ -300,12 +300,12 @@ pub(crate) fn verify_stage_signatures(stage: &Path) -> anyhow::Result<()> {
 }
 
 pub(crate) fn verify_release_executable(path: &Path) -> anyhow::Result<()> {
-    let expected_thumbprint = EXPECTED_SIGNER_THUMBPRINT
-        .context("release build does not contain a pinned signing certificate")?;
-    verify_authenticode(path, expected_thumbprint)
+    let expected_sha256 = EXPECTED_SIGNER_SHA256
+        .context("release build does not contain a pinned signing certificate SHA-256")?;
+    verify_authenticode(path, expected_sha256)
 }
 
-pub(crate) fn verify_authenticode(path: &Path, expected_thumbprint: &str) -> anyhow::Result<()> {
+pub(crate) fn verify_authenticode(path: &Path, expected_sha256: &str) -> anyhow::Result<()> {
     if !path.is_file() {
         bail!("signed update executable is missing: {}", path.display());
     }
@@ -339,7 +339,7 @@ pub(crate) fn verify_authenticode(path: &Path, expected_thumbprint: &str) -> any
             (&mut trust_data as *mut WINTRUST_DATA).cast(),
         )
     };
-    let signer_thumbprint = signer_thumbprint_from_state(trust_data.hWVTStateData);
+    let signer_sha256 = signer_sha256_from_state(trust_data.hWVTStateData);
     trust_data.dwStateAction = WTD_STATEACTION_CLOSE;
     unsafe {
         let _ = WinVerifyTrust(
@@ -348,7 +348,7 @@ pub(crate) fn verify_authenticode(path: &Path, expected_thumbprint: &str) -> any
             (&mut trust_data as *mut WINTRUST_DATA).cast(),
         );
     }
-    let signer_thumbprint = signer_thumbprint?;
+    let signer_sha256 = signer_sha256?;
     // Only relax the Windows trust-chain result for this exact CI-pinned signer.
     if status != 0 && status as u32 != CERT_E_UNTRUSTEDROOT.0 as u32 {
         bail!(
@@ -357,17 +357,17 @@ pub(crate) fn verify_authenticode(path: &Path, expected_thumbprint: &str) -> any
             status as u32
         );
     }
-    if !signer_thumbprint.eq_ignore_ascii_case(expected_thumbprint) {
+    if !signer_sha256.eq_ignore_ascii_case(expected_sha256) {
         bail!(
-            "unexpected Authenticode signer for {} (expected {})",
+            "unexpected Authenticode signer for {} (expected SHA-256 {})",
             path.display(),
-            expected_thumbprint
+            expected_sha256
         );
     }
     Ok(())
 }
 
-fn signer_thumbprint_from_state(state: HANDLE) -> anyhow::Result<String> {
+fn signer_sha256_from_state(state: HANDLE) -> anyhow::Result<String> {
     if state.is_invalid() {
         bail!("Windows trust provider returned no signature state");
     }
@@ -385,20 +385,20 @@ fn signer_thumbprint_from_state(state: HANDLE) -> anyhow::Result<String> {
             bail!("Authenticode signature has no signer certificate");
         }
 
-        let mut thumbprint = [0_u8; 20];
-        let mut size = thumbprint.len() as u32;
+        let mut fingerprint = [0_u8; 32];
+        let mut size = fingerprint.len() as u32;
         CertGetCertificateContextProperty(
             (*provider_cert).pCert,
-            CERT_SHA1_HASH_PROP_ID,
-            Some(thumbprint.as_mut_ptr().cast()),
+            CERT_SHA256_HASH_PROP_ID,
+            Some(fingerprint.as_mut_ptr().cast()),
             &mut size,
         )
-        .context("read Authenticode signer thumbprint")?;
-        if size != thumbprint.len() as u32 {
-            bail!("unexpected Authenticode signer thumbprint length");
+        .context("read Authenticode signer SHA-256 fingerprint")?;
+        if size != fingerprint.len() as u32 {
+            bail!("unexpected Authenticode signer SHA-256 length");
         }
-        let mut output = String::with_capacity(40);
-        for byte in thumbprint {
+        let mut output = String::with_capacity(64);
+        for byte in fingerprint {
             use std::fmt::Write as _;
             write!(output, "{byte:02X}").expect("writing to String cannot fail");
         }
@@ -586,7 +586,13 @@ mod tests {
             .as_nanos();
         let path = env::temp_dir().join(format!("filemanager-unsigned-{id}.exe"));
         fs::write(&path, b"not a signed executable").unwrap();
-        assert!(verify_authenticode(&path, "FB1E9D5E4BBBAE0D4C7B74AC45ED2A1D4D3DA1FB").is_err());
+        assert!(
+            verify_authenticode(
+                &path,
+                "0000000000000000000000000000000000000000000000000000000000000000"
+            )
+            .is_err()
+        );
         fs::remove_file(path).unwrap();
     }
 }
