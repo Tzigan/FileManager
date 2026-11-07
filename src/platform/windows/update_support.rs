@@ -16,7 +16,7 @@ use windows::Win32::Security::Cryptography::{
     BCRYPT_ALG_HANDLE, BCRYPT_HANDLE, BCRYPT_HASH_HANDLE, BCRYPT_OBJECT_LENGTH,
     BCRYPT_OPEN_ALGORITHM_PROVIDER_FLAGS, BCRYPT_SHA256_ALGORITHM, BCryptCloseAlgorithmProvider,
     BCryptCreateHash, BCryptDestroyHash, BCryptFinishHash, BCryptGetProperty, BCryptHashData,
-    BCryptOpenAlgorithmProvider, CERT_SHA256_HASH_PROP_ID, CertGetCertificateContextProperty,
+    BCryptOpenAlgorithmProvider,
 };
 use windows::Win32::Security::WinTrust::{
     WINTRUST_ACTION_GENERIC_VERIFY_V2, WINTRUST_DATA, WINTRUST_FILE_INFO, WTD_CHOICE_FILE,
@@ -359,9 +359,10 @@ pub(crate) fn verify_authenticode(path: &Path, expected_sha256: &str) -> anyhow:
     }
     if !signer_sha256.eq_ignore_ascii_case(expected_sha256) {
         bail!(
-            "unexpected Authenticode signer for {} (expected SHA-256 {})",
+            "unexpected Authenticode signer for {} (expected SHA-256 {}, got {})",
             path.display(),
-            expected_sha256
+            expected_sha256,
+            signer_sha256
         );
     }
     Ok(())
@@ -384,25 +385,13 @@ fn signer_sha256_from_state(state: HANDLE) -> anyhow::Result<String> {
         if provider_cert.is_null() || (*provider_cert).pCert.is_null() {
             bail!("Authenticode signature has no signer certificate");
         }
-
-        let mut fingerprint = [0_u8; 32];
-        let mut size = fingerprint.len() as u32;
-        CertGetCertificateContextProperty(
-            (*provider_cert).pCert,
-            CERT_SHA256_HASH_PROP_ID,
-            Some(fingerprint.as_mut_ptr().cast()),
-            &mut size,
-        )
-        .context("read Authenticode signer SHA-256 fingerprint")?;
-        if size != fingerprint.len() as u32 {
-            bail!("unexpected Authenticode signer SHA-256 length");
+        let certificate = &*(*provider_cert).pCert;
+        if certificate.pbCertEncoded.is_null() || certificate.cbCertEncoded == 0 {
+            bail!("Authenticode signer certificate has no encoded data");
         }
-        let mut output = String::with_capacity(64);
-        for byte in fingerprint {
-            use std::fmt::Write as _;
-            write!(output, "{byte:02X}").expect("writing to String cannot fail");
-        }
-        Ok(output)
+        let encoded =
+            std::slice::from_raw_parts(certificate.pbCertEncoded, certificate.cbCertEncoded as usize);
+        sha256_bytes(encoded)
     }
 }
 
@@ -428,6 +417,81 @@ fn sha256_file(path: &Path) -> anyhow::Result<String> {
     )?;
     let algorithm_guard = AlgorithmGuard(algorithm);
     let result = hash_file_with_algorithm(path, algorithm_guard.0);
+    drop(algorithm_guard);
+    result
+}
+
+fn sha256_bytes(bytes: &[u8]) -> anyhow::Result<String> {
+    let mut algorithm = BCRYPT_ALG_HANDLE::default();
+    check_ntstatus(
+        unsafe {
+            BCryptOpenAlgorithmProvider(
+                &mut algorithm,
+                BCRYPT_SHA256_ALGORITHM,
+                windows::core::PCWSTR::null(),
+                BCRYPT_OPEN_ALGORITHM_PROVIDER_FLAGS(0),
+            )
+        },
+        "open SHA-256 provider",
+    )?;
+    let algorithm_guard = AlgorithmGuard(algorithm);
+    let result = (|| {
+        let mut object_len_bytes = [0_u8; 4];
+        let mut bytes_returned = 0_u32;
+        check_ntstatus(
+            unsafe {
+                BCryptGetProperty(
+                    BCRYPT_HANDLE::from(algorithm_guard.0),
+                    BCRYPT_OBJECT_LENGTH,
+                    Some(&mut object_len_bytes),
+                    &mut bytes_returned,
+                    0,
+                )
+            },
+            "read SHA-256 object size",
+        )?;
+        if bytes_returned != object_len_bytes.len() as u32 {
+            bail!("unexpected SHA-256 object-size response");
+        }
+        let object_len = u32::from_le_bytes(object_len_bytes) as usize;
+        if object_len == 0 || object_len > 16 * 1024 * 1024 {
+            bail!("invalid SHA-256 object size");
+        }
+        let mut object = vec![0_u8; object_len];
+        let mut hash = BCRYPT_HASH_HANDLE::default();
+        check_ntstatus(
+            unsafe {
+                BCryptCreateHash(
+                    algorithm_guard.0,
+                    &mut hash,
+                    Some(&mut object),
+                    None,
+                    0,
+                )
+            },
+            "create SHA-256 hash",
+        )?;
+        let hash_guard = HashGuard(hash);
+        let result = (|| {
+            check_ntstatus(
+                unsafe { BCryptHashData(hash_guard.0, bytes, 0) },
+                "hash signer certificate",
+            )?;
+            let mut digest = [0_u8; 32];
+            check_ntstatus(
+                unsafe { BCryptFinishHash(hash_guard.0, &mut digest, 0) },
+                "finish signer certificate SHA-256 hash",
+            )?;
+            let mut output = String::with_capacity(64);
+            for byte in digest {
+                use std::fmt::Write as _;
+                write!(output, "{byte:02X}").expect("writing to String cannot fail");
+            }
+            Ok(output)
+        })();
+        drop(hash_guard);
+        result
+    })();
     drop(algorithm_guard);
     result
 }
@@ -552,10 +616,12 @@ mod tests {
             .as_nanos();
         let path = env::temp_dir().join(format!("filemanager-sha256-{}-{id}", std::process::id()));
         fs::write(&path, b"abc").unwrap();
+        let expected = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
         assert_eq!(
             sha256_file(&path).unwrap(),
-            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+            expected
         );
+        assert_eq!(sha256_bytes(b"abc").unwrap(), expected.to_ascii_uppercase());
         fs::remove_file(path).unwrap();
     }
 
