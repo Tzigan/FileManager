@@ -306,10 +306,18 @@ pub(crate) fn verify_release_executable(path: &Path) -> anyhow::Result<()> {
 }
 
 pub(crate) fn verify_authenticode(path: &Path, expected_sha256: &str) -> anyhow::Result<()> {
-    if !path.is_file() {
-        bail!("signed update executable is missing: {}", path.display());
+    let resolved_path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        env::current_dir()?.join(path)
+    };
+    if !resolved_path.is_file() {
+        bail!(
+            "signed update executable is missing: {}",
+            resolved_path.display()
+        );
     }
-    let path_wide: Vec<u16> = path
+    let path_wide: Vec<u16> = resolved_path
         .as_os_str()
         .encode_wide()
         .chain(std::iter::once(0))
@@ -353,14 +361,14 @@ pub(crate) fn verify_authenticode(path: &Path, expected_sha256: &str) -> anyhow:
     if status != 0 && status as u32 != CERT_E_UNTRUSTEDROOT.0 as u32 {
         bail!(
             "Authenticode verification failed for {} (0x{:08x})",
-            path.display(),
+            resolved_path.display(),
             status as u32
         );
     }
     if !signer_sha256.eq_ignore_ascii_case(expected_sha256) {
         bail!(
             "unexpected Authenticode signer for {} (expected SHA-256 {}, got {})",
-            path.display(),
+            resolved_path.display(),
             expected_sha256,
             signer_sha256
         );
