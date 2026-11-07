@@ -1,5 +1,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+#[cfg(windows)]
+#[path = "platform/windows/system_tools.rs"]
+mod system_tools;
+
 mod core;
 mod platform;
 mod ui;

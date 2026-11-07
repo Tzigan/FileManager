@@ -2,6 +2,11 @@
 
 #[cfg(windows)]
 #[allow(dead_code)]
+#[path = "platform/windows/system_tools.rs"]
+mod system_tools;
+
+#[cfg(windows)]
+#[allow(dead_code)]
 #[path = "platform/windows/update_support.rs"]
 mod update_support;
 #[cfg(windows)]

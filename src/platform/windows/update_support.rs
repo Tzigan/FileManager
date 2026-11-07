@@ -55,7 +55,9 @@ pub fn prepare_update_archive(
 
     let stage = create_stage_directory()?;
     let result = (|| {
-        let output = Command::new("tar.exe")
+        let tar = crate::system_tools::system_executable("tar.exe")
+            .context("locate Windows archive extractor")?;
+        let output = Command::new(tar)
             .args(["-xf"])
             .arg(archive)
             .arg("-C")
@@ -166,7 +168,9 @@ fn is_missing_process_error(error: &windows::core::Error) -> bool {
 }
 
 fn validate_archive_members(archive: &Path) -> anyhow::Result<()> {
-    let output = Command::new("tar.exe")
+    let tar = crate::system_tools::system_executable("tar.exe")
+        .context("locate Windows archive inspector")?;
+    let output = Command::new(tar)
         .args(["-tf"])
         .arg(archive)
         .output()
