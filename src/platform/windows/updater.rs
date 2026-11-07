@@ -164,7 +164,6 @@ fn install_binaries(target_exe: &Path, stage_dir: &Path) -> anyhow::Result<Insta
         .context("target executable has no parent")?;
     validate_target(target_exe)?;
     validate_stage_files(stage_dir)?;
-    cleanup_previous_backups(install_dir);
 
     let id = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
     let backup_dir = install_dir.join(format!("{BACKUP_PREFIX}{}{id}", std::process::id()));
@@ -312,23 +311,6 @@ fn remove_file_if_present(path: &Path) -> std::io::Result<()> {
     }
 }
 
-fn cleanup_previous_backups(install_dir: &Path) {
-    let Ok(entries) = fs::read_dir(install_dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        if name
-            .to_str()
-            .is_some_and(|name| name.starts_with(BACKUP_PREFIX))
-            && entry.file_type().is_ok_and(|kind| kind.is_dir())
-            && entry.path().join(BACKUP_MARKER).is_file()
-        {
-            let _ = fs::remove_dir_all(entry.path());
-        }
-    }
-}
-
 fn wait_for_startup(child: &mut Child, marker: &Path) -> anyhow::Result<()> {
     let deadline = Instant::now() + STARTUP_TIMEOUT;
     loop {
@@ -441,6 +423,45 @@ mod tests {
         assert_eq!(fs::read(&target).unwrap(), b"old app");
         assert!(!updater.exists());
 
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(stage_dir).unwrap();
+    }
+
+    #[test]
+    fn new_install_preserves_marked_backup_from_previous_failed_rollback() {
+        let root = temp_dir("updater-preserve-backup");
+        let install_dir = root.join("install");
+        fs::create_dir(&install_dir).unwrap();
+        let stage_dir = std::env::temp_dir().join(format!(
+            "FileManager-update-stage-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&stage_dir).unwrap();
+
+        let target = install_dir.join(APP_FILE);
+        let updater = install_dir.join(UPDATER_FILE);
+        fs::write(&target, b"old app").unwrap();
+        fs::write(&updater, b"old updater").unwrap();
+        fs::write(stage_dir.join(APP_FILE), b"new app").unwrap();
+        fs::write(stage_dir.join(UPDATER_FILE), b"new updater").unwrap();
+
+        let previous_backup = install_dir.join(format!("{BACKUP_PREFIX}previous"));
+        fs::create_dir(&previous_backup).unwrap();
+        fs::write(previous_backup.join(BACKUP_MARKER), b"").unwrap();
+        fs::write(previous_backup.join(APP_FILE), b"last recoverable app").unwrap();
+
+        let transaction = install_binaries(&target, &stage_dir).unwrap();
+        assert_eq!(
+            fs::read(previous_backup.join(APP_FILE)).unwrap(),
+            b"last recoverable app"
+        );
+        assert!(previous_backup.join(BACKUP_MARKER).is_file());
+
+        rollback(&transaction).unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"old app");
         fs::remove_dir_all(root).unwrap();
         fs::remove_dir_all(stage_dir).unwrap();
     }
