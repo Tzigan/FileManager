@@ -9,8 +9,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, bail};
 use windows::Win32::Foundation::{
-    CERT_E_UNTRUSTEDROOT, CloseHandle, ERROR_INVALID_PARAMETER, HANDLE, HWND, NTSTATUS,
-    WAIT_OBJECT_0,
+    CERT_E_CHAINING, CERT_E_UNTRUSTEDROOT, CloseHandle, ERROR_INVALID_PARAMETER, HANDLE, HWND,
+    NTSTATUS, TRUST_E_SUBJECT_NOT_TRUSTED, WAIT_OBJECT_0,
 };
 use windows::Win32::Security::Cryptography::{
     BCRYPT_ALG_HANDLE, BCRYPT_HANDLE, BCRYPT_HASH_HANDLE, BCRYPT_OBJECT_LENGTH,
@@ -357,14 +357,6 @@ pub(crate) fn verify_authenticode(path: &Path, expected_sha256: &str) -> anyhow:
         );
     }
     let signer_sha256 = signer_sha256?;
-    // Only relax the Windows trust-chain result for this exact CI-pinned signer.
-    if status != 0 && status as u32 != CERT_E_UNTRUSTEDROOT.0 as u32 {
-        bail!(
-            "Authenticode verification failed for {} (0x{:08x})",
-            resolved_path.display(),
-            status as u32
-        );
-    }
     if !signer_sha256.eq_ignore_ascii_case(expected_sha256) {
         bail!(
             "unexpected Authenticode signer for {} (expected SHA-256 {}, got {})",
@@ -373,7 +365,25 @@ pub(crate) fn verify_authenticode(path: &Path, expected_sha256: &str) -> anyhow:
             signer_sha256
         );
     }
+    // A pin permits only chain-trust failures for this exact signer, not a bad signature digest.
+    let status_code = status as u32;
+    if status != 0 && !is_chain_trust_error(status_code) {
+        bail!(
+            "Authenticode verification failed for {} (0x{:08x})",
+            resolved_path.display(),
+            status_code
+        );
+    }
     Ok(())
+}
+
+fn is_chain_trust_error(status: u32) -> bool {
+    [
+        CERT_E_UNTRUSTEDROOT.0 as u32,
+        CERT_E_CHAINING.0 as u32,
+        TRUST_E_SUBJECT_NOT_TRUSTED.0 as u32,
+    ]
+    .contains(&status)
 }
 
 fn signer_sha256_from_state(state: HANDLE) -> anyhow::Result<String> {
@@ -595,6 +605,7 @@ impl Drop for HashGuard {
 mod tests {
     use super::*;
     use std::io::Cursor;
+    use windows::Win32::Foundation::TRUST_E_BAD_DIGEST;
 
     struct ChunkedReader<R>(R);
 
@@ -631,6 +642,15 @@ mod tests {
         );
         assert_eq!(sha256_bytes(b"abc").unwrap(), expected.to_ascii_uppercase());
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn only_chain_trust_errors_are_accepted_for_a_pinned_signer() {
+        assert!(is_chain_trust_error(CERT_E_UNTRUSTEDROOT.0 as u32));
+        assert!(is_chain_trust_error(CERT_E_CHAINING.0 as u32));
+        assert!(is_chain_trust_error(TRUST_E_SUBJECT_NOT_TRUSTED.0 as u32));
+        assert!(!is_chain_trust_error(TRUST_E_BAD_DIGEST.0 as u32));
+        assert!(!is_chain_trust_error(0));
     }
 
     #[test]

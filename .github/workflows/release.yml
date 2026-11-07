@@ -194,11 +194,26 @@ jobs:
           $verifier = (Resolve-Path -LiteralPath "target\release\FileManagerUpdater.exe").Path
           foreach ($relativeExe in @("target\release\filemanager.exe", "target\release\FileManagerUpdater.exe")) {
             $exe = (Resolve-Path -LiteralPath $relativeExe).Path
-            $verifyOutput = & $verifier --verify-file $exe 2>&1
-            $verifyExitCode = $LASTEXITCODE
+            $stdoutPath = Join-Path $env:RUNNER_TEMP "verify-$([IO.Path]::GetFileName($exe)).stdout.log"
+            $stderrPath = Join-Path $env:RUNNER_TEMP "verify-$([IO.Path]::GetFileName($exe)).stderr.log"
+            Remove-Item -LiteralPath $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
+            $exeArgument = '"' + $exe + '"'
+            $process = Start-Process `
+              -FilePath $verifier `
+              -ArgumentList @("--verify-file", $exeArgument) `
+              -Wait `
+              -PassThru `
+              -RedirectStandardOutput $stdoutPath `
+              -RedirectStandardError $stderrPath
+            $verifyExitCode = $process.ExitCode
             if ($verifyExitCode -ne 0) {
-              if ($verifyOutput) {
-                Write-Host ($verifyOutput | Out-String)
+              foreach ($logPath in @($stdoutPath, $stderrPath)) {
+                if (Test-Path -LiteralPath $logPath) {
+                  $verifyOutput = [System.IO.File]::ReadAllText($logPath)
+                  if (-not [string]::IsNullOrWhiteSpace($verifyOutput)) {
+                    Write-Host $verifyOutput
+                  }
+                }
               }
               $signature = Get-AuthenticodeSignature -LiteralPath $exe
               $actualFingerprint = "<none>"
