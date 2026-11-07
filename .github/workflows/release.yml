@@ -191,10 +191,15 @@ jobs:
       - name: Verify signed executables
         shell: pwsh
         run: |
-          foreach ($exe in @("target\release\filemanager.exe", "target\release\FileManagerUpdater.exe")) {
-            & target\release\FileManagerUpdater.exe --verify-file $exe
+          $verifier = (Resolve-Path -LiteralPath "target\release\FileManagerUpdater.exe").Path
+          foreach ($relativeExe in @("target\release\filemanager.exe", "target\release\FileManagerUpdater.exe")) {
+            $exe = (Resolve-Path -LiteralPath $relativeExe).Path
+            $verifyOutput = & $verifier --verify-file $exe 2>&1
             $verifyExitCode = $LASTEXITCODE
             if ($verifyExitCode -ne 0) {
+              if ($verifyOutput) {
+                Write-Host ($verifyOutput | Out-String)
+              }
               $signature = Get-AuthenticodeSignature -LiteralPath $exe
               $actualFingerprint = "<none>"
               if ($null -ne $signature.SignerCertificate) {
@@ -202,7 +207,7 @@ jobs:
                   [System.Security.Cryptography.HashAlgorithmName]::SHA256
                 ).ToUpperInvariant()
               }
-              throw "Pinned Authenticode verification failed for $exe (status: $($signature.Status); expected SHA-256: $env:FILEMANAGER_SIGNER_SHA256; actual: $actualFingerprint)."
+              throw "Pinned Authenticode verification failed for $exe (status: $($signature.Status); details: $($signature.StatusMessage); expected SHA-256: $env:FILEMANAGER_SIGNER_SHA256; actual: $actualFingerprint)."
             }
           }
 
