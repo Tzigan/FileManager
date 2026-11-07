@@ -34,7 +34,7 @@ fn uninstall_at(roots: &[String]) -> io::Result<()> {
 }
 
 fn run(args: &[&str]) -> io::Result<()> {
-    let out = Command::new("reg").args(args).output()?;
+    let out = reg_command()?.args(args).output()?;
     if out.status.success() {
         Ok(())
     } else {
@@ -42,10 +42,15 @@ fn run(args: &[&str]) -> io::Result<()> {
     }
 }
 
+fn reg_command() -> io::Result<Command> {
+    Ok(Command::new(
+        crate::system_tools::system_executable("reg.exe")?,
+    ))
+}
+
 #[cfg(test)]
 mod tests_v05 {
     use super::*;
-    use std::process::Command;
 
     #[test]
     fn installs_and_removes_test_only_registry_keys() {
@@ -58,15 +63,19 @@ mod tests_v05 {
         ];
         install_at(&roots, &exe, "Open in FileManager").unwrap();
         for k in &roots {
-            let q = Command::new("reg").args(["query", k]).output().unwrap();
+            let q = reg_command().unwrap().args(["query", k]).output().unwrap();
             assert!(q.status.success(), "missing {k}");
-            let qc = Command::new("reg").args(["query", &format!("{k}\\command"), "/ve"]).output().unwrap();
+            let qc = reg_command()
+                .unwrap()
+                .args(["query", &format!("{k}\\command"), "/ve"])
+                .output()
+                .unwrap();
             let out = String::from_utf8_lossy(&qc.stdout);
             assert!(out.contains("%1"), "command lacks %1 in {k}");
         }
         uninstall_at(&roots).unwrap();
         for k in &roots {
-            let q = Command::new("reg").args(["query", k]).output().unwrap();
+            let q = reg_command().unwrap().args(["query", k]).output().unwrap();
             assert!(!q.status.success(), "leftover {k}");
         }
         assert_eq!(ROOTS, [ROOT, ROOT_BG, ROOT_DRIVE]);

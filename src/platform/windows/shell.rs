@@ -20,7 +20,7 @@ pub fn shell_open(path: &Path) -> io::Result<()> {
 
 /// Opens Windows Terminal at the given directory.
 pub fn open_terminal(path: &Path) -> io::Result<()> {
-    std::process::Command::new("wt.exe")
+    std::process::Command::new(crate::system_tools::windows_terminal_executable()?)
         .arg("-d")
         .arg(path)
         .spawn()
