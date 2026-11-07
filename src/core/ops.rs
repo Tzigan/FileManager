@@ -234,6 +234,33 @@ impl<'a> Worker<'a> {
     // ------------------------------------------------------------------
 
     fn copy_many(&mut self, job: &OpJob, sources: &[PathBuf], dest: &Path, is_move: bool) -> io::Result<()> {
+        let mut safe_sources = Vec::with_capacity(sources.len());
+        for src in sources {
+            if self.cancelled(job) {
+                return Ok(());
+            }
+            let is_dir = fs::symlink_metadata(src).is_ok_and(|meta| meta.is_dir());
+            if is_dir && destination_is_inside_directory(src, dest) {
+                let error = io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "destination is the source folder or one of its subfolders",
+                );
+                match self.ask_error(job, src, &error) {
+                    ErrorAction::Skip | ErrorAction::Retry => self.failed += 1,
+                    ErrorAction::Cancel => {
+                        job.cancel.store(true, Ordering::Relaxed);
+                        return Ok(());
+                    }
+                }
+                continue;
+            }
+            safe_sources.push(src.clone());
+        }
+        let sources = safe_sources.as_slice();
+        if sources.is_empty() {
+            return Ok(());
+        }
+
         // Stage 1: count totals (cancellable).
         self.progress(job, OpStage::Scanning, dest, 0, 0, 0, 0);
         let mut total_bytes = 0u64;
@@ -749,6 +776,13 @@ fn same_existing_path(a: &Path, b: &Path) -> bool {
         return true;
     }
     matches!((fs::canonicalize(a), fs::canonicalize(b)), (Ok(a), Ok(b)) if a == b)
+}
+
+fn destination_is_inside_directory(source: &Path, destination: &Path) -> bool {
+    let source = fs::canonicalize(source).unwrap_or_else(|_| source.to_path_buf());
+    let destination =
+        fs::canonicalize(destination).unwrap_or_else(|_| destination.to_path_buf());
+    destination == source || destination.starts_with(&source)
 }
 
 /// Prefixes paths longer than ~240 chars with `\\?\` for Windows long paths.
@@ -1692,5 +1726,58 @@ mod tests_operation_decisions {
         assert_eq!(fs::read(&first).unwrap(), b"1");
         assert_eq!(fs::read(&second).unwrap(), b"2");
         fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod tests_copy_destination {
+    use super::*;
+    use std::sync::mpsc::channel;
+
+    #[test]
+    fn refuses_to_copy_directory_into_its_subdirectory() {
+        let id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("fm-copy-destination-{id}"));
+        let source = root.join("source");
+        let destination = source.join("child");
+        fs::create_dir_all(&destination).unwrap();
+        fs::write(source.join("keep.txt"), b"original").unwrap();
+
+        let (reply_tx, reply_rx) = channel();
+        reply_tx
+            .send(OpReply::Error {
+                id: 42,
+                action: ErrorAction::Skip,
+            })
+            .unwrap();
+        let (event_tx, event_rx) = channel();
+        let mut worker = Worker {
+            reply_rx: &reply_rx,
+            events: &event_tx,
+            overwrite_all: false,
+            skip_all: false,
+            failed: 0,
+        };
+
+        worker.run(&OpJob {
+            id: 42,
+            kind: OpKind::Copy {
+                sources: vec![source.clone()],
+                dest: destination.clone(),
+            },
+            cancel: Arc::new(AtomicBool::new(false)),
+        });
+
+        assert_eq!(worker.failed, 1);
+        assert_eq!(fs::read(source.join("keep.txt")).unwrap(), b"original");
+        assert_eq!(fs::read_dir(&destination).unwrap().count(), 0);
+        assert!(matches!(
+            event_rx.try_recv().unwrap(),
+            OpEvent::AskError { id: 42, .. }
+        ));
+        fs::remove_dir_all(root).unwrap();
     }
 }
