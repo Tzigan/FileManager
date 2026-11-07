@@ -15,9 +15,11 @@
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
+
+static NEXT_COPY_TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug)]
 pub enum OpKind {
@@ -272,7 +274,11 @@ impl<'a> Worker<'a> {
             }
             let dst = dest.join(src.file_name().unwrap_or_default());
             // Pasting into the same folder — Explorer copies to "name — копия".
-            let dst = if *src == dst { copy_variant(&dst) } else { dst };
+            let dst = if same_existing_path(src, &dst) {
+                copy_variant(&dst)
+            } else {
+                dst
+            };
             let stage = if is_move { OpStage::Moving } else { OpStage::Copying };
             self.progress(job, stage, src, done_bytes, total_bytes, done_files, total_files);
             if is_move {
@@ -592,41 +598,91 @@ fn scan(root: &Path, bytes: &mut u64, count: &mut usize, job: &OpJob) -> io::Res
     Ok(())
 }
 
-/// Streams `src` → `dst` in 64 KiB chunks, reporting bytes through `on_chunk`.
-/// On cancellation the partial destination file is removed.
+/// Streams `src` to a sibling temporary file, then replaces `dst` only after
+/// the copy is complete. Cancellation and I/O errors leave the old destination
+/// untouched.
 fn copy_file_stream(src: &Path, dst: &Path, on_chunk: &mut dyn FnMut(u64), job: &OpJob) -> io::Result<()> {
     let dst = long_path(dst);
     if let Some(parent) = dst.parent() {
         fs::create_dir_all(parent)?;
     }
-    let mut reader = io::BufReader::with_capacity(1 << 20, fs::File::open(long_path(src))?);
-    let mut writer = io::BufWriter::with_capacity(1 << 20, fs::File::create(&dst)?);
-    let mut buf = vec![0u8; 1 << 16];
-    loop {
-        if job.cancel.load(Ordering::Relaxed) {
-            drop(writer);
-            let _ = fs::remove_file(&dst);
-            return Ok(());
+    let (temp_path, temp_file) = create_copy_temp(&dst)?;
+    let copy_result = (|| {
+        let mut reader = io::BufReader::with_capacity(1 << 20, fs::File::open(long_path(src))?);
+        let mut writer = io::BufWriter::with_capacity(1 << 20, temp_file);
+        let mut buf = vec![0u8; 1 << 16];
+        loop {
+            if job.cancel.load(Ordering::Relaxed) {
+                return Ok::<_, io::Error>(false);
+            }
+            let n = reader.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            writer.write_all(&buf[..n])?;
+            on_chunk(n as u64);
         }
-        let n = reader.read(&mut buf)?;
-        if n == 0 {
-            break;
+        writer.flush()?;
+        let src_len = fs::metadata(long_path(src))?.len();
+        let dst_len = writer.get_ref().metadata()?.len();
+        if src_len != dst_len {
+            return Err(io::Error::new(io::ErrorKind::Other, "size mismatch after copy"));
         }
-        writer.write_all(&buf[..n])?;
-        on_chunk(n as u64);
+        if let Ok(mtime) = fs::metadata(long_path(src)).and_then(|m| m.modified()) {
+            let _ = writer.get_ref().set_modified(mtime);
+        }
+        writer.get_ref().sync_all()?;
+        Ok(true)
+    })();
+
+    match copy_result {
+        Ok(true) if job.cancel.load(Ordering::Relaxed) => {
+            let _ = fs::remove_file(&temp_path);
+            Ok(())
+        }
+        Ok(true) => {
+            if let Err(error) = crate::platform::replace_file(&temp_path, &dst) {
+                let _ = fs::remove_file(&temp_path);
+                return Err(error);
+            }
+            Ok(())
+        }
+        Ok(false) => {
+            let _ = fs::remove_file(&temp_path);
+            Ok(())
+        }
+        Err(error) => {
+            let _ = fs::remove_file(&temp_path);
+            Err(error)
+        }
     }
-    writer.flush()?;
-    // Verify: written size must match the source size.
-    let src_len = fs::metadata(long_path(src))?.len();
-    let dst_len = writer.get_ref().metadata()?.len();
-    if src_len != dst_len {
-        return Err(io::Error::new(io::ErrorKind::Other, "size mismatch after copy"));
+}
+
+fn create_copy_temp(dst: &Path) -> io::Result<(PathBuf, fs::File)> {
+    let parent = dst
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    for _ in 0..128 {
+        let id = NEXT_COPY_TEMP_ID.fetch_add(1, Ordering::Relaxed);
+        let path = long_path(&parent.join(format!(
+            ".filemanager-copy-{}-{id}.tmp",
+            std::process::id()
+        )));
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(file) => return Ok((path, file)),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
     }
-    // Preserve the modification timestamp (best effort).
-    if let Ok(mtime) = fs::metadata(long_path(src)).and_then(|m| m.modified()) {
-        let _ = writer.get_ref().set_modified(mtime);
-    }
-    Ok(())
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "could not allocate a temporary copy file",
+    ))
 }
 
 fn remove_any(path: &Path) -> io::Result<()> {
@@ -686,6 +742,13 @@ fn copy_variant(dst: &Path) -> PathBuf {
         }
     }
     dst.to_path_buf()
+}
+
+fn same_existing_path(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    matches!((fs::canonicalize(a), fs::canonicalize(b)), (Ok(a), Ok(b)) if a == b)
 }
 
 /// Prefixes paths longer than ~240 chars with `\\?\` for Windows long paths.
@@ -772,6 +835,33 @@ mod tests {
         assert!(copied_bytes > 0);
         assert!(!dst.exists());
         assert_eq!(fs::metadata(&src).unwrap().len(), 4 * 1024 * 1024);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn cancelling_overwrite_preserves_existing_destination() {
+        let dir = tmpdir("overwrite-cancel");
+        let src = dir.join("new.bin");
+        let dst = dir.join("existing.bin");
+        fs::write(&src, vec![0x5a; 128 * 1024]).unwrap();
+        fs::write(&dst, b"original destination").unwrap();
+        let job = job();
+        let cancel = job.cancel.clone();
+
+        copy_file_stream(
+            &src,
+            &dst,
+            &mut |_| cancel.store(true, Ordering::Relaxed),
+            &job,
+        )
+        .unwrap();
+
+        assert_eq!(fs::read(&dst).unwrap(), b"original destination");
+        assert!(
+            fs::read_dir(&dir)
+                .unwrap()
+                .all(|entry| !entry.unwrap().file_name().to_string_lossy().starts_with(".filemanager-copy-"))
+        );
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -1247,6 +1337,47 @@ mod tests_samefolder {
         });
         assert!(dir.join("a — копия (2).txt").exists());
         assert_eq!(fs::read_to_string(dir.join("a.txt")).unwrap(), "data");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn same_folder_copy_detects_case_only_directory_alias() {
+        let dir = tmp("case-alias");
+        let src = dir.join("Source.txt");
+        fs::write(&src, b"original").unwrap();
+        let dest = PathBuf::from(dir.to_string_lossy().to_ascii_lowercase());
+        let destination_entry = dest.join("Source.txt");
+        let copy = copy_variant(&destination_entry);
+        assert_ne!(src, destination_entry);
+        assert!(same_existing_path(&src, &destination_entry));
+
+        let (reply_tx, reply_rx) = channel();
+        reply_tx
+            .send(OpReply::Conflict {
+                id: 1,
+                action: ConflictAction::Cancel,
+            })
+            .unwrap();
+        let (event_tx, _event_rx) = channel();
+        let mut worker = Worker {
+            reply_rx: &reply_rx,
+            events: &event_tx,
+            overwrite_all: false,
+            skip_all: false,
+            failed: 0,
+        };
+        worker.run(&OpJob {
+            id: 1,
+            kind: OpKind::Copy {
+                sources: vec![src.clone()],
+                dest,
+            },
+            cancel: Arc::new(AtomicBool::new(false)),
+        });
+
+        assert_eq!(fs::read(&src).unwrap(), b"original");
+        assert_eq!(fs::read(copy).unwrap(), b"original");
         fs::remove_dir_all(&dir).ok();
     }
 }
