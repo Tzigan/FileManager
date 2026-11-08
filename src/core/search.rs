@@ -114,12 +114,17 @@ fn parse_date(value: &str, upper_bound: bool) -> Result<Option<SystemTime>, Sear
         return Ok(None);
     }
     let mut parts = value.split('-');
-    let (Some(year), Some(month), Some(day)) = (parts.next(), parts.next(), parts.next()) else {
+    let (Some(first), Some(month), Some(last)) = (parts.next(), parts.next(), parts.next()) else {
         return Err(SearchValidationError::InvalidDate);
     };
-    if parts.next().is_some() || year.len() != 4 || month.len() != 2 || day.len() != 2 {
+    if parts.next().is_some() || month.len() != 2 {
         return Err(SearchValidationError::InvalidDate);
     }
+    let (year, day) = match (first.len(), last.len()) {
+        (4, 2) => (first, last),
+        (2, 4) => (last, first),
+        _ => return Err(SearchValidationError::InvalidDate),
+    };
     let (Ok(year), Ok(month), Ok(day)) = (
         year.parse::<i64>(),
         month.parse::<i64>(),
@@ -372,6 +377,22 @@ mod tests {
         );
         assert_eq!(
             parse_options("", false, false, "", "", "", "2023-02-29", ""),
+            Err(SearchValidationError::InvalidDate)
+        );
+
+        let russian = parse_options("", false, false, "", "", "", "29-02-2024", "01-03-2024")
+            .unwrap();
+        assert_eq!(
+            russian
+                .modified_before
+                .unwrap()
+                .duration_since(russian.modified_from.unwrap())
+                .unwrap()
+                .as_secs(),
+            2 * 24 * 60 * 60
+        );
+        assert_eq!(
+            parse_options("", false, false, "", "", "", "29-02-2023", ""),
             Err(SearchValidationError::InvalidDate)
         );
     }
