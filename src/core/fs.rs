@@ -19,6 +19,8 @@ pub struct FileEntry {
     pub created: Option<SystemTime>,
     /// Lowercase extension without the dot, e.g. `txt`.
     pub extension: Option<String>,
+    /// Путь элемента внутри ZIP; для обычных файлов равен `None`.
+    pub archive_member: Option<String>,
 }
 
 #[derive(Debug)]
@@ -88,7 +90,7 @@ pub fn sort_entries_by(entries: &mut Vec<FileEntry>, key: SortKey, desc: bool) {
     });
 }
 
-fn map_entry(item: &fs::DirEntry) -> Option<FileEntry> {
+pub(crate) fn map_entry(item: &fs::DirEntry) -> Option<FileEntry> {
     let path = item.path();
     let name = item.file_name().to_string_lossy().into_owned();
     let file_type = item.file_type().ok()?;
@@ -124,6 +126,7 @@ fn map_entry(item: &fs::DirEntry) -> Option<FileEntry> {
         modified,
         created,
         extension,
+        archive_member: None,
     })
 }
 
@@ -178,6 +181,7 @@ mod tests {
             modified: None,
             created: None,
             extension: None,
+            archive_member: None,
         }
     }
 
@@ -395,6 +399,7 @@ mod tests_v06 {
         FileEntry {
             name: name.to_string(), path: PathBuf::from(name), is_dir, is_symlink: false,
             hidden: false, readonly: false, size: None, modified: None, created: None, extension: None,
+            archive_member: None,
         }
     }
 

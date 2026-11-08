@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crate::core::fs::{FileEntry, SortKey};
 use crate::core::history::History;
@@ -14,11 +15,95 @@ pub enum ListStatus {
     Loading,
 }
 
+const SEARCH_DEBOUNCE: Duration = Duration::from_millis(250);
+
+#[derive(Debug)]
+pub struct SearchState {
+    pub query: String,
+    pub recursive: bool,
+    pub fuzzy: bool,
+    pub extensions: String,
+    pub min_size: String,
+    pub max_size: String,
+    pub modified_from: String,
+    pub modified_to: String,
+    pub filters_expanded: bool,
+    pub generation: u64,
+    pub debounce_at: Option<Instant>,
+    pub cancel: Arc<AtomicBool>,
+    pub running: bool,
+    pub results_active: bool,
+    pub validation_error: Option<String>,
+}
+
+impl Default for SearchState {
+    fn default() -> Self {
+        Self {
+            query: String::new(),
+            recursive: false,
+            fuzzy: false,
+            extensions: String::new(),
+            min_size: String::new(),
+            max_size: String::new(),
+            modified_from: String::new(),
+            modified_to: String::new(),
+            filters_expanded: false,
+            generation: 0,
+            debounce_at: None,
+            cancel: Arc::new(AtomicBool::new(false)),
+            running: false,
+            results_active: false,
+            validation_error: None,
+        }
+    }
+}
+
+impl SearchState {
+    pub fn has_criteria(&self) -> bool {
+        !self.query.trim().is_empty()
+            || !self.extensions.trim().is_empty()
+            || !self.min_size.trim().is_empty()
+            || !self.max_size.trim().is_empty()
+            || !self.modified_from.trim().is_empty()
+            || !self.modified_to.trim().is_empty()
+    }
+
+    pub fn schedule(&mut self) {
+        self.cancel.store(true, Ordering::Relaxed);
+        self.cancel = Arc::new(AtomicBool::new(false));
+        self.generation = self.generation.wrapping_add(1);
+        self.debounce_at = Some(Instant::now() + SEARCH_DEBOUNCE);
+        self.running = false;
+        self.validation_error = None;
+    }
+
+    pub fn reset(&mut self) {
+        self.cancel.store(true, Ordering::Relaxed);
+        self.cancel = Arc::new(AtomicBool::new(false));
+        self.generation = self.generation.wrapping_add(1);
+        self.query.clear();
+        self.recursive = false;
+        self.fuzzy = false;
+        self.extensions.clear();
+        self.min_size.clear();
+        self.max_size.clear();
+        self.modified_from.clear();
+        self.modified_to.clear();
+        self.debounce_at = None;
+        self.running = false;
+        self.results_active = false;
+        self.validation_error = None;
+    }
+}
+
 /// State of a single explorer tab: location, listing, selection and history.
 pub struct Tab {
     /// Stable identity for background results; vector indices change on close/reorder.
     pub id: u64,
     pub path: PathBuf,
+    pub archive_prefix: Option<String>,
+    pub archive_back: Vec<String>,
+    pub archive_forward: Vec<String>,
     pub address_input: String,
     pub entries: Vec<FileEntry>,
     /// Selected row indices into `entries`.
@@ -35,6 +120,7 @@ pub struct Tab {
     pub generation: u64,
     pub cancel: Arc<AtomicBool>,
     pub error: Option<String>,
+    pub search: SearchState,
 }
 
 impl Tab {
@@ -43,6 +129,9 @@ impl Tab {
             id: NEXT_TAB_ID.fetch_add(1, Ordering::Relaxed),
             address_input: path.display().to_string(),
             path,
+            archive_prefix: None,
+            archive_back: Vec::new(),
+            archive_forward: Vec::new(),
             entries: Vec::new(),
             selection: BTreeSet::new(),
             anchor: None,
@@ -55,6 +144,7 @@ impl Tab {
             generation: 0,
             cancel: Arc::new(AtomicBool::new(false)),
             error: None,
+            search: SearchState::default(),
         }
     }
 
@@ -100,6 +190,7 @@ pub(crate) fn close_tab_state(tabs: &mut Vec<Tab>, active: usize, index: usize) 
         return None;
     }
     tabs[index].cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+    tabs[index].search.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
     tabs.remove(index);
     Some(if index < active {
         active - 1
@@ -119,6 +210,7 @@ pub(crate) fn close_other_tabs_state(tabs: &mut Vec<Tab>, index: usize) -> Optio
         i -= 1;
         if i != index && !tabs[i].pinned {
             tabs[i].cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            tabs[i].search.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
             tabs.remove(i);
         }
     }
