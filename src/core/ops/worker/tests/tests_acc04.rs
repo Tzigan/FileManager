@@ -14,6 +14,7 @@ fn w<'a>(r: &'a Receiver<OpReply>, e: &'a Sender<OpEvent>) -> Worker<'a> {
     Worker {
         reply_rx: r,
         events: e,
+        platform: test_ops_platform(),
         overwrite_all: false,
         skip_all: false,
         failed: 0,

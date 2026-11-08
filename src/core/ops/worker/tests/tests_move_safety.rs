@@ -80,6 +80,7 @@ fn failed_locked_file_move_keeps_original_source() {
     let mut worker = Worker {
         reply_rx: &reply_rx,
         events: &event_tx,
+        platform: test_ops_platform(),
         overwrite_all: false,
         skip_all: false,
         failed: 0,
@@ -142,6 +143,7 @@ fn incomplete_recursive_move_keeps_the_entire_source_tree() {
     let mut w = Worker {
         reply_rx: &reply_rx,
         events: &event_tx,
+        platform: test_ops_platform(),
         overwrite_all: false,
         skip_all: false,
         failed: 0,

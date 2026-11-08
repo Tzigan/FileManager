@@ -19,6 +19,7 @@ fn same_folder_paste_makes_copy_name() {
     let mut w = Worker {
         reply_rx: &rrx,
         events: &etx,
+        platform: test_ops_platform(),
         overwrite_all: false,
         skip_all: false,
         failed: 0,
@@ -70,6 +71,7 @@ fn same_folder_copy_detects_case_only_directory_alias() {
     let mut worker = Worker {
         reply_rx: &reply_rx,
         events: &event_tx,
+        platform: test_ops_platform(),
         overwrite_all: false,
         skip_all: false,
         failed: 0,

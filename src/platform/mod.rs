@@ -138,3 +138,7 @@ mod stubs {
 
 #[cfg(not(windows))]
 pub use stubs::{acquire_single_instance, decode_image, drives, extract_zip_all, extract_zip_file, extract_zip_folder, format_local_time, free_space, get_clipboard_files, get_clipboard_text, install_context_menu, launch_updater, notify_already_running, open_recycle_bin, open_terminal, pipe_listen, pipe_send, prepare_update_archive, read_zip_dir_cancellable, recycle_bin, replace_file, search_zip, set_attributes, set_clipboard_files, shell_open, signal_update_started, uninstall_context_menu, AcquireResult, SingleInstanceGuard};
+
+pub(crate) fn ops_platform() -> crate::core::ops::OpsPlatform {
+    crate::core::ops::OpsPlatform::new(free_space, recycle_bin, replace_file)
+}

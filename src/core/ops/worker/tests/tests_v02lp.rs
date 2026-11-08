@@ -27,6 +27,7 @@ fn copy_into_deep_path() {
     let mut w = Worker {
         reply_rx: &rrx,
         events: &etx,
+        platform: test_ops_platform(),
         overwrite_all: false,
         skip_all: false,
         failed: 0,

@@ -22,6 +22,7 @@ fn worker<'a>(rrx: &'a Receiver<OpReply>, etx: &'a Sender<OpEvent>) -> Worker<'a
     Worker {
         reply_rx: rrx,
         events: etx,
+        platform: test_ops_platform(),
         overwrite_all: false,
         skip_all: false,
         failed: 0,

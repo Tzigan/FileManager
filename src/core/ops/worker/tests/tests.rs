@@ -28,7 +28,7 @@ fn copy_streams_content_and_preserves_size() {
     let data: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
     fs::write(&src, &data).unwrap();
     let j = job();
-    copy_file_stream(&src, &dst, &mut |_| {}, &j).unwrap();
+    copy_file_stream(&src, &dst, &mut |_| {}, test_ops_platform(), &j).unwrap();
     assert_eq!(fs::read(&dst).unwrap(), data);
     fs::remove_dir_all(&dir).ok();
 }
@@ -41,7 +41,7 @@ fn cancel_removes_partial_file() {
     fs::write(&src, vec![7u8; 1_000_000]).unwrap();
     let j = job();
     j.cancel.store(true, Ordering::Relaxed);
-    copy_file_stream(&src, &dst, &mut |_| {}, &j).unwrap();
+    copy_file_stream(&src, &dst, &mut |_| {}, test_ops_platform(), &j).unwrap();
     assert!(!dst.exists());
     fs::remove_dir_all(&dir).ok();
 }
@@ -61,6 +61,7 @@ fn cancellation_after_a_written_chunk_removes_partial_destination() {
             copied_bytes += n;
             job.cancel.store(true, Ordering::Relaxed);
         },
+        test_ops_platform(),
         &job,
     )
     .unwrap();
@@ -85,6 +86,7 @@ fn cancelling_overwrite_preserves_existing_destination() {
         &src,
         &dst,
         &mut |_| cancel.store(true, Ordering::Relaxed),
+        test_ops_platform(),
         &job,
     )
     .unwrap();

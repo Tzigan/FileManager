@@ -61,7 +61,7 @@ impl<'a> Worker<'a> {
             return Ok(());
         }
         loop {
-            match crate::platform::recycle_bin(sources) {
+            match self.platform.recycle_bin(sources) {
                 Ok(()) => return Ok(()),
                 Err(e) => match self.ask_error(job, &sources[0], &e) {
                     ErrorAction::Retry => continue,
@@ -103,7 +103,7 @@ impl<'a> Worker<'a> {
             false
         };
         loop {
-            match rename_with_overwrite(from, to, overwrite_confirmed) {
+            match rename_with_overwrite(from, to, overwrite_confirmed, self.platform) {
                 Ok(()) => return Ok(()),
                 Err(e) => match self.ask_error(job, from, &e) {
                     ErrorAction::Retry => continue,

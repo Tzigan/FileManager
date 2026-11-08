@@ -26,6 +26,7 @@ fn refuses_to_copy_directory_into_its_subdirectory() {
     let mut worker = Worker {
         reply_rx: &reply_rx,
         events: &event_tx,
+        platform: test_ops_platform(),
         overwrite_all: false,
         skip_all: false,
         failed: 0,

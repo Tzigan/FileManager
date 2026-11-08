@@ -24,12 +24,14 @@ pub fn spawn(
     jobs_rx: Receiver<OpJob>,
     reply_rx: Receiver<OpReply>,
     events_tx: Sender<OpEvent>,
+    platform: OpsPlatform,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         while let Ok(job) = jobs_rx.recv() {
             let mut w = Worker {
                 reply_rx: &reply_rx,
                 events: &events_tx,
+                platform,
                 overwrite_all: false,
                 skip_all: false,
                 failed: 0,
@@ -46,9 +48,15 @@ pub fn spawn(
 struct Worker<'a> {
     reply_rx: &'a Receiver<OpReply>,
     events: &'a Sender<OpEvent>,
+    platform: OpsPlatform,
     overwrite_all: bool,
     skip_all: bool,
     failed: usize,
+}
+
+#[cfg(test)]
+fn test_ops_platform() -> OpsPlatform {
+    crate::platform::ops_platform()
 }
 
 impl<'a> Worker<'a> {
@@ -142,7 +150,12 @@ impl<'a> Worker<'a> {
     }
 }
 
-fn rename_with_overwrite(from: &Path, to: &Path, overwrite_confirmed: bool) -> io::Result<()> {
+fn rename_with_overwrite(
+    from: &Path,
+    to: &Path,
+    overwrite_confirmed: bool,
+    platform: OpsPlatform,
+) -> io::Result<()> {
     let from = long_path(from);
     let to = long_path(to);
     if !to.exists() {
@@ -158,7 +171,7 @@ fn rename_with_overwrite(from: &Path, to: &Path, overwrite_confirmed: bool) -> i
     let from_meta = fs::symlink_metadata(&from)?;
     let to_meta = fs::symlink_metadata(&to)?;
     if from_meta.is_file() && to_meta.is_file() {
-        return crate::platform::replace_file(&from, &to);
+        return platform.replace_file(&from, &to);
     }
 
     let backup_dir = create_rename_backup_dir(&to)?;
@@ -240,6 +253,7 @@ fn copy_file_stream(
     src: &Path,
     dst: &Path,
     on_chunk: &mut dyn FnMut(u64),
+    platform: OpsPlatform,
     job: &OpJob,
 ) -> io::Result<()> {
     let dst = long_path(dst);
@@ -284,7 +298,7 @@ fn copy_file_stream(
             Ok(())
         }
         Ok(true) => {
-            if let Err(error) = crate::platform::replace_file(&temp_path, &dst) {
+            if let Err(error) = platform.replace_file(&temp_path, &dst) {
                 let _ = fs::remove_file(&temp_path);
                 return Err(error);
             }
