@@ -194,6 +194,9 @@ impl FileManagerApp {
     /// Selection of the active tab as paths.
     pub(crate) fn selected_paths(&self) -> Vec<PathBuf> {
         let tab = &self.tabs[self.active];
+        if tab.archive_prefix.is_some() {
+            return Vec::new();
+        }
         paths_for_selection(&tab.entries, &tab.selection)
     }
 
@@ -225,6 +228,9 @@ impl FileManagerApp {
     }
 
     pub(crate) fn act_paste(&mut self) {
+        if self.tabs[self.active].archive_prefix.is_some() {
+            return;
+        }
         // Internal clipboard first (tracks cut-vs-copy), then Explorer's.
         if let Some(cb) = self.ops_ui.clipboard.clone() {
             let dest = self.tabs[self.active].path.clone();
@@ -257,6 +263,9 @@ impl FileManagerApp {
 
     pub(crate) fn act_rename(&mut self) {
         let tab = &self.tabs[self.active];
+        if tab.archive_prefix.is_some() {
+            return;
+        }
         if tab.selection.len() == 1 {
             if let Some(entry) = tab.entries.get(*tab.selection.iter().next().unwrap()) {
                 self.ops_ui.rename = Some((entry.path.clone(), entry.name.clone()));
@@ -265,6 +274,9 @@ impl FileManagerApp {
     }
 
     pub(crate) fn act_bookmark(&mut self) {
+        if self.tabs[self.active].archive_prefix.is_some() {
+            return;
+        }
         let path = self.tabs[self.active].path.clone();
         self.act_bookmark_path(&path);
     }
@@ -606,6 +618,7 @@ mod tests {
             modified: None,
             created: None,
             extension: None,
+            archive_member: None,
         }
     }
 

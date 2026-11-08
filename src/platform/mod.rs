@@ -1,8 +1,15 @@
+#[derive(Debug)]
+pub struct DecodedImage {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+}
+
 #[cfg(windows)]
 mod windows;
 
 #[cfg(windows)]
-pub use self::windows::{acquire_single_instance, drives, format_local_time, free_space, get_clipboard_files, get_clipboard_text, install_context_menu, launch_updater, notify_already_running, open_recycle_bin, open_terminal, pipe_listen, pipe_send, prepare_update_archive, recycle_bin, replace_file, set_attributes, set_clipboard_files, shell_open, signal_update_started, uninstall_context_menu, AcquireResult, SingleInstanceGuard};
+pub use self::windows::{acquire_single_instance, decode_image, drives, extract_zip_all, extract_zip_file, extract_zip_folder, format_local_time, free_space, get_clipboard_files, get_clipboard_text, install_context_menu, launch_updater, notify_already_running, open_recycle_bin, open_terminal, pipe_listen, pipe_send, prepare_update_archive, read_zip_dir_cancellable, recycle_bin, replace_file, search_zip, set_attributes, set_clipboard_files, shell_open, signal_update_started, uninstall_context_menu, AcquireResult, SingleInstanceGuard};
 
 /// Stubs for non-Windows hosts so the crate still compiles for docs/tests.
 #[cfg(not(windows))]
@@ -43,6 +50,62 @@ mod stubs {
     pub fn free_space(_path: &std::path::Path) -> Option<u64> {
         None
     }
+    pub fn decode_image(_path: &std::path::Path, _max_dimension: u32) -> std::io::Result<super::DecodedImage> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "image previews are supported only on Windows",
+        ))
+    }
+    pub fn read_zip_dir_cancellable(
+        _archive: &std::path::Path,
+        _prefix: &str,
+        _cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<Vec<crate::core::fs::FileEntry>, crate::core::fs::ReadDirError> {
+        Err(crate::core::fs::ReadDirError::Io(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "ZIP browsing is supported only on Windows",
+        )))
+    }
+    pub fn search_zip(
+        _archive: &std::path::Path,
+        _prefix: &str,
+        _options: &crate::core::search::SearchOptions,
+        _cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<Vec<crate::core::fs::FileEntry>, crate::core::fs::ReadDirError> {
+        Err(crate::core::fs::ReadDirError::Io(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "ZIP search is supported only on Windows",
+        )))
+    }
+    pub fn extract_zip_file(
+        _archive: &std::path::Path,
+        _member: &str,
+        _destination: &std::path::Path,
+    ) -> std::io::Result<std::path::PathBuf> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "ZIP extraction is supported only on Windows",
+        ))
+    }
+    pub fn extract_zip_folder(
+        _archive: &std::path::Path,
+        _folder: &str,
+        _destination: &std::path::Path,
+    ) -> std::io::Result<std::path::PathBuf> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "ZIP extraction is supported only on Windows",
+        ))
+    }
+    pub fn extract_zip_all(
+        _archive: &std::path::Path,
+        _destination: &std::path::Path,
+    ) -> std::io::Result<std::path::PathBuf> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "ZIP extraction is supported only on Windows",
+        ))
+    }
     pub fn recycle_bin(paths: &[std::path::PathBuf]) -> std::io::Result<()> {
         for p in paths {
             let m = std::fs::metadata(p)?;
@@ -74,4 +137,4 @@ mod stubs {
 }
 
 #[cfg(not(windows))]
-pub use stubs::{acquire_single_instance, drives, format_local_time, free_space, get_clipboard_files, get_clipboard_text, install_context_menu, launch_updater, notify_already_running, open_recycle_bin, open_terminal, pipe_listen, pipe_send, prepare_update_archive, recycle_bin, replace_file, set_attributes, set_clipboard_files, shell_open, signal_update_started, uninstall_context_menu, AcquireResult, SingleInstanceGuard};
+pub use stubs::{acquire_single_instance, decode_image, drives, extract_zip_all, extract_zip_file, extract_zip_folder, format_local_time, free_space, get_clipboard_files, get_clipboard_text, install_context_menu, launch_updater, notify_already_running, open_recycle_bin, open_terminal, pipe_listen, pipe_send, prepare_update_archive, read_zip_dir_cancellable, recycle_bin, replace_file, search_zip, set_attributes, set_clipboard_files, shell_open, signal_update_started, uninstall_context_menu, AcquireResult, SingleInstanceGuard};

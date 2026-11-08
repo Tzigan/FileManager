@@ -174,6 +174,7 @@ fn entry_at(entries: &[FileEntry], index: usize) -> Option<FileEntry> {
 impl FileManagerApp {
     /// Virtualized file list: view switcher + header + rows in the current mode.
     pub(crate) fn file_list(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
+        self.begin_thumbnail_frame();
         style::dense_vertical_spacing(ui.style_mut());
         ui.horizontal(|ui| {
             for (mode, key) in [
@@ -271,6 +272,7 @@ impl FileManagerApp {
                         });
                 });
         }
+        self.finish_thumbnail_frame();
         self.empty_area_menu(&bg_resp, ctx);
         self.scroll_to_cursor = false;
     }
@@ -345,9 +347,10 @@ impl FileManagerApp {
     /// Table rows: either a flat item index list, or group headers + items
     /// (folders first, then per-extension, name-sorted inside a group).
     fn build_rows(&self) -> Vec<ListRow> {
+        let tab = &self.tabs[self.active];
         table_rows(
-            &self.tabs[self.active].entries,
-            self.store.settings.group_by_type,
+            &tab.entries,
+            self.store.settings.group_by_type && !tab.search.results_active,
             &self.store.settings.group_order,
             self.t("type.folder"),
             self.t("type.file"),
@@ -615,20 +618,21 @@ impl FileManagerApp {
         let cell = 112.0f32;
         let cols = (ui.available_width() / cell).floor().max(1.0) as usize;
         let count = self.tabs[self.active].entries.len();
-        let mut index = 0usize;
-        egui::Grid::new("file_grid")
-            .num_columns(cols)
-            .spacing([style::SPACE_SM, style::SPACE_SM])
-            .show(ui, |ui| {
-                for _row in 0..count.div_ceil(cols) {
-                    for _ in 0..cols {
-                        if index >= count {
-                            break;
+        let row_count = count.div_ceil(cols);
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show_rows(ui, 74.0, row_count, |ui, rows| {
+                for row in rows {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = style::SPACE_SM;
+                        for col in 0..cols {
+                            let index = row * cols + col;
+                            if index < count {
+                                self.grid_tile(ui, index, ctx);
+                            }
                         }
-                        self.grid_tile(ui, index, ctx);
-                        index += 1;
-                    }
-                    ui.end_row();
+                    });
+                    ui.add_space(6.0);
                 }
             });
     }
@@ -641,14 +645,15 @@ impl FileManagerApp {
             ui.allocate_exact_size(egui::vec2(104.0, 68.0), egui::Sense::click());
         let selected = self.tabs[self.active].selection.contains(&index);
         let focused = self.tabs[self.active].cursor == index;
-        let painter = ui.painter();
         if selected {
-            painter.rect_filled(rect, style::RADIUS_ROW, ui.visuals().selection.bg_fill);
+            ui.painter()
+                .rect_filled(rect, style::RADIUS_ROW, ui.visuals().selection.bg_fill);
         } else if resp.hovered() {
-            painter.rect_filled(rect, style::RADIUS_ROW, ui.visuals().widgets.hovered.bg_fill);
+            ui.painter()
+                .rect_filled(rect, style::RADIUS_ROW, ui.visuals().widgets.hovered.bg_fill);
         }
         if focused {
-            painter.rect_stroke(
+            ui.painter().rect_stroke(
                 rect.shrink(1.0),
                 style::RADIUS_ROW,
                 egui::Stroke::new(1.0, ui.visuals().selection.stroke.color),
@@ -659,15 +664,17 @@ impl FileManagerApp {
             egui::pos2(rect.center().x, rect.min.y + 23.0),
             egui::vec2(38.0, 40.0),
         );
-        icons::paint_entry_icon(
-            painter,
-            icon_rect,
-            entry.is_dir,
-            entry.extension.as_deref(),
-            ui.visuals().dark_mode,
-        );
+        if !self.paint_thumbnail(ui, &entry, icon_rect) {
+            icons::paint_entry_icon(
+                ui.painter(),
+                icon_rect,
+                entry.is_dir,
+                entry.extension.as_deref(),
+                ui.visuals().dark_mode,
+            );
+        }
         let font = egui::TextStyle::Body.resolve(ui.style());
-        painter.with_clip_rect(rect.shrink(4.0)).text(
+        ui.painter().with_clip_rect(rect.shrink(4.0)).text(
             egui::pos2(rect.center().x, rect.max.y - 14.0),
             egui::Align2::CENTER_CENTER,
             &entry.name,
@@ -690,8 +697,20 @@ impl FileManagerApp {
             tab.selection.clear();
             tab.anchor = None;
         }
+        let in_archive = self.tabs[self.active].archive_prefix.is_some();
         resp.context_menu(|ui| {
             style::compact_context_menu(ui);
+            if in_archive {
+                if ui.button(self.t("zip.extract_all").to_owned()).clicked() {
+                    self.extract_zip_all(ctx);
+                    ui.close();
+                }
+                if ui.button(self.t("toolbar.refresh").to_owned()).clicked() {
+                    self.refresh(ctx);
+                    ui.close();
+                }
+                return;
+            }
             if ui
                 .add_enabled(
                     self.ops_ui.clipboard.is_some(),
@@ -736,6 +755,10 @@ impl FileManagerApp {
         ui: &mut egui::Ui,
         ctx: &egui::Context,
     ) {
+        let archive_member = entry.archive_member.clone();
+        let zip_file = archive_member.is_none()
+            && !entry.is_dir
+            && entry.extension.as_deref() == Some("zip");
         if resp.clicked() {
             // Clicking the list drops text-field focus (address bar) so shortcuts work.
             ctx.memory_mut(|m| {
@@ -754,7 +777,11 @@ impl FileManagerApp {
             tab.cursor = index;
         }
         if resp.double_clicked() {
-            if entry.is_dir {
+            if let Some(member) = &archive_member {
+                if entry.is_dir {
+                    self.navigate_zip(self.active, member.clone(), ctx);
+                }
+            } else if entry.is_dir || zip_file {
                 self.navigate(self.active, entry.path.clone(), ctx);
             } else {
                 let _ = crate::platform::shell_open(&entry.path);
@@ -766,50 +793,81 @@ impl FileManagerApp {
 
         resp.context_menu(|ui| {
             style::compact_context_menu(ui);
-            if ui.button(self.t("ctx.open").to_owned()).clicked() {
+            if let Some(member) = &archive_member {
                 if entry.is_dir {
-                    self.navigate(self.active, entry.path.clone(), ctx);
+                    if ui.button(self.t("ctx.open").to_owned()).clicked() {
+                        self.navigate_zip(self.active, member.clone(), ctx);
+                        ui.close();
+                    }
+                    if ui.button(self.t("zip.extract_folder").to_owned()).clicked() {
+                        self.extract_zip_folder(member.clone(), ctx);
+                        ui.close();
+                    }
                 } else {
-                    let _ = crate::platform::shell_open(&entry.path);
+                    if ui.button(self.t("zip.extract_file").to_owned()).clicked() {
+                        self.extract_zip_file(member.clone(), ctx);
+                        ui.close();
+                    }
                 }
-                ui.close();
-            }
-            if entry.is_dir && ui.button(self.t("ctx.open_new_tab").to_owned()).clicked() {
-                self.queue_open_path_in_new_tab(entry.path.clone());
-                ui.close();
-            }
-            ui.separator();
-            if ui.button(self.t("ctx.copy").to_owned()).clicked() {
-                self.act_copy();
-                ui.close();
-            }
-            if ui.button(self.t("ctx.cut").to_owned()).clicked() {
-                self.act_cut();
-                ui.close();
-            }
-            if ui
-                .add_enabled(
-                    self.ops_ui.clipboard.is_some(),
-                    egui::Button::new(self.t("ctx.paste").to_owned()),
-                )
-                .clicked()
-            {
-                self.act_paste();
-                ui.close();
-            }
-            ui.separator();
-            if ui.button(self.t("ctx.rename").to_owned()).clicked() {
-                self.act_rename();
-                ui.close();
-            }
-            if ui.button(self.t("ctx.delete").to_owned()).clicked() {
-                self.act_delete(false);
-                ui.close();
-            }
-            ui.separator();
-            if ui.button(self.t("ctx.properties").to_owned()).clicked() {
-                self.props_target = Some(entry.path.clone());
-                ui.close();
+            } else {
+                if ui.button(self.t("ctx.open").to_owned()).clicked() {
+                    if entry.is_dir || zip_file {
+                        self.navigate(self.active, entry.path.clone(), ctx);
+                    } else {
+                        let _ = crate::platform::shell_open(&entry.path);
+                    }
+                    ui.close();
+                }
+                if !entry.is_dir
+                    && crate::core::preview::supports_preview(&entry.path)
+                    && ui.button(self.t("ctx.preview").to_owned()).clicked()
+                {
+                    self.open_preview(entry.path.clone(), ctx);
+                    ui.close();
+                }
+                if (entry.is_dir || zip_file)
+                    && ui.button(self.t("ctx.open_new_tab").to_owned()).clicked()
+                {
+                    self.queue_open_path_in_new_tab(entry.path.clone());
+                    ui.close();
+                }
+                if zip_file && ui.button(self.t("zip.extract_all").to_owned()).clicked() {
+                    self.extract_zip_all_from(entry.path.clone(), ctx);
+                    ui.close();
+                }
+                ui.separator();
+                if ui.button(self.t("ctx.copy").to_owned()).clicked() {
+                    self.act_copy();
+                    ui.close();
+                }
+                if ui.button(self.t("ctx.cut").to_owned()).clicked() {
+                    self.act_cut();
+                    ui.close();
+                }
+                if ui
+                    .add_enabled(
+                        self.ops_ui.clipboard.is_some(),
+                        egui::Button::new(self.t("ctx.paste").to_owned()),
+                    )
+                    .clicked()
+                {
+                    self.act_paste();
+                    ui.close();
+                }
+                ui.separator();
+                if ui.button(self.t("ctx.rename").to_owned()).clicked() {
+                    self.act_rename();
+                    ui.close();
+                }
+                if ui.button(self.t("ctx.delete").to_owned()).clicked() {
+                    self.act_delete(false);
+                    ui.close();
+                }
+                ui.separator();
+                if ui.button(self.t("ctx.properties").to_owned()).clicked() {
+                    self.props_target = Some(entry.path.clone());
+                    ui.close();
+                }
             }
         });
     }
@@ -844,6 +902,7 @@ mod tests {
             modified: None,
             created: None,
             extension: extension.map(str::to_owned),
+            archive_member: None,
         }
     }
 

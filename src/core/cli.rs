@@ -1,9 +1,7 @@
 use std::path::PathBuf;
 
-/// Parses CLI args: positional path, `--folder <dir>`, `--select <file>`.
-/// Explorer's context menu passes "%1" positionally.
-/// Returns (initial_path, initial_select_name); paths that are not
-/// existing directories are filtered out.
+/// Разбирает путь, `--folder <путь>` и `--select <файл>`.
+/// Принимает существующие папки и ZIP-архивы.
 pub fn parse_args(args: &[String]) -> (Option<PathBuf>, Option<String>) {
     let mut initial_path = None;
     let mut initial_select = None;
@@ -23,12 +21,20 @@ pub fn parse_args(args: &[String]) -> (Option<PathBuf>, Option<String>) {
                 }
                 i += 1;
             }
-            _ if p.is_dir() => initial_path = Some(p),
+            _ if is_openable_path(&p) => initial_path = Some(p),
             _ => {}
         }
         i += 1;
     }
-    (initial_path.filter(|p: &PathBuf| p.is_dir()), initial_select)
+    (initial_path.filter(|path| is_openable_path(path)), initial_select)
+}
+
+fn is_openable_path(path: &std::path::Path) -> bool {
+    path.is_dir()
+        || (path.is_file()
+            && path
+                .extension()
+                .is_some_and(|extension| extension.to_string_lossy().eq_ignore_ascii_case("zip")))
 }
 
 #[cfg(test)]
@@ -65,6 +71,16 @@ mod tests {
     fn positional_dir_sets_path() {
         let (path, _) = parse_args(&s(&["C:\\Windows"]));
         assert_eq!(path.as_deref(), Some(std::path::Path::new("C:\\Windows")));
+    }
+
+    #[test]
+    fn positional_zip_archive_sets_path() {
+        let dir = temp_dir();
+        let archive = dir.join("files.ZIP");
+        std::fs::write(&archive, b"not decoded by argument parsing").unwrap();
+        let (path, _) = parse_args(&[archive.to_string_lossy().into_owned()]);
+        assert_eq!(path, Some(archive));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
