@@ -62,7 +62,7 @@ impl<'a> Worker<'a> {
 
         // Stage 2: free-space check (copy & cross-volume move only matter
         // for copies — rename is free; we still check, it's harmless).
-        if let Some(free) = crate::platform::free_space(dest) {
+        if let Some(free) = self.platform.free_space(dest) {
             if total_bytes > free {
                 let e = io::Error::new(
                     io::ErrorKind::OutOfMemory,
@@ -231,6 +231,7 @@ impl<'a> Worker<'a> {
                 &mut |written| {
                     *done_b += written;
                 },
+                self.platform,
                 job,
             ) {
                 Ok(()) => {

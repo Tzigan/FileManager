@@ -15,6 +15,7 @@ fn worker<'a>(rrx: &'a Receiver<OpReply>, etx: &'a Sender<OpEvent>) -> Worker<'a
     Worker {
         reply_rx: rrx,
         events: etx,
+        platform: test_ops_platform(),
         overwrite_all: false,
         skip_all: false,
         failed: 0,
@@ -36,7 +37,7 @@ fn queue_runs_jobs_in_order() {
     let (jtx, jrx) = channel();
     let (etx, erx) = channel::<OpEvent>();
     let (_rtx, rrx) = channel();
-    spawn(jrx, rrx, etx);
+    spawn(jrx, rrx, etx, test_ops_platform());
     for (i, name) in ["o1", "o2"].iter().enumerate() {
         jtx.send(OpJob {
             id: (i + 1) as u64,

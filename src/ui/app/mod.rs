@@ -207,7 +207,12 @@ impl FileManagerApp {
         let (ops_tx, jobs_rx) = channel::<OpJob>();
         let (op_reply, reply_rx) = channel::<OpReply>();
         let (events_tx, ops_evt) = channel::<OpEvent>();
-        ops::spawn(jobs_rx, reply_rx, events_tx);
+        ops::spawn(
+            jobs_rx,
+            reply_rx,
+            events_tx,
+            crate::platform::ops_platform(),
+        );
         let (thumbnail_tx, thumbnail_rx) = sync_channel::<ThumbnailRequest>(24);
         {
             let msg_tx = msg_tx.clone();

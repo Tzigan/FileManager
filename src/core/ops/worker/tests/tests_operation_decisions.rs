@@ -17,6 +17,7 @@ fn worker<'a>(reply_rx: &'a Receiver<OpReply>, events: &'a Sender<OpEvent>) -> W
     Worker {
         reply_rx,
         events,
+        platform: test_ops_platform(),
         overwrite_all: false,
         skip_all: false,
         failed: 0,

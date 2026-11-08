@@ -36,6 +36,7 @@ fn rename_rejects_destination_outside_source_folder() {
     let mut worker = Worker {
         reply_rx: &reply_rx,
         events: &event_tx,
+        platform: test_ops_platform(),
         overwrite_all: false,
         skip_all: false,
         failed: 0,
@@ -84,6 +85,7 @@ fn failed_overwrite_rename_keeps_existing_destination() {
     let mut worker = Worker {
         reply_rx: &reply_rx,
         events: &event_tx,
+        platform: test_ops_platform(),
         overwrite_all: false,
         skip_all: false,
         failed: 0,
@@ -110,7 +112,7 @@ fn successful_overwrite_rename_replaces_destination() {
     fs::write(&source, b"source").unwrap();
     fs::write(&destination, b"old destination").unwrap();
 
-    rename_with_overwrite(&source, &destination, true).unwrap();
+    rename_with_overwrite(&source, &destination, true, test_ops_platform()).unwrap();
     assert!(!source.exists());
     assert_eq!(fs::read(&destination).unwrap(), b"source");
     fs::remove_dir_all(dir).unwrap();

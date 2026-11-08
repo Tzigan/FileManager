@@ -15,5 +15,7 @@
 mod types;
 mod worker;
 
-pub use types::{ConflictAction, ErrorAction, OpEvent, OpJob, OpKind, OpReply, OpStage};
+pub use types::{
+    ConflictAction, ErrorAction, OpEvent, OpJob, OpKind, OpReply, OpStage, OpsPlatform,
+};
 pub use worker::spawn;
