@@ -141,6 +141,27 @@ fn preview_viewport_can_resize_and_keeps_its_user_size() {
 }
 
 #[test]
+fn side_mouse_buttons_map_to_navigation_without_changing_standard_buttons() {
+    use super::input::{MouseNavigationAction, map_mouse_button_to_navigation};
+
+    assert_eq!(
+        map_mouse_button_to_navigation(egui::PointerButton::Extra1),
+        Some(MouseNavigationAction::Back)
+    );
+    assert_eq!(
+        map_mouse_button_to_navigation(egui::PointerButton::Extra2),
+        Some(MouseNavigationAction::Forward)
+    );
+    for button in [
+        egui::PointerButton::Primary,
+        egui::PointerButton::Secondary,
+        egui::PointerButton::Middle,
+    ] {
+        assert_eq!(map_mouse_button_to_navigation(button), None);
+    }
+}
+
+#[test]
 fn clearing_preview_resets_floating_viewport_state() {
     let mut preview = PreviewState::default();
     preview.target = Some(PathBuf::from("preview.txt"));

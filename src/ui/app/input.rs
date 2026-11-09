@@ -2,8 +2,26 @@
 
 use super::*;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum MouseNavigationAction {
+    Back,
+    Forward,
+}
+
+pub(super) fn map_mouse_button_to_navigation(
+    button: egui::PointerButton,
+) -> Option<MouseNavigationAction> {
+    // В egui боковые кнопки обычно приходят как Extra1/Extra2; точное соответствие зависит от платформы и библиотеки.
+    match button {
+        egui::PointerButton::Extra1 => Some(MouseNavigationAction::Back),
+        egui::PointerButton::Extra2 => Some(MouseNavigationAction::Forward),
+        _ => None,
+    }
+}
+
 impl FileManagerApp {
     pub(super) fn handle_keys(&mut self, ctx: &egui::Context) {
+        self.handle_side_mouse_navigation(ctx);
         let text_edit_focused = ctx.text_edit_focused();
         let mods = ctx.input(|i| i.modifiers);
         let input = |i: &egui::InputState| i.clone();
@@ -177,6 +195,25 @@ impl FileManagerApp {
             self.move_cursor(0, extend);
         } else if i.key_pressed(egui::Key::End) {
             self.move_cursor(len - 1, extend);
+        }
+    }
+
+    fn handle_side_mouse_navigation(&mut self, ctx: &egui::Context) {
+        if !self.store.settings.enable_mouse_side_navigation {
+            return;
+        }
+        let action = ctx.input(|input| {
+            for button in [egui::PointerButton::Extra1, egui::PointerButton::Extra2] {
+                if input.pointer.button_clicked(button) {
+                    return map_mouse_button_to_navigation(button);
+                }
+            }
+            None
+        });
+        match action {
+            Some(MouseNavigationAction::Back) => self.go_back(ctx),
+            Some(MouseNavigationAction::Forward) => self.go_forward(ctx),
+            None => {}
         }
     }
 

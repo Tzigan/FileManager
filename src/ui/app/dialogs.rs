@@ -114,7 +114,7 @@ impl FileManagerApp {
         let builder = floating_dialog_viewport(
             ctx,
             title,
-            egui::vec2(560.0, 205.0),
+            egui::vec2(560.0, 315.0),
             self.settings_viewport_placed,
         );
         let mut close_requested = false;
@@ -159,6 +159,23 @@ impl FileManagerApp {
                         ui.add_space(style::SPACE_SM);
                         ui.label(
                             egui::RichText::new(self.t("settings.single_instance_hint")).weak(),
+                        );
+                        ui.add_space(style::SPACE_MD);
+                        let side_navigation_label =
+                            self.t("settings.mouse_side_navigation").to_owned();
+                        if ui
+                            .checkbox(
+                                &mut self.store.settings.enable_mouse_side_navigation,
+                                side_navigation_label,
+                            )
+                            .changed()
+                        {
+                            self.persist();
+                        }
+                        ui.add_space(style::SPACE_SM);
+                        ui.label(
+                            egui::RichText::new(self.t("settings.mouse_side_navigation_hint"))
+                                .weak(),
                         );
                     });
                 });

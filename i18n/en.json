@@ -157,6 +157,8 @@
   "update.install_failed": "Could not start the update installer",
   "group.by_type": "Group by type",
   "settings.single_instance": "Single instance",
+  "settings.mouse_side_navigation": "Mouse side buttons for navigation",
+  "settings.mouse_side_navigation_hint": "Use the mouse Back and Forward buttons to navigate folder history.",
   "ctx.properties": "Properties",
   "props.title": "Properties",
   "props.path": "Path",
