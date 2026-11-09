@@ -26,7 +26,6 @@ pub(crate) const ICON_WIDTH: f32 = 26.0;
 impl FileManagerApp {
     /// Virtualized file list: view switcher + header + rows in the current mode.
     pub(crate) fn file_list(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
-        self.begin_thumbnail_frame();
         style::dense_vertical_spacing(ui.style_mut());
         ui.horizontal(|ui| {
             for (mode, key) in [
@@ -129,7 +128,6 @@ impl FileManagerApp {
                         });
                 });
         }
-        self.finish_thumbnail_frame();
         self.empty_area_menu(&bg_resp, ctx);
         self.scroll_to_cursor = false;
     }

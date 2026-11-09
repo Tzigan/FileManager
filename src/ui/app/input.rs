@@ -21,6 +21,14 @@ pub(super) fn map_mouse_button_to_navigation(
 
 impl FileManagerApp {
     pub(super) fn handle_keys(&mut self, ctx: &egui::Context) {
+        self.handle_keys_impl(ctx, true);
+    }
+
+    pub(super) fn handle_detached_keys(&mut self, ctx: &egui::Context) {
+        self.handle_keys_impl(ctx, false);
+    }
+
+    fn handle_keys_impl(&mut self, ctx: &egui::Context, allow_tab_management: bool) {
         self.handle_side_mouse_navigation(ctx);
         let text_edit_focused = ctx.text_edit_focused();
         let mods = ctx.input(|i| i.modifiers);
@@ -87,24 +95,38 @@ impl FileManagerApp {
             return;
         }
 
-        // Tab management.
-        if mods.ctrl && ctx.input(|i| i.key_pressed(egui::Key::T)) {
-            self.new_tab(ctx);
-            return;
-        }
-        if mods.ctrl && ctx.input(|i| i.key_pressed(egui::Key::W)) {
-            self.close_tab(self.active, ctx);
-            return;
-        }
-        if mods.ctrl && ctx.input(|i| i.key_pressed(egui::Key::Tab)) {
-            let next = (self.active + 1) % self.tabs.len();
-            self.switch_tab(next);
-            return;
-        }
-        if mods.ctrl && mods.shift && ctx.input(|i| i.key_pressed(egui::Key::Tab)) {
-            let prev = (self.active + self.tabs.len() - 1) % self.tabs.len();
-            self.switch_tab(prev);
-            return;
+        if allow_tab_management {
+            if mods.ctrl && mods.shift && ctx.input(|i| i.key_pressed(egui::Key::Tab)) {
+                let visible = self.visible_tab_indices();
+                if !visible.is_empty() {
+                    let current = visible
+                        .iter()
+                        .position(|&index| index == self.active)
+                        .unwrap_or_default();
+                    let prev = (current + visible.len() - 1) % visible.len();
+                    self.switch_tab(visible[prev]);
+                }
+                return;
+            }
+            if mods.ctrl && ctx.input(|i| i.key_pressed(egui::Key::T)) {
+                self.new_tab(ctx);
+                return;
+            }
+            if mods.ctrl && ctx.input(|i| i.key_pressed(egui::Key::W)) {
+                self.close_tab(self.active, ctx);
+                return;
+            }
+            if mods.ctrl && ctx.input(|i| i.key_pressed(egui::Key::Tab)) {
+                let visible = self.visible_tab_indices();
+                if !visible.is_empty() {
+                    let current = visible
+                        .iter()
+                        .position(|&index| index == self.active)
+                        .unwrap_or_default();
+                    self.switch_tab(visible[(current + 1) % visible.len()]);
+                }
+                return;
+            }
         }
 
         if ctx.input(|i| i.key_pressed(egui::Key::Delete)) {

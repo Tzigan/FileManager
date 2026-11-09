@@ -85,16 +85,38 @@ impl FileManagerApp {
 
     pub(super) fn tab_bar(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
         configure_tab_scroll_style(ui.style_mut());
+        let available = ui.available_rect_before_wrap();
+        let frame_rect = egui::Rect::from_min_size(
+            available.min,
+            egui::vec2(
+                ui.available_width(),
+                super::window_frame::WINDOW_FRAME_HEIGHT,
+            ),
+        )
+        .expand2(egui::vec2(style::FRAME_PADDING_X as f32, 0.0));
+        let mut detach_tab_id = None;
         ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = style::SPACE_XS;
             let mut act: Option<(&str, usize)> = None;
             let mut drop_dst = None;
             let mut drag_src = None;
             let mut dragging_tab =
                 is_tab_dragging(self.tab_drag, self.tab_press, ui.ctx().pointer_latest_pos());
-            let metas: Vec<(bool, String)> =
-                self.tabs.iter().map(|t| (t.pinned, t.title())).collect();
+            let metas: Vec<(usize, bool, String)> = self
+                .tabs
+                .iter()
+                .enumerate()
+                .filter(|(_, tab)| !self.is_tab_detached(tab.id))
+                .map(|(index, tab)| (index, tab.pinned, tab.title()))
+                .collect();
 
-            let scroll_width = (ui.available_width() - 30.0).max(1.0);
+            let spacing = ui.spacing().item_spacing.x;
+            let scroll_width = (ui.available_width()
+                - super::window_frame::WINDOW_CONTROLS_WIDTH
+                - super::window_frame::WINDOW_DRAG_AREA_MIN_WIDTH
+                - super::window_frame::TAB_PLUS_AREA_WIDTH
+                - spacing * 3.0)
+                .max(1.0);
             egui::ScrollArea::horizontal()
                 .id_salt("tab_strip_scroll")
                 .max_width(scroll_width)
@@ -104,23 +126,33 @@ impl FileManagerApp {
                 .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        for (i, (pinned, title)) in metas.iter().enumerate() {
+                        for (display_index, (i, pinned, title)) in metas.iter().enumerate() {
                             ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing.x = style::SPACE_XXS;
 
-                                // Hand-rolled tab widget: click-and-drag sense so a plain click
-                                // stays a click (arrow cursor), while press+drag reorders.
+                                // Клик переключает вкладку, а перетаскивание меняет её порядок.
                                 let galley = ui.painter().layout_no_wrap(
                                     title.clone(),
                                     egui::TextStyle::Button.resolve(ui.style()),
                                     ui.visuals().text_color(),
                                 );
-                                // The × lives inside the tab: right-side strip of the same rect.
-                                let pin_w = if *pinned { 16.0 } else { 0.0 };
-                                let close_w = if *pinned { 0.0 } else { 18.0 };
-                                let size = galley.size() + egui::vec2(14.0 + pin_w + close_w, 6.0);
-                                // click (not click_and_drag): a focusable widget would keep keyboard
-                                // focus and kill every global shortcut after a tab click.
+                                // Крестик закрытия расположен внутри вкладки справа.
+                                let pin_w = if *pinned {
+                                    super::window_frame::TAB_PIN_WIDTH
+                                } else {
+                                    0.0
+                                };
+                                let close_w = if *pinned {
+                                    0.0
+                                } else {
+                                    super::window_frame::TAB_CLOSE_WIDTH
+                                };
+                                let size = galley.size()
+                                    + egui::vec2(
+                                        super::window_frame::TAB_TEXT_EXTRA_WIDTH + pin_w + close_w,
+                                        super::window_frame::TAB_VERTICAL_EXTRA_HEIGHT,
+                                    );
+                                // Обычный клик сохраняет работу глобальных сочетаний клавиш.
                                 let (rect, resp) =
                                     ui.allocate_exact_size(size, egui::Sense::click());
                                 let x_rect = egui::Rect::from_min_max(
@@ -135,7 +167,7 @@ impl FileManagerApp {
                                 );
                                 let visuals = ui.visuals();
                                 let painter = ui.painter();
-                                if i == self.active {
+                                if *i == self.active {
                                     painter.rect_filled(
                                         rect,
                                         style::RADIUS_ROW,
@@ -148,13 +180,17 @@ impl FileManagerApp {
                                         visuals.widgets.hovered.bg_fill,
                                     );
                                 }
-                                let color = if i == self.active {
+                                let color = if *i == self.active {
                                     visuals.strong_text_color()
                                 } else {
                                     visuals.text_color()
                                 };
-                                let text_left = rect.left() + 7.0 + pin_w;
-                                let text_right = rect.right() - 7.0 - close_w;
+                                let text_left = rect.left()
+                                    + super::window_frame::TAB_HORIZONTAL_PADDING
+                                    + pin_w;
+                                let text_right = rect.right()
+                                    - super::window_frame::TAB_HORIZONTAL_PADDING
+                                    - close_w;
                                 painter.galley(
                                     egui::pos2(
                                         (text_left + text_right - galley.size().x) * 0.5,
@@ -164,16 +200,22 @@ impl FileManagerApp {
                                     color,
                                 );
                                 if *pinned {
+                                    let pin_size = super::window_frame::TAB_PIN_ICON_SIZE;
                                     let pin_rect = egui::Rect::from_min_size(
-                                        egui::pos2(rect.left() + 4.0, rect.center().y - 6.0),
-                                        egui::vec2(12.0, 12.0),
+                                        egui::pos2(
+                                            rect.left() + super::window_frame::TAB_PIN_ICON_OFFSET,
+                                            rect.center().y - pin_size * 0.5,
+                                        ),
+                                        egui::vec2(pin_size, pin_size),
                                     );
                                     icon_pin(painter, pin_rect, color);
                                 }
                                 if !*pinned {
                                     if over_x {
                                         painter.rect_filled(
-                                            x_rect.shrink(2.0),
+                                            x_rect.shrink(
+                                                super::window_frame::TAB_CLOSE_HIGHLIGHT_INSET,
+                                            ),
                                             style::RADIUS_ROW,
                                             visuals.error_fg_color.gamma_multiply(0.25),
                                         );
@@ -183,20 +225,26 @@ impl FileManagerApp {
                                     } else {
                                         visuals.weak_text_color()
                                     };
-                                    let cross = 4.0;
+                                    let cross = super::window_frame::TAB_CLOSE_CROSS_RADIUS;
                                     painter.line_segment(
                                         [
                                             x_rect.center() + egui::vec2(-cross, -cross),
                                             x_rect.center() + egui::vec2(cross, cross),
                                         ],
-                                        egui::Stroke::new(1.4, x_color),
+                                        egui::Stroke::new(
+                                            super::window_frame::TAB_CLOSE_CROSS_STROKE,
+                                            x_color,
+                                        ),
                                     );
                                     painter.line_segment(
                                         [
                                             x_rect.center() + egui::vec2(-cross, cross),
                                             x_rect.center() + egui::vec2(cross, -cross),
                                         ],
-                                        egui::Stroke::new(1.4, x_color),
+                                        egui::Stroke::new(
+                                            super::window_frame::TAB_CLOSE_CROSS_STROKE,
+                                            x_color,
+                                        ),
                                     );
                                 }
 
@@ -209,19 +257,19 @@ impl FileManagerApp {
                                         .t(if *pinned { "tab.unpin" } else { "tab.pin" })
                                         .to_owned();
                                     if !*pinned && ui.button(close_txt).clicked() {
-                                        act = Some(("close", i));
+                                        act = Some(("close", *i));
                                         ui.close();
                                     }
                                     if ui.button(others_txt).clicked() {
-                                        act = Some(("close_others", i));
+                                        act = Some(("close_others", *i));
                                         ui.close();
                                     }
                                     if ui.button(dup_txt).clicked() {
-                                        act = Some(("dup", i));
+                                        act = Some(("dup", *i));
                                         ui.close();
                                     }
                                     if ui.button(pin_txt).clicked() {
-                                        act = Some(("pin", i));
+                                        act = Some(("pin", *i));
                                         ui.close();
                                     }
                                 });
@@ -231,46 +279,50 @@ impl FileManagerApp {
                                         .map(|p| x_rect.contains(p))
                                         .unwrap_or(false);
                                     if in_x {
-                                        act = Some(("close", i));
+                                        act = Some(("close", *i));
                                     } else {
-                                        act = Some(("switch", i));
+                                        act = Some(("switch", *i));
                                     }
                                 }
                                 if !dragging_tab && resp.middle_clicked() && !*pinned {
-                                    act = Some(("close", i));
+                                    act = Some(("close", *i));
                                 }
-                                // Manual drag: pressed on this tab and moved past the threshold.
-                                if resp.is_pointer_button_down_on() {
-                                    if let Some(p) = ui.ctx().pointer_latest_pos() {
-                                        if self.tab_press.is_none() {
-                                            self.tab_press = Some((i, p));
-                                        }
-                                        if let Some((si, start)) = self.tab_press {
-                                            if si == i && p.distance(start) > TAB_DRAG_THRESHOLD {
-                                                drag_src = Some(i);
-                                                dragging_tab = true;
-                                            }
-                                        }
+                                // Начинаем перестановку после выхода указателя за порог перетаскивания.
+                                if resp.is_pointer_button_down_on()
+                                    && let Some(p) = ui.ctx().pointer_latest_pos()
+                                {
+                                    if self.tab_press.is_none() {
+                                        self.tab_press = Some((*i, p));
+                                    }
+                                    if let Some((si, start)) = self.tab_press
+                                        && si == *i
+                                        && p.distance(start)
+                                            > super::window_frame::TAB_DRAG_THRESHOLD
+                                    {
+                                        drag_src = Some(*i);
+                                        dragging_tab = true;
                                     }
                                 }
-                                if drag_src.is_some() || self.tab_drag.is_some() {
-                                    if let Some(pos) = ui.ctx().pointer_latest_pos() {
-                                        if rect.contains(pos) {
-                                            let before = pos.x < rect.center().x;
-                                            drop_dst = Some(if before { i } else { i + 1 });
-                                            // Vertical insertion line at the hovered edge.
-                                            ui.painter().vline(
-                                                if before { rect.left() } else { rect.right() },
-                                                rect.y_range(),
-                                                egui::Stroke::new(
-                                                    2.0,
-                                                    ui.visuals().selection.stroke.color,
-                                                ),
-                                            );
-                                        }
-                                    }
+                                if (drag_src.is_some() || self.tab_drag.is_some())
+                                    && let Some(pos) = ui.ctx().pointer_latest_pos()
+                                    && rect.contains(pos)
+                                {
+                                    let before = pos.x < rect.center().x;
+                                    drop_dst = Some(if before {
+                                        display_index
+                                    } else {
+                                        display_index + 1
+                                    });
+                                    // Показываем место вставки рядом с наведённой вкладкой.
+                                    ui.painter().vline(
+                                        if before { rect.left() } else { rect.right() },
+                                        rect.y_range(),
+                                        egui::Stroke::new(
+                                            super::window_frame::TAB_INSERTION_STROKE,
+                                            ui.visuals().selection.stroke.color,
+                                        ),
+                                    );
                                 }
-                                let _ = resp;
                             });
                         }
                     });
@@ -278,39 +330,65 @@ impl FileManagerApp {
             if ui.small_button("+").clicked() {
                 self.new_tab(ctx);
             }
-            if let Some(src) = drag_src.or(self.tab_drag) {
-                // Floating chip under the pointer while a tab is dragged.
-                if let Some(pos) = ui.ctx().pointer_latest_pos() {
-                    if let Some((_, title)) = metas.get(src) {
-                        egui::Area::new(ui.scope_id().with("tab_drag_chip"))
-                            .order(egui::Order::Foreground)
-                            .current_pos(pos + egui::vec2(10.0, -16.0))
-                            .show(ui.ctx(), |ui| {
-                                egui::Frame::new()
-                                    .fill(ui.visuals().extreme_bg_color)
-                                    .corner_radius(style::RADIUS_ROW)
-                                    .inner_margin(egui::Margin::symmetric(
-                                        style::FRAME_PADDING_X,
-                                        style::FRAME_PADDING_Y,
-                                    ))
-                                    .stroke(egui::Stroke::new(
-                                        1.0,
-                                        ui.visuals().selection.stroke.color,
-                                    ))
-                                    .show(ui, |ui| {
-                                        ui.label(title.clone());
-                                    });
+            let drag_width =
+                (ui.available_width() - super::window_frame::WINDOW_CONTROLS_WIDTH - spacing)
+                    .max(0.0);
+            let (_, drag_response) = ui.allocate_exact_size(
+                egui::vec2(drag_width, super::window_frame::WINDOW_FRAME_HEIGHT),
+                egui::Sense::click_and_drag(),
+            );
+            if drag_response.drag_started() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+            }
+            if drag_response.double_clicked() {
+                super::window_frame::toggle_maximized(ctx);
+            }
+            self.window_controls(ctx, ui);
+            if let Some(src) = drag_src.or(self.tab_drag)
+                && let Some(pos) = ui.ctx().pointer_latest_pos()
+                && let Some((_, _, title)) = metas.iter().find(|(index, _, _)| *index == src)
+            {
+                // Показываем перетаскиваемую вкладку под указателем.
+                egui::Area::new(ui.scope_id().with("tab_drag_chip"))
+                    .order(egui::Order::Foreground)
+                    .current_pos(
+                        pos + egui::vec2(
+                            super::window_frame::TAB_DRAG_CHIP_OFFSET_X,
+                            super::window_frame::TAB_DRAG_CHIP_OFFSET_Y,
+                        ),
+                    )
+                    .show(ui.ctx(), |ui| {
+                        egui::Frame::new()
+                            .fill(ui.visuals().extreme_bg_color)
+                            .corner_radius(style::RADIUS_ROW)
+                            .inner_margin(egui::Margin::symmetric(
+                                style::FRAME_PADDING_X,
+                                style::FRAME_PADDING_Y,
+                            ))
+                            .stroke(egui::Stroke::new(
+                                super::window_frame::TAB_DRAG_CHIP_STROKE,
+                                ui.visuals().selection.stroke.color,
+                            ))
+                            .show(ui, |ui| {
+                                ui.label(title.clone());
                             });
-                    }
-                }
+                    });
             }
             if let Some(src) = drag_src {
                 self.tab_drag = Some(src);
             }
             if ui.ctx().input(|i| i.pointer.any_released()) {
-                if self.tab_drag.is_some() {
-                    if let (Some(src), Some(dst)) = (self.tab_drag, drop_dst) {
-                        self.move_tab(src, dst);
+                if let Some(src) = self.tab_drag {
+                    let released_inside_frame = !super::window_frame::release_is_outside_frame(
+                        frame_rect,
+                        ui.ctx().pointer_latest_pos(),
+                    );
+                    if released_inside_frame {
+                        if let Some(dst) = drop_dst {
+                            self.move_visible_tab(src, dst);
+                        }
+                    } else if let Some(tab) = self.tabs.get(src) {
+                        detach_tab_id = Some(tab.id);
                     }
                     self.tab_drag = None;
                 }
@@ -327,6 +405,9 @@ impl FileManagerApp {
                 }
             }
         });
+        if let Some(tab_id) = detach_tab_id {
+            self.request_detach_tab(tab_id);
+        }
     }
 
     pub(super) fn toolbar(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {

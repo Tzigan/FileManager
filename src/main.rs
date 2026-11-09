@@ -62,6 +62,8 @@ fn main() -> anyhow::Result<()> {
 
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("FileManager")
+        .with_decorations(false)
+        .with_resizable(true)
         .with_inner_size([1100.0, 700.0])
         .with_min_inner_size([640.0, 420.0]);
     match eframe::icon_data::from_png_bytes(include_bytes!("../resources/app.png")) {

@@ -19,7 +19,7 @@ impl FileManagerApp {
         }
     }
 
-    fn persist_tabs(&mut self) {
+    pub(super) fn persist_tabs(&mut self) {
         self.store.settings.tabs = self.tabs.iter().map(persisted_tab_path).collect();
         self.store.settings.pinned_tabs = self
             .tabs
@@ -267,6 +267,14 @@ impl FileManagerApp {
     }
 
     pub(super) fn close_tab(&mut self, idx: usize, ctx: &egui::Context) {
+        if self.visible_tab_indices().len() <= 1
+            || self
+                .tabs
+                .get(idx)
+                .is_none_or(|tab| self.is_tab_detached(tab.id))
+        {
+            return;
+        }
         let Some(active) = crate::ui::tabs::close_tab_state(&mut self.tabs, self.active, idx)
         else {
             return;
@@ -276,8 +284,22 @@ impl FileManagerApp {
         ctx.request_repaint();
     }
 
+    pub(super) fn close_detached_tab(&mut self, tab_id: u64, ctx: &egui::Context) {
+        let Some(index) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        };
+        if self.tabs[index].pinned {
+            return;
+        }
+        self.detached_tabs.remove(&tab_id);
+        self.active = index;
+        self.close_tab(index, ctx);
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
+
     pub(super) fn switch_tab(&mut self, idx: usize) {
-        if idx != self.active && idx < self.tabs.len() {
+        if idx != self.active && idx < self.tabs.len() && !self.is_tab_detached(self.tabs[idx].id) {
             self.active = idx;
             self.persist_tabs();
         }
@@ -294,13 +316,36 @@ impl FileManagerApp {
     }
 
     pub(super) fn close_others(&mut self, idx: usize, ctx: &egui::Context) {
-        if self.tabs.len() <= 1 {
-            return;
-        }
-        let Some(active) = crate::ui::tabs::close_other_tabs_state(&mut self.tabs, idx) else {
+        let Some(keep_id) = self.tabs.get(idx).map(|tab| tab.id) else {
             return;
         };
-        self.active = active;
+        if self.visible_tab_indices().len() <= 1 || self.is_tab_detached(keep_id) {
+            return;
+        }
+        if self.detached_tabs.is_empty() {
+            let Some(active) = crate::ui::tabs::close_other_tabs_state(&mut self.tabs, idx) else {
+                return;
+            };
+            self.active = active;
+            self.persist_tabs();
+            ctx.request_repaint();
+            return;
+        }
+        let mut index = self.tabs.len();
+        while index > 0 {
+            index -= 1;
+            let tab = &self.tabs[index];
+            if tab.id != keep_id && !tab.pinned && !self.is_tab_detached(tab.id) {
+                tab.cancel.store(true, Ordering::Relaxed);
+                tab.search.cancel.store(true, Ordering::Relaxed);
+                self.tabs.remove(index);
+            }
+        }
+        self.active = self
+            .tabs
+            .iter()
+            .position(|tab| tab.id == keep_id)
+            .unwrap_or_default();
         self.persist_tabs();
         ctx.request_repaint();
     }
@@ -315,6 +360,36 @@ impl FileManagerApp {
             return;
         };
         self.active = dst;
+        self.persist_tabs();
+    }
+
+    pub(super) fn move_visible_tab(&mut self, source: usize, drop_slot: usize) {
+        if self.detached_tabs.is_empty() {
+            self.move_tab(source, drop_slot);
+            return;
+        }
+        let visible = self.visible_tab_indices();
+        let Some(source_id) = self.tabs.get(source).map(|tab| tab.id) else {
+            return;
+        };
+        let Some(source_slot) = visible.iter().position(|&index| index == source) else {
+            return;
+        };
+        if crate::ui::tabs::move_to_visible_drop_slot(
+            &mut self.tabs,
+            &visible,
+            source_slot,
+            drop_slot,
+        )
+        .is_none()
+        {
+            return;
+        }
+        self.active = self
+            .tabs
+            .iter()
+            .position(|tab| tab.id == source_id)
+            .unwrap_or_default();
         self.persist_tabs();
     }
 }
