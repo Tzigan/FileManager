@@ -49,6 +49,9 @@ pub struct Settings {
     /// One running instance: new launches forward their path over the pipe.
     #[serde(default = "default_true")]
     pub single_instance: bool,
+    /// Навигация по истории папок боковыми кнопками мыши.
+    #[serde(default = "default_true")]
+    pub enable_mouse_side_navigation: bool,
 }
 
 fn default_true() -> bool {
@@ -71,6 +74,7 @@ impl Default for Settings {
             group_by_type: false,
             group_order: Vec::new(),
             single_instance: true,
+            enable_mouse_side_navigation: true,
         }
     }
 }
@@ -133,6 +137,7 @@ mod tests {
     fn defaults_are_safe() {
         let s = Settings::default();
         assert!(s.tabs.is_empty() && s.active_tab == 0 && s.bookmarks.is_empty());
+        assert!(s.enable_mouse_side_navigation);
     }
 
     #[test]
@@ -166,6 +171,7 @@ mod tests {
         store.settings.group_by_type = true;
         store.settings.group_order = vec!["ext:txt".into(), "folder".into()];
         store.settings.single_instance = false;
+        store.settings.enable_mouse_side_navigation = false;
         store.save().unwrap();
 
         let loaded = SettingsStore::load(&dir);
@@ -182,6 +188,7 @@ mod tests {
         assert!(loaded.settings.group_by_type);
         assert_eq!(loaded.settings.group_order, vec!["ext:txt", "folder"]);
         assert!(!loaded.settings.single_instance);
+        assert!(!loaded.settings.enable_mouse_side_navigation);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -199,10 +206,13 @@ mod tests {
         assert_eq!(loaded.settings.tabs, vec![PathBuf::from("C:\\work")]);
         assert_eq!(loaded.settings.bookmarks, vec![PathBuf::from("D:\\docs")]);
         assert_eq!(loaded.settings.view_mode, ViewMode::Table);
-        assert!(loaded.settings.col_size && loaded.settings.col_type && loaded.settings.col_modified);
+        assert!(
+            loaded.settings.col_size && loaded.settings.col_type && loaded.settings.col_modified
+        );
         assert!(!loaded.settings.group_by_type);
         assert!(loaded.settings.group_order.is_empty());
         assert!(loaded.settings.single_instance);
+        assert!(loaded.settings.enable_mouse_side_navigation);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

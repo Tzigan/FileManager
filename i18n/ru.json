@@ -157,6 +157,8 @@
   "update.install_failed": "Не удалось запустить установщик обновления",
   "group.by_type": "Группировать по типу",
   "settings.single_instance": "Один экземпляр приложения",
+  "settings.mouse_side_navigation": "Боковые кнопки мыши для навигации",
+  "settings.mouse_side_navigation_hint": "Кнопки «Назад» и «Вперёд» переходят по истории папок.",
   "ctx.properties": "Свойства",
   "props.title": "Свойства",
   "props.path": "Путь",
