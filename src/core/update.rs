@@ -126,7 +126,7 @@ pub fn download(manifest: &UpdateManifest) -> anyhow::Result<PathBuf> {
     download_with_progress(manifest, |_, _| {})
 }
 
-/// Downloads the release archive and reports the number of verified-size bytes read.
+/// Скачивает архив релиза и сообщает число прочитанных байтов.
 pub fn download_with_progress(
     manifest: &UpdateManifest,
     progress: impl FnMut(u64, u64),
