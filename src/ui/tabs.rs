@@ -234,6 +234,38 @@ pub(crate) fn move_to_drop_slot<T>(items: &mut Vec<T>, source: usize, slot: usiz
     Some(target)
 }
 
+/// Перемещает видимую вкладку, не меняя порядок скрытых оконных вкладок.
+pub(crate) fn move_to_visible_drop_slot<T>(
+    items: &mut Vec<T>,
+    visible_indices: &[usize],
+    source_slot: usize,
+    drop_slot: usize,
+) -> Option<usize> {
+    if drop_slot > visible_indices.len() {
+        return None;
+    }
+    let source = *visible_indices.get(source_slot)?;
+    if source >= items.len() {
+        return None;
+    }
+
+    let target_slot = drop_slot.saturating_sub(usize::from(drop_slot > source_slot));
+    let item = items.remove(source);
+    let visible_after: Vec<usize> = visible_indices
+        .iter()
+        .enumerate()
+        .filter_map(|(slot, &index)| {
+            (slot != source_slot).then_some(if index > source { index - 1 } else { index })
+        })
+        .collect();
+    let target = visible_after
+        .get(target_slot)
+        .copied()
+        .unwrap_or_else(|| visible_after.last().map_or(items.len(), |index| index + 1));
+    items.insert(target.min(items.len()), item);
+    Some(target.min(items.len() - 1))
+}
+
 /// Click selection honoring Ctrl/Shift modifiers (Explorer semantics).
 /// Returns the new cursor position.
 pub(crate) fn apply_click(
@@ -400,6 +432,19 @@ mod tests {
         assert_eq!(move_to_drop_slot(&mut tabs, 2, 0), None);
         assert_eq!(move_to_drop_slot(&mut tabs, 0, 3), None);
         assert_eq!(tabs, ["A", "B"]);
+    }
+
+    #[test]
+    fn moving_visible_tab_keeps_detached_slots_out_of_the_visible_order() {
+        let mut tabs = vec!["A", "detached-1", "B", "detached-2", "C"];
+        let visible = [0, 2, 4];
+
+        assert_eq!(
+            move_to_visible_drop_slot(&mut tabs, &visible, 0, 2),
+            Some(3)
+        );
+        assert_eq!(tabs, ["detached-1", "B", "detached-2", "A", "C"]);
+        assert_eq!([tabs[1], tabs[3], tabs[4]], ["B", "A", "C"]);
     }
 
     #[test]

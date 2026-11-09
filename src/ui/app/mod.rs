@@ -5,6 +5,7 @@ mod navigation;
 mod preview;
 mod search;
 mod toolbar;
+mod window_frame;
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
@@ -179,6 +180,8 @@ pub struct FileManagerApp {
     zip_generation: u64,
     zip_busy: bool,
     zip_message: Option<String>,
+    detached_tabs: HashMap<u64, window_frame::DetachedTabWindow>,
+    tab_detach_error: Option<String>,
 
     pub(crate) tabs: Vec<Tab>,
     pub(crate) active: usize,
@@ -339,6 +342,8 @@ impl FileManagerApp {
             zip_generation: 0,
             zip_busy: false,
             zip_message: None,
+            detached_tabs: HashMap::new(),
+            tab_detach_error: None,
             tabs: paths.into_iter().map(|p| { let mut t = Tab::new(p); t.pinned = pins.contains(&t.path); t }).collect(),
             active,
             tree: TreeState::new(drives()),
@@ -634,6 +639,78 @@ impl FileManagerApp {
         }
     }
 
+    pub(super) fn show_active_tab_status(&self, ui: &mut egui::Ui) {
+        let tab = &self.tabs[self.active];
+        ui.horizontal(|ui| {
+            if tab.status == ListStatus::Loading {
+                let status = if tab.search.running || tab.search.debounce_at.is_some() {
+                    "search.searching"
+                } else {
+                    "status.loading"
+                };
+                ui.label(self.t(status).to_owned());
+            } else {
+                ui.label(format!("{}: {}", self.t("status.items"), tab.entries.len()));
+                if !tab.selection.is_empty() {
+                    ui.separator();
+                    ui.label(format!(
+                        "{}: {}",
+                        self.t("status.selected"),
+                        tab.selection.len()
+                    ));
+                }
+            }
+            if let Some(error) = &self.tab_detach_error {
+                ui.separator();
+                ui.colored_label(ui.visuals().error_fg_color, error);
+            }
+        });
+    }
+
+    pub(super) fn show_active_file_content(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
+        let (error, empty, loading, searching, no_results) = {
+            let tab = &self.tabs[self.active];
+            (
+                tab.error.clone(),
+                tab.entries.is_empty(),
+                tab.status == ListStatus::Loading,
+                tab.search.running || tab.search.debounce_at.is_some(),
+                tab.search.results_active,
+            )
+        };
+        if let Some(error) = error {
+            ui.vertical_centered(|ui| {
+                ui.add_space(style::SPACE_EMPTY_STATE);
+                ui.colored_label(ui.visuals().error_fg_color, error);
+                ui.add_space(style::SPACE_MD);
+                if ui.button(self.t("toolbar.up").to_owned()).clicked() {
+                    self.go_up(ctx);
+                }
+            });
+            return;
+        }
+        if empty {
+            ui.vertical_centered(|ui| {
+                ui.add_space(style::SPACE_EMPTY_STATE);
+                if loading {
+                    ui.spinner();
+                    let status = if searching {
+                        "search.searching"
+                    } else {
+                        "status.loading"
+                    };
+                    ui.label(self.t(status).to_owned());
+                } else if no_results {
+                    ui.label(self.t("search.no_results").to_owned());
+                } else {
+                    ui.label(self.t("folder.empty").to_owned());
+                }
+            });
+            return;
+        }
+        self.file_list(ctx, ui);
+    }
+
     fn error_text(&self, e: &std::io::Error) -> String {
         match e.kind() {
             std::io::ErrorKind::PermissionDenied => self.t("error.access_denied").to_owned(),
@@ -750,6 +827,7 @@ impl eframe::App for FileManagerApp {
             super::style::configure(&ctx);
             self.style_configured = true;
         }
+        window_frame::handle_resize_edges(&ctx);
         if !self.update_startup_signaled {
             self.update_startup_signaled = true;
             if let Err(e) = crate::platform::signal_update_started() {
@@ -761,15 +839,15 @@ impl eframe::App for FileManagerApp {
         self.handle_keys(&ctx);
         self.handle_dropped_files(&ctx);
 
-        egui::Panel::top("menu_bar").show(ui, |ui| self.menu_bar(ui));
-        egui::Panel::top("tab_bar")
+        self.begin_thumbnail_frame();
+        egui::Panel::top("window_frame")
             .frame(
-                egui::Frame::side_top_panel(ui.style()).inner_margin(egui::Margin::symmetric(
-                    style::FRAME_PADDING_X,
-                    0,
-                )),
+                egui::Frame::new()
+                    .fill(ui.visuals().panel_fill)
+                    .inner_margin(egui::Margin::symmetric(style::FRAME_PADDING_X, 0)),
             )
             .show(ui, |ui| self.tab_bar(&ctx, ui));
+        egui::Panel::top("menu_bar").show(ui, |ui| self.menu_bar(ui));
         egui::Panel::top("toolbar").show(ui, |ui| self.toolbar(&ctx, ui));
         egui::Panel::top("search_bar").show(ui, |ui| self.search_bar(ui));
         self.dispatch_due_searches(&ctx);
@@ -788,81 +866,12 @@ impl eframe::App for FileManagerApp {
 
         egui::Panel::bottom("ops_panel").show(ui, |ui| self.ops_panel(ui));
 
-        egui::Panel::bottom("status_bar").show(ui, |ui| {
-            ui.horizontal(|ui| {
-                let tab = &self.tabs[self.active];
-                if tab.status == ListStatus::Loading {
-                    let status = if tab.search.running || tab.search.debounce_at.is_some() {
-                        "search.searching"
-                    } else {
-                        "status.loading"
-                    };
-                    ui.label(self.t(status).to_owned());
-                } else {
-                    ui.label(format!(
-                        "{}: {}",
-                        self.t("status.items"),
-                        tab.entries.len()
-                    ));
-                    if !tab.selection.is_empty() {
-                        ui.separator();
-                        ui.label(format!(
-                            "{}: {}",
-                            self.t("status.selected"),
-                            tab.selection.len()
-                        ));
-                    }
-                }
-            });
-        });
-
-        egui::CentralPanel::default().show(ui, |ui| {
-            let (error, empty, loading, searching, no_results) = {
-                let tab = &self.tabs[self.active];
-                (
-                    tab.error.clone(),
-                    tab.entries.is_empty(),
-                    tab.status == ListStatus::Loading,
-                    tab.search.running || tab.search.debounce_at.is_some(),
-                    tab.search.results_active,
-                )
-            };
-            if let Some(err) = error {
-                self.cancel_all_thumbnails();
-                ui.vertical_centered(|ui| {
-                    ui.add_space(style::SPACE_EMPTY_STATE);
-                    ui.colored_label(ui.visuals().error_fg_color, err);
-                    ui.add_space(style::SPACE_MD);
-                    if ui.button(self.t("toolbar.up").to_owned()).clicked() {
-                        self.go_up(&ctx);
-                    }
-                });
-                return;
-            }
-            if empty {
-                self.cancel_all_thumbnails();
-                ui.vertical_centered(|ui| {
-                    ui.add_space(style::SPACE_EMPTY_STATE);
-                    if loading {
-                        ui.spinner();
-                        let status = if searching {
-                            "search.searching"
-                        } else {
-                            "status.loading"
-                        };
-                        ui.label(self.t(status).to_owned());
-                    } else if no_results {
-                        ui.label(self.t("search.no_results").to_owned());
-                    } else {
-                        ui.label(self.t("folder.empty").to_owned());
-                    }
-                });
-                return;
-            }
-            self.file_list(&ctx, ui);
-        });
+        egui::Panel::bottom("status_bar").show(ui, |ui| self.show_active_tab_status(ui));
+        egui::CentralPanel::default().show(ui, |ui| self.show_active_file_content(&ctx, ui));
 
         self.flush_pending_open_tabs(&ctx);
+        self.show_detached_tab_windows(&ctx);
+        self.finish_thumbnail_frame();
         self.about_window(&ctx);
         self.settings_window(&ctx);
         self.props_window(&ctx);
@@ -880,12 +889,9 @@ impl eframe::App for FileManagerApp {
     }
 }
 
-
 fn tab_scroll_source() -> egui::scroll_area::ScrollSource {
     egui::scroll_area::ScrollSource::MOUSE_WHEEL
 }
-
-const TAB_DRAG_THRESHOLD: f32 = 5.0;
 
 fn is_tab_dragging(
     active_drag: Option<usize>,
@@ -893,7 +899,7 @@ fn is_tab_dragging(
     pointer: Option<egui::Pos2>,
 ) -> bool {
     active_drag.is_some()
-        || matches!((press, pointer), (Some((_, start)), Some(pos)) if pos.distance(start) > TAB_DRAG_THRESHOLD)
+        || matches!((press, pointer), (Some((_, start)), Some(pos)) if pos.distance(start) > window_frame::TAB_DRAG_THRESHOLD)
 }
 
 fn tab_close_button_hovered(
@@ -910,10 +916,10 @@ fn tab_strip_content_margin() -> egui::Margin {
 }
 
 fn configure_tab_scroll_style(style: &mut egui::Style) {
-    // egui normally requires Shift for vertical wheel input in horizontal-only
-    // areas. The tab strip is the one place where plain wheel maps horizontally.
+    // В обычных горизонтальных областях egui прокрутка колесом требует Shift.
+    // Для полосы вкладок колесо прокручивает список напрямую.
     style.always_scroll_the_only_direction = true;
-    // The panel should hug the tab row without resizing the tabs or the plus button.
+    // Высота панели подстраивается к строке, не меняя размеры вкладок и кнопки «+».
     style.spacing.item_spacing.y = super::style::TAB_BAR_VERTICAL_SPACING;
 }
 

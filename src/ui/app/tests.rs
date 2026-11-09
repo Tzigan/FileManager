@@ -121,6 +121,45 @@ fn detached_dialog_viewports_are_topmost_and_keep_user_moved_positions() {
 }
 
 #[test]
+fn window_frame_maps_resize_edges_and_drop_targets() {
+    use super::window_frame::{release_is_outside_frame, resize_direction_at};
+
+    let frame = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 300.0));
+    assert_eq!(
+        resize_direction_at(frame, egui::pos2(1.0, 1.0)),
+        Some(egui::viewport::ResizeDirection::NorthWest)
+    );
+    assert_eq!(
+        resize_direction_at(frame, egui::pos2(399.0, 299.0)),
+        Some(egui::viewport::ResizeDirection::SouthEast)
+    );
+    assert_eq!(resize_direction_at(frame, frame.center()), None);
+
+    assert!(!release_is_outside_frame(frame, Some(frame.center())));
+    assert!(release_is_outside_frame(
+        frame,
+        Some(egui::pos2(401.0, 140.0))
+    ));
+    assert!(release_is_outside_frame(frame, None));
+}
+
+#[test]
+fn detached_tab_viewport_is_borderless_resizable_and_keeps_its_size() {
+    use super::window_frame::detached_viewport_builder;
+
+    let ctx = egui::Context::default();
+    let initial = detached_viewport_builder(&ctx, "Detached".into(), false);
+    assert_eq!(initial.decorations, Some(false));
+    assert_eq!(initial.resizable, Some(true));
+    assert_eq!(initial.inner_size, Some(egui::vec2(1000.0, 640.0)));
+    assert!(initial.position.is_some());
+
+    let placed = detached_viewport_builder(&ctx, "Detached".into(), true);
+    assert_eq!(placed.inner_size, None);
+    assert_eq!(placed.position, None);
+}
+
+#[test]
 fn preview_viewport_can_resize_and_keeps_its_user_size() {
     let ctx = egui::Context::default();
     let initial = super::preview::preview_viewport_builder(&ctx, "Preview".into(), false);
