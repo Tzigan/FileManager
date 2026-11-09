@@ -133,6 +133,18 @@ fn clearing_preview_resets_floating_viewport_state() {
 }
 
 #[test]
+fn update_percent_is_bounded_and_handles_zero_total() {
+    let percent = super::dialogs::update_percent;
+
+    assert_eq!(percent(0, 100), 0);
+    assert_eq!(percent(25, 100), 25);
+    assert_eq!(percent(50, 100), 50);
+    assert_eq!(percent(100, 100), 100);
+    assert_eq!(percent(125, 100), 100);
+    assert_eq!(percent(0, 0), 0);
+}
+
+#[test]
 fn drive_root_is_one_absolute_breadcrumb() {
     #[cfg(windows)]
     {

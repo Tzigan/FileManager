@@ -14,8 +14,6 @@ use std::sync::mpsc::{channel, sync_channel, Receiver, Sender, SyncSender, TrySe
 use std::sync::Arc;
 use std::thread;
 
-use anyhow::Context;
-
 use super::style;
 use crate::core::fs::{self, FileEntry, ReadDirError, SortKey};
 use crate::core::i18n::{I18n, Language};
@@ -75,6 +73,8 @@ pub(crate) enum WorkerMsg {
     OpenPath(PathBuf),
     /// A newer release exists on GitHub (version, exe URL).
     UpdateFound { manifest: UpdateManifest },
+    /// Получено обновление прогресса скачивания.
+    UpdateProgress { downloaded: u64, total: u64 },
     /// The verified update package is staged and ready for the separate updater.
     UpdateReady(PathBuf),
     /// The app is on the latest version (manual check).
@@ -151,7 +151,11 @@ pub struct FileManagerApp {
     /// Update offer: (version, exe URL).
     pending_update: Option<UpdateManifest>,
     update_busy: bool,
-    /// Update status/error text for the update window.
+    update_downloaded: u64,
+    update_total: u64,
+    update_ready: Option<PathBuf>,
+    update_status: Option<String>,
+    /// Ошибка обновления, показываемая в окне «О программе».
     update_err: Option<String>,
     /// Index of the tab currently being drag-reordered.
     tab_drag: Option<usize>,
@@ -313,6 +317,10 @@ impl FileManagerApp {
             update_startup_signaled: false,
             pending_update: None,
             update_busy: false,
+            update_downloaded: 0,
+            update_total: 0,
+            update_ready: None,
+            update_status: None,
             update_err: None,
             tab_drag: None,
             tab_press: None,
@@ -582,37 +590,44 @@ impl FileManagerApp {
                 }
                 WorkerMsg::OpenPath(path) => self.open_path_in_new_tab(path, ctx),
                 WorkerMsg::UpdateFound { manifest } => {
+                    self.update_busy = false;
+                    self.update_total = manifest.size;
+                    self.update_downloaded = 0;
+                    self.update_ready = None;
                     self.pending_update = Some(manifest);
+                    self.update_status = None;
                     self.update_err = None;
+                    ctx.request_repaint();
+                }
+                WorkerMsg::UpdateProgress { downloaded, total } => {
+                    self.update_downloaded = downloaded;
+                    self.update_total = total;
                     ctx.request_repaint();
                 }
                 WorkerMsg::UpdateReady(stage_dir) => {
                     self.update_busy = false;
-                    let launch_result = std::env::current_exe()
-                        .context("locate current FileManager executable")
-                        .and_then(|target| {
-                            crate::platform::launch_updater(
-                                &stage_dir,
-                                &target,
-                                std::process::id(),
-                            )
-                        });
-                    match launch_result {
-                        Ok(()) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
-                        Err(e) => {
-                            let _ = std::fs::remove_dir_all(&stage_dir);
-                            self.update_err = Some(e.to_string());
-                            ctx.request_repaint();
-                        }
-                    }
+                    self.update_downloaded = self.update_total;
+                    self.update_ready = Some(stage_dir);
+                    self.update_status = None;
+                    self.update_err = None;
+                    ctx.request_repaint();
                 }
                 WorkerMsg::UpdateLatest => {
-                    self.update_err = Some(self.t("update.latest").to_owned());
+                    self.update_busy = false;
+                    self.pending_update = None;
+                    self.update_ready = None;
+                    self.update_downloaded = 0;
+                    self.update_total = 0;
+                    self.update_err = None;
+                    self.update_status = Some(self.t("update.latest").to_owned());
                     ctx.request_repaint();
                 }
                 WorkerMsg::UpdateFailed(e) => {
                     self.update_busy = false;
-                    self.update_err = Some(e);
+                    tracing::warn!(error = %e, "update operation failed");
+                    self.update_ready = None;
+                    self.update_status = None;
+                    self.update_err = Some(self.t("update.failed").to_owned());
                     ctx.request_repaint();
                 }
             }
@@ -850,7 +865,6 @@ impl eframe::App for FileManagerApp {
         self.flush_pending_open_tabs(&ctx);
         self.about_window(&ctx);
         self.settings_window(&ctx);
-        self.update_window(&ctx);
         self.props_window(&ctx);
         self.preview_window(&ctx);
         self.zip_status_window(&ctx);

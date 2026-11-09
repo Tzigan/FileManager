@@ -1,5 +1,7 @@
 //! Диалоги настроек, свойств и обновления.
 
+use anyhow::Context;
+
 use super::*;
 
 impl FileManagerApp {
@@ -14,7 +16,7 @@ impl FileManagerApp {
         let builder = floating_dialog_viewport(
             ctx,
             title,
-            egui::vec2(500.0, 240.0),
+            egui::vec2(520.0, 350.0),
             self.about_viewport_placed,
         );
         let mut close_requested = false;
@@ -36,8 +38,64 @@ impl FileManagerApp {
                 ));
                 ui.label(format!("{}: {}", log_label, self.dirs.log_dir.display()));
                 ui.add_space(style::SPACE_SM);
-                if ui.button(self.t("update.check").to_owned()).clicked() {
+                let can_check = !self.update_busy
+                    && self.pending_update.is_none()
+                    && self.update_ready.is_none();
+                if ui
+                    .add_enabled(
+                        can_check,
+                        egui::Button::new(self.t("update.check").to_owned()),
+                    )
+                    .clicked()
+                {
+                    self.update_status = None;
+                    self.update_err = None;
                     self.spawn_update_check(&viewport_ctx);
+                }
+                if let Some(manifest) = self.pending_update.clone() {
+                    ui.add_space(style::SPACE_SM);
+                    ui.label(self.t("update.found").replace("{v}", &manifest.version));
+                    if self.update_ready.is_some() {
+                        ui.horizontal(|ui| {
+                            ui.label(self.t("update.ready").to_owned());
+                            if ui.button(self.t("update.install").to_owned()).clicked() {
+                                self.install_ready_update(ctx, &viewport_ctx);
+                            }
+                        });
+                    } else {
+                        ui.horizontal(|ui| {
+                            if ui
+                                .add_enabled(
+                                    !self.update_busy,
+                                    egui::Button::new(self.t("update.now").to_owned()),
+                                )
+                                .clicked()
+                            {
+                                self.start_update_download(&viewport_ctx);
+                            }
+                            if !self.update_busy
+                                && ui.button(self.t("update.later").to_owned()).clicked()
+                            {
+                                self.pending_update = None;
+                                self.update_downloaded = 0;
+                                self.update_total = 0;
+                                self.update_status = None;
+                                self.update_err = None;
+                            }
+                        });
+                    }
+                }
+                if let Some(status) = &self.update_status {
+                    ui.label(status);
+                }
+                if self.update_busy
+                    || (self.update_err.is_some() && self.update_total > 0)
+                    || self.update_ready.is_some()
+                {
+                    update_progress_row(ui, self.update_downloaded, self.update_total);
+                }
+                if let Some(error) = &self.update_err {
+                    ui.colored_label(ui.visuals().error_fg_color, error);
                 }
             });
         });
@@ -138,11 +196,28 @@ impl FileManagerApp {
             return;
         };
         self.update_busy = true;
+        self.update_ready = None;
+        self.update_downloaded = 0;
+        self.update_total = manifest.size;
+        self.update_status = Some(self.t("update.downloading").to_owned());
         self.update_err = None;
         let tx = self.msg_tx.clone();
+        let progress_tx = tx.clone();
+        let progress_ctx = ctx.clone();
         let ctx = ctx.clone();
         thread::spawn(move || {
-            let msg = match crate::core::update::download(&manifest) {
+            let mut last_percent = None;
+            let msg = match crate::core::update::download_with_progress(
+                &manifest,
+                move |downloaded, total| {
+                    let percent = update_percent(downloaded, total);
+                    if last_percent != Some(percent) {
+                        last_percent = Some(percent);
+                        let _ = progress_tx.send(WorkerMsg::UpdateProgress { downloaded, total });
+                        progress_ctx.request_repaint();
+                    }
+                },
+            ) {
                 Ok(archive) => {
                     let stage = crate::platform::prepare_update_archive(
                         &archive,
@@ -162,6 +237,32 @@ impl FileManagerApp {
             let _ = tx.send(msg);
             ctx.request_repaint();
         });
+    }
+
+    fn install_ready_update(&mut self, main_ctx: &egui::Context, about_ctx: &egui::Context) {
+        let Some(stage_dir) = self.update_ready.clone() else {
+            return;
+        };
+        let launch_result = std::env::current_exe()
+            .context("locate current FileManager executable")
+            .and_then(|target| {
+                crate::platform::launch_updater(&stage_dir, &target, std::process::id())
+            });
+        match launch_result {
+            Ok(()) => {
+                about_ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                main_ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            Err(error) => {
+                tracing::error!(path = %stage_dir.display(), error = %error, "failed to launch update installer");
+                let _ = std::fs::remove_dir_all(&stage_dir);
+                self.update_ready = None;
+                self.update_status = None;
+                self.update_err = Some(self.t("update.install_failed").to_owned());
+                main_ctx.request_repaint();
+                about_ctx.request_repaint();
+            }
+        }
     }
 
     pub(super) fn act_props(&mut self) {
@@ -282,50 +383,45 @@ impl FileManagerApp {
             self.props_target = None;
         }
     }
+}
 
-    pub(super) fn update_window(&mut self, ctx: &egui::Context) {
-        if self.pending_update.is_none() && self.update_err.is_none() && !self.update_busy {
-            return;
-        }
-        let title = self.t("update.title").to_owned();
-        let found = self.pending_update.clone();
-        let mut open = true;
-        egui::Window::new(title)
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
-            .open(&mut open)
-            .show(ctx, |ui| {
-                if self.update_busy {
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label(self.t("update.downloading").to_owned());
-                    });
-                }
-                if let Some(manifest) = &found {
-                    ui.label(self.t("update.found").replace("{v}", &manifest.version));
-                    ui.horizontal(|ui| {
-                        if ui
-                            .add_enabled(
-                                !self.update_busy,
-                                egui::Button::new(self.t("update.now").to_owned()),
-                            )
-                            .clicked()
-                        {
-                            self.start_update_download(ctx);
-                        }
-                        if ui.button(self.t("update.later").to_owned()).clicked() {
-                            self.pending_update = None;
-                        }
-                    });
-                }
-                if let Some(e) = &self.update_err {
-                    ui.label(e.as_str());
-                }
-            });
-        if !open {
-            self.pending_update = None;
-            self.update_err = None;
-        }
+pub(super) fn update_percent(downloaded: u64, total: u64) -> u32 {
+    if total == 0 {
+        0
+    } else {
+        (downloaded.saturating_mul(100) / total).min(100) as u32
     }
+}
+
+fn update_progress_row(ui: &mut egui::Ui, downloaded: u64, total: u64) {
+    let progress = if total == 0 {
+        0.0
+    } else {
+        (downloaded as f32 / total as f32).clamp(0.0, 1.0)
+    };
+    let progress =
+        ui.ctx()
+            .animate_value_with_time(egui::Id::unique("about-update-progress"), progress, 0.15);
+    let percent = update_percent(downloaded, total);
+    let percent_width = 42.0;
+    let gap = style::SPACE_SM;
+    let bar_width = (ui.available_width() - percent_width - gap).max(40.0);
+    ui.horizontal(|ui| {
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(bar_width, 8.0), egui::Sense::hover());
+        let visuals = ui.visuals();
+        let radius = style::RADIUS_CONTROL;
+        ui.painter()
+            .rect_filled(rect, radius, visuals.widgets.inactive.bg_fill);
+        let filled =
+            egui::Rect::from_min_size(rect.min, egui::vec2(rect.width() * progress, rect.height()));
+        if progress > 0.0 {
+            ui.painter()
+                .rect_filled(filled, radius, visuals.selection.bg_fill);
+        }
+        ui.add_space(gap);
+        ui.add_sized(
+            egui::vec2(percent_width, 18.0),
+            egui::Label::new(format!("{percent}%")),
+        );
+    });
 }
