@@ -87,13 +87,7 @@ impl FileManagerApp {
         let loading_label = self.t("preview.loading").to_owned();
         let truncated_label = self.t("preview.truncated").to_owned();
         let viewport_id = egui::ViewportId::from_hash_of("filemanager-preview");
-        let builder = floating_dialog_viewport(
-            ctx,
-            title,
-            egui::vec2(760.0, 540.0),
-            self.preview.viewport_placed,
-        )
-        .with_resizable(true);
+        let builder = preview_viewport_builder(ctx, title, self.preview.viewport_placed);
         let mut close_requested = false;
         ctx.show_viewport_immediate(viewport_id, builder, |viewport_ui, _class| {
             let viewport_ctx = viewport_ui.ctx().clone();
@@ -116,7 +110,8 @@ impl FileManagerApp {
                     if preview.truncated {
                         ui.label(&truncated_label);
                     }
-                    ui.add(
+                    ui.add_sized(
+                        ui.available_size(),
                         egui::TextEdit::multiline(&mut preview.text)
                             .font(egui::TextStyle::Monospace)
                             .code_editor()
@@ -259,4 +254,27 @@ impl FileManagerApp {
         }
         self.thumbnail_visible.clear();
     }
+}
+
+pub(super) fn preview_viewport_builder(
+    ctx: &egui::Context,
+    title: String,
+    already_placed: bool,
+) -> egui::ViewportBuilder {
+    let inner_size = egui::vec2(760.0, 540.0);
+    let mut builder = egui::ViewportBuilder::default()
+        .with_title(title)
+        .with_resizable(true)
+        .with_maximize_button(true)
+        .with_always_on_top();
+    if !already_placed {
+        let parent_rect = ctx
+            .input(|input| input.viewport().outer_rect)
+            .unwrap_or_else(|| ctx.content_rect());
+        let estimated_outer_size = inner_size + egui::vec2(16.0, 40.0);
+        builder = builder
+            .with_inner_size(inner_size)
+            .with_position(parent_rect.center() - estimated_outer_size / 2.0);
+    }
+    builder
 }
