@@ -121,7 +121,16 @@ fn parse_version(s: &str) -> Option<[u64; 3]> {
 }
 
 /// Downloads the release archive into a unique temporary file.
+#[allow(dead_code)]
 pub fn download(manifest: &UpdateManifest) -> anyhow::Result<PathBuf> {
+    download_with_progress(manifest, |_, _| {})
+}
+
+/// Downloads the release archive and reports the number of verified-size bytes read.
+pub fn download_with_progress(
+    manifest: &UpdateManifest,
+    progress: impl FnMut(u64, u64),
+) -> anyhow::Result<PathBuf> {
     manifest.validate()?;
     let id = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
     let dst = std::env::temp_dir().join(format!(
@@ -132,13 +141,23 @@ pub fn download(manifest: &UpdateManifest) -> anyhow::Result<PathBuf> {
         .header("User-Agent", USER_AGENT)
         .call()?;
     let mut reader = resp.body_mut().as_reader();
-    write_download(&mut reader, &dst, manifest.size)
+    write_download_with_progress(&mut reader, &dst, manifest.size, progress)
 }
 
+#[cfg(test)]
 fn write_download(
     reader: &mut impl Read,
     dst: &Path,
     expected_size: u64,
+) -> anyhow::Result<PathBuf> {
+    write_download_with_progress(reader, dst, expected_size, |_, _| {})
+}
+
+fn write_download_with_progress(
+    reader: &mut impl Read,
+    dst: &Path,
+    expected_size: u64,
+    mut progress: impl FnMut(u64, u64),
 ) -> anyhow::Result<PathBuf> {
     let mut file = std::fs::OpenOptions::new()
         .write(true)
@@ -148,6 +167,7 @@ fn write_download(
     let result = (|| {
         let mut buffer = [0_u8; 64 * 1024];
         let mut total = 0_u64;
+        progress(0, expected_size);
         loop {
             let read = reader.read(&mut buffer).context("read update archive")?;
             if read == 0 {
@@ -161,6 +181,7 @@ fn write_download(
             }
             file.write_all(&buffer[..read])
                 .context("write update archive")?;
+            progress(total, expected_size);
         }
         if total != expected_size {
             bail!("update archive size does not match the manifest");
@@ -283,6 +304,32 @@ mod tests {
             dst
         );
         assert_eq!(std::fs::read(&dst).unwrap(), bytes);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn download_progress_reports_monotonic_byte_counts() {
+        let dir = temp_dir();
+        let dst = dir.join("progress.zip");
+        let bytes = vec![0x4a; 2 * 64 * 1024 + 17];
+        let total = bytes.len() as u64;
+        let mut progress = Vec::new();
+
+        write_download_with_progress(
+            &mut Cursor::new(bytes),
+            &dst,
+            total,
+            |downloaded, expected| progress.push((downloaded, expected)),
+        )
+        .unwrap();
+
+        assert_eq!(progress.first(), Some(&(0, total)));
+        assert_eq!(progress.last(), Some(&(total, total)));
+        assert!(
+            progress
+                .windows(2)
+                .all(|values| values[0].0 <= values[1].0 && values.iter().all(|v| v.1 == total))
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 
