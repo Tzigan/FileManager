@@ -2,10 +2,24 @@ use super::*;
 
 pub(super) const WINDOW_FRAME_HEIGHT: f32 = 40.0;
 pub(super) const WINDOW_CONTROL_WIDTH: f32 = 46.0;
-pub(super) const WINDOW_CONTROLS_WIDTH: f32 = WINDOW_CONTROL_WIDTH * 3.0;
+pub(super) const WINDOW_CONTROL_GAP: f32 = 2.0;
+pub(super) const WINDOW_CONTROLS_WIDTH: f32 = WINDOW_CONTROL_WIDTH * 3.0 + WINDOW_CONTROL_GAP * 2.0;
 pub(super) const WINDOW_CONTROL_VERTICAL_GAP: f32 = 2.0;
 pub(super) const WINDOW_DRAG_AREA_MIN_WIDTH: f32 = 28.0;
 pub(super) const WINDOW_RESIZE_HANDLE_WIDTH: f32 = 6.0;
+pub(super) const WINDOW_FRAME_SIDE_INSET: i8 = 8;
+pub(super) const WINDOW_CONTROL_HEIGHT: f32 =
+    WINDOW_FRAME_HEIGHT - WINDOW_RESIZE_HANDLE_WIDTH * 2.0 - WINDOW_CONTROL_VERTICAL_GAP * 2.0;
+pub(super) const WINDOW_CONTROL_HOVER_TIME: f32 = 0.14;
+pub(super) const WINDOW_CONTROL_PRESS_TIME: f32 = 0.06;
+pub(super) const WINDOW_CONTROL_HOVER_BLEND: f32 = 0.72;
+pub(super) const WINDOW_CONTROL_CLOSE_HOVER_BLEND: f32 = 0.24;
+pub(super) const WINDOW_CONTROL_CLOSE_PRESSED_BLEND: f32 = 0.42;
+pub(super) const WINDOW_CONTROL_ICON_SIZE: f32 = 12.0;
+pub(super) const WINDOW_CONTROL_RESTORE_ICON_SIZE: f32 = 10.0;
+pub(super) const WINDOW_CONTROL_RESTORE_OFFSET: f32 = 2.0;
+pub(super) const WINDOW_CONTROL_ICON_STROKE: f32 = 1.4;
+pub(super) const WINDOW_CONTROL_CROSS_FACTOR: f32 = 0.7;
 
 pub(super) const TAB_DRAG_THRESHOLD: f32 = 5.0;
 pub(super) const TAB_PLUS_AREA_WIDTH: f32 = 30.0;
@@ -30,6 +44,147 @@ pub(super) const DETACHED_TREE_DEFAULT_WIDTH: f32 = 210.0;
 pub(super) const DETACHED_TREE_WIDTH_RANGE: std::ops::RangeInclusive<f32> = 140.0..=360.0;
 pub(super) const DETACHED_PROPS_DEFAULT_WIDTH: f32 = 340.0;
 pub(super) const DETACHED_PROPS_WIDTH_RANGE: std::ops::RangeInclusive<f32> = 260.0..=460.0;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum WindowControlIcon {
+    Minimize,
+    Maximize,
+    Restore,
+    Close,
+}
+
+pub(super) fn maximize_restore_icon(maximized: bool) -> WindowControlIcon {
+    if maximized {
+        WindowControlIcon::Restore
+    } else {
+        WindowControlIcon::Maximize
+    }
+}
+
+pub(super) fn window_control_background(
+    visuals: &egui::Visuals,
+    icon: WindowControlIcon,
+    enabled: bool,
+    hover_progress: f32,
+    pressed_progress: f32,
+) -> egui::Color32 {
+    if !enabled {
+        return egui::Color32::TRANSPARENT;
+    }
+
+    let is_close = icon == WindowControlIcon::Close;
+    let hover_color = if is_close {
+        visuals
+            .panel_fill
+            .lerp_to_gamma(visuals.error_fg_color, WINDOW_CONTROL_CLOSE_HOVER_BLEND)
+    } else {
+        visuals
+            .panel_fill
+            .lerp_to_gamma(visuals.widgets.hovered.bg_fill, WINDOW_CONTROL_HOVER_BLEND)
+    };
+    let pressed_color = if is_close {
+        visuals
+            .panel_fill
+            .lerp_to_gamma(visuals.error_fg_color, WINDOW_CONTROL_CLOSE_PRESSED_BLEND)
+    } else {
+        visuals.widgets.active.bg_fill
+    };
+
+    egui::Color32::TRANSPARENT
+        .lerp_to_gamma(hover_color, hover_progress.clamp(0.0, 1.0))
+        .lerp_to_gamma(pressed_color, pressed_progress.clamp(0.0, 1.0))
+}
+
+fn draw_window_control_icon(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    icon: WindowControlIcon,
+    color: egui::Color32,
+) {
+    let center = rect.center();
+    let stroke = egui::Stroke::new(WINDOW_CONTROL_ICON_STROKE, color);
+    let half_icon = WINDOW_CONTROL_ICON_SIZE * 0.5;
+
+    match icon {
+        WindowControlIcon::Minimize => {
+            painter.line_segment(
+                [
+                    egui::pos2(center.x - half_icon, center.y),
+                    egui::pos2(center.x + half_icon, center.y),
+                ],
+                stroke,
+            );
+        }
+        WindowControlIcon::Maximize => {
+            draw_window_control_square(
+                painter,
+                egui::Rect::from_center_size(
+                    center,
+                    egui::vec2(WINDOW_CONTROL_ICON_SIZE, WINDOW_CONTROL_ICON_SIZE),
+                ),
+                stroke,
+            );
+        }
+        WindowControlIcon::Restore => {
+            let size = egui::vec2(
+                WINDOW_CONTROL_RESTORE_ICON_SIZE,
+                WINDOW_CONTROL_RESTORE_ICON_SIZE,
+            );
+            draw_window_control_square(
+                painter,
+                egui::Rect::from_center_size(
+                    center
+                        + egui::vec2(
+                            WINDOW_CONTROL_RESTORE_OFFSET,
+                            -WINDOW_CONTROL_RESTORE_OFFSET,
+                        ),
+                    size,
+                ),
+                stroke,
+            );
+            draw_window_control_square(
+                painter,
+                egui::Rect::from_center_size(
+                    center
+                        - egui::vec2(
+                            WINDOW_CONTROL_RESTORE_OFFSET,
+                            -WINDOW_CONTROL_RESTORE_OFFSET,
+                        ),
+                    size,
+                ),
+                stroke,
+            );
+        }
+        WindowControlIcon::Close => {
+            let half_cross = half_icon * WINDOW_CONTROL_CROSS_FACTOR;
+            painter.line_segment(
+                [
+                    egui::pos2(center.x - half_cross, center.y - half_cross),
+                    egui::pos2(center.x + half_cross, center.y + half_cross),
+                ],
+                stroke,
+            );
+            painter.line_segment(
+                [
+                    egui::pos2(center.x - half_cross, center.y + half_cross),
+                    egui::pos2(center.x + half_cross, center.y - half_cross),
+                ],
+                stroke,
+            );
+        }
+    }
+}
+
+fn draw_window_control_square(painter: &egui::Painter, rect: egui::Rect, stroke: egui::Stroke) {
+    let top_left = rect.left_top();
+    let top_right = rect.right_top();
+    let bottom_right = rect.right_bottom();
+    let bottom_left = rect.left_bottom();
+    painter.line_segment([top_left, top_right], stroke);
+    painter.line_segment([top_right, bottom_right], stroke);
+    painter.line_segment([bottom_right, bottom_left], stroke);
+    painter.line_segment([bottom_left, top_left], stroke);
+}
 
 #[derive(Debug, Clone, Copy, Default)]
 pub(super) struct DetachedTabWindow {
@@ -96,6 +251,50 @@ pub(super) fn toggle_maximized(ctx: &egui::Context) {
     ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
 }
 
+fn window_control_button(
+    ctx: &egui::Context,
+    ui: &mut egui::Ui,
+    icon: WindowControlIcon,
+    tooltip: String,
+    enabled: bool,
+) -> egui::Response {
+    let response = ui
+        .add_enabled_ui(enabled, |ui| {
+            ui.add_sized(
+                egui::vec2(WINDOW_CONTROL_WIDTH, WINDOW_CONTROL_HEIGHT),
+                egui::Button::new("").frame(false),
+            )
+        })
+        .inner
+        .on_hover_text(tooltip);
+    let pressed = enabled && response.is_pointer_button_down_on();
+    let hovered = enabled && response.hovered();
+    let hover_progress = ctx.animate_bool_with_time(
+        response.id.with("window_control_hover"),
+        hovered,
+        WINDOW_CONTROL_HOVER_TIME,
+    );
+    let pressed_progress = ctx.animate_bool_with_time(
+        response.id.with("window_control_pressed"),
+        pressed,
+        WINDOW_CONTROL_PRESS_TIME,
+    );
+    let visuals = ui.visuals();
+    let background =
+        window_control_background(visuals, icon, enabled, hover_progress, pressed_progress);
+    if background.a() > 0 {
+        ui.painter()
+            .rect_filled(response.rect, style::RADIUS_CONTROL, background);
+    }
+    let icon_color = if enabled {
+        visuals.strong_text_color()
+    } else {
+        visuals.weak_text_color()
+    };
+    draw_window_control_icon(ui.painter(), response.rect, icon, icon_color);
+    response
+}
+
 impl FileManagerApp {
     pub(super) fn is_tab_detached(&self, tab_id: u64) -> bool {
         self.detached_tabs
@@ -155,10 +354,7 @@ impl FileManagerApp {
                     .frame(
                         egui::Frame::new()
                             .fill(viewport_ui.visuals().panel_fill)
-                            .inner_margin(egui::Margin::symmetric(
-                                WINDOW_RESIZE_HANDLE_WIDTH as i8,
-                                0,
-                            )),
+                            .inner_margin(egui::Margin::symmetric(WINDOW_FRAME_SIDE_INSET, 0)),
                     )
                     .show(viewport_ui, |ui| {
                         self.detached_titlebar(&viewport_ctx, ui, tab_id, &title);
@@ -235,44 +431,38 @@ impl FileManagerApp {
             egui::vec2(WINDOW_CONTROLS_WIDTH, WINDOW_FRAME_HEIGHT),
             egui::Layout::left_to_right(egui::Align::Center),
             |ui| {
-                ui.spacing_mut().item_spacing.x = 0.0;
-                let button_height = WINDOW_FRAME_HEIGHT
-                    - WINDOW_RESIZE_HANDLE_WIDTH * 2.0
-                    - WINDOW_CONTROL_VERTICAL_GAP * 2.0;
-                if ui
-                    .add_sized(
-                        egui::vec2(WINDOW_CONTROL_WIDTH, button_height),
-                        egui::Button::new("−").frame(false),
-                    )
-                    .on_hover_text(self.t("window.minimize"))
-                    .clicked()
+                ui.spacing_mut().item_spacing.x = WINDOW_CONTROL_GAP;
+                if window_control_button(
+                    ctx,
+                    ui,
+                    WindowControlIcon::Minimize,
+                    self.t("window.minimize").to_owned(),
+                    true,
+                )
+                .clicked()
                 {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                 }
                 let maximized = ctx.input(|input| input.viewport().maximized.unwrap_or(false));
-                let maximize_label = if maximized { "❐" } else { "□" };
-                let maximize_hint = if maximized {
-                    self.t("window.restore")
-                } else {
-                    self.t("window.maximize")
-                };
-                if ui
-                    .add_sized(
-                        egui::vec2(WINDOW_CONTROL_WIDTH, button_height),
-                        egui::Button::new(maximize_label).frame(false),
-                    )
-                    .on_hover_text(maximize_hint)
-                    .clicked()
-                {
+                let maximize_icon = maximize_restore_icon(maximized);
+                let maximize_hint = self
+                    .t(if maximized {
+                        "window.restore"
+                    } else {
+                        "window.maximize"
+                    })
+                    .to_owned();
+                if window_control_button(ctx, ui, maximize_icon, maximize_hint, true).clicked() {
                     toggle_maximized(ctx);
                 }
-                if ui
-                    .add_sized(
-                        egui::vec2(WINDOW_CONTROL_WIDTH, button_height),
-                        egui::Button::new("×").frame(false),
-                    )
-                    .on_hover_text(self.t("window.close"))
-                    .clicked()
+                if window_control_button(
+                    ctx,
+                    ui,
+                    WindowControlIcon::Close,
+                    self.t("window.close").to_owned(),
+                    true,
+                )
+                .clicked()
                 {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }

@@ -160,6 +160,43 @@ fn detached_tab_viewport_is_borderless_resizable_and_keeps_its_size() {
 }
 
 #[test]
+fn window_control_visual_states_and_maximize_icon_follow_viewport_state() {
+    use super::window_frame::{
+        WINDOW_CONTROL_GAP, WINDOW_CONTROL_HEIGHT, WINDOW_CONTROL_VERTICAL_GAP,
+        WINDOW_CONTROL_WIDTH, WINDOW_CONTROLS_WIDTH, WINDOW_FRAME_HEIGHT,
+        WINDOW_RESIZE_HANDLE_WIDTH, WindowControlIcon, maximize_restore_icon,
+        window_control_background,
+    };
+
+    let visuals = egui::Visuals::default();
+    let idle = window_control_background(&visuals, WindowControlIcon::Minimize, true, 0.0, 0.0);
+    let hover = window_control_background(&visuals, WindowControlIcon::Minimize, true, 1.0, 0.0);
+    let pressed = window_control_background(&visuals, WindowControlIcon::Minimize, true, 0.0, 1.0);
+    let close_hover = window_control_background(&visuals, WindowControlIcon::Close, true, 1.0, 0.0);
+    let close_pressed =
+        window_control_background(&visuals, WindowControlIcon::Close, true, 0.0, 1.0);
+    let disabled =
+        window_control_background(&visuals, WindowControlIcon::Maximize, false, 1.0, 0.0);
+
+    assert_eq!(idle, egui::Color32::TRANSPARENT);
+    assert_ne!(hover, idle);
+    assert_ne!(pressed, hover);
+    assert_ne!(close_hover, hover);
+    assert_ne!(close_pressed, close_hover);
+    assert_eq!(disabled, egui::Color32::TRANSPARENT);
+    assert_eq!(maximize_restore_icon(false), WindowControlIcon::Maximize);
+    assert_eq!(maximize_restore_icon(true), WindowControlIcon::Restore);
+    assert_eq!(
+        WINDOW_CONTROL_HEIGHT,
+        WINDOW_FRAME_HEIGHT - WINDOW_RESIZE_HANDLE_WIDTH * 2.0 - WINDOW_CONTROL_VERTICAL_GAP * 2.0
+    );
+    assert_eq!(
+        WINDOW_CONTROLS_WIDTH,
+        WINDOW_CONTROL_WIDTH * 3.0 + WINDOW_CONTROL_GAP * 2.0
+    );
+}
+
+#[test]
 fn preview_viewport_can_resize_and_keeps_its_user_size() {
     let ctx = egui::Context::default();
     let initial = super::preview::preview_viewport_builder(&ctx, "Preview".into(), false);
