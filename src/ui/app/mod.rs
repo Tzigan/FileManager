@@ -71,15 +71,15 @@ pub(crate) enum WorkerMsg {
     },
     /// A path forwarded by another instance / CLI — open in a new tab.
     OpenPath(PathBuf),
-    /// A newer release exists on GitHub (version, exe URL).
+    /// Найдена более новая версия приложения.
     UpdateFound { manifest: UpdateManifest },
     /// Получено обновление прогресса скачивания.
     UpdateProgress { downloaded: u64, total: u64 },
-    /// The verified update package is staged and ready for the separate updater.
+    /// Проверенный пакет подготовлен для установки отдельным updater.
     UpdateReady(PathBuf),
-    /// The app is on the latest version (manual check).
+    /// При проверке вручную установлена последняя версия.
     UpdateLatest,
-    /// Update check or download failed.
+    /// Проверка или загрузка обновления завершилась ошибкой.
     UpdateFailed(String),
 }
 
