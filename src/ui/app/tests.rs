@@ -1,8 +1,8 @@
 //! Тесты расположения вкладок, навигации и окон.
 use super::{
-    breadcrumb_segments, configure_tab_scroll_style, dropped_paths, floating_dialog_viewport,
-    is_tab_dragging, parse_archive_address, persisted_tab_path, tab_close_button_hovered,
-    tab_scroll_source, tab_strip_content_margin,
+    PreviewState, breadcrumb_segments, configure_tab_scroll_style, dropped_paths,
+    floating_dialog_viewport, is_tab_dragging, parse_archive_address, persisted_tab_path,
+    tab_close_button_hovered, tab_scroll_source, tab_strip_content_margin,
 };
 use std::path::{Path, PathBuf};
 
@@ -118,6 +118,18 @@ fn detached_dialog_viewports_are_topmost_and_keep_user_moved_positions() {
     );
     assert_eq!(moved.maximize_button, Some(false));
     assert_eq!(moved.position, None);
+}
+
+#[test]
+fn clearing_preview_resets_floating_viewport_state() {
+    let mut preview = PreviewState::default();
+    preview.target = Some(PathBuf::from("preview.txt"));
+    preview.viewport_placed = true;
+
+    preview.clear();
+
+    assert!(preview.target.is_none());
+    assert!(!preview.viewport_placed);
 }
 
 #[test]
