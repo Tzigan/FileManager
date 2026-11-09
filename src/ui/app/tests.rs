@@ -121,6 +121,26 @@ fn detached_dialog_viewports_are_topmost_and_keep_user_moved_positions() {
 }
 
 #[test]
+fn preview_viewport_can_resize_and_keeps_its_user_size() {
+    let ctx = egui::Context::default();
+    let initial = super::preview::preview_viewport_builder(&ctx, "Preview".into(), false);
+    assert_eq!(initial.inner_size, Some(egui::vec2(760.0, 540.0)));
+    assert!(initial.position.is_some());
+    assert_eq!(initial.resizable, Some(true));
+    assert_eq!(initial.maximize_button, Some(true));
+    assert_eq!(
+        initial.window_level,
+        Some(egui::viewport::WindowLevel::AlwaysOnTop)
+    );
+
+    let placed = super::preview::preview_viewport_builder(&ctx, "Preview".into(), true);
+    assert_eq!(placed.inner_size, None);
+    assert_eq!(placed.position, None);
+    assert_eq!(placed.resizable, Some(true));
+    assert_eq!(placed.maximize_button, Some(true));
+}
+
+#[test]
 fn clearing_preview_resets_floating_viewport_state() {
     let mut preview = PreviewState::default();
     preview.target = Some(PathBuf::from("preview.txt"));
