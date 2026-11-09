@@ -90,6 +90,7 @@ struct PreviewState {
     image_dimensions: Option<(u32, u32)>,
     error: Option<String>,
     loading: bool,
+    viewport_placed: bool,
     generation: u64,
     cancel: Arc<AtomicBool>,
 }
@@ -103,6 +104,7 @@ impl Default for PreviewState {
             image_dimensions: None,
             error: None,
             loading: false,
+            viewport_placed: false,
             generation: 0,
             cancel: Arc::new(AtomicBool::new(false)),
         }
@@ -120,6 +122,7 @@ impl PreviewState {
         self.image_dimensions = None;
         self.error = None;
         self.loading = false;
+        self.viewport_placed = false;
     }
 }
 

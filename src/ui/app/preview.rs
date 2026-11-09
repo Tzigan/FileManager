@@ -86,12 +86,23 @@ impl FileManagerApp {
         let title = format!("{} — {name}", self.t("preview.title"));
         let loading_label = self.t("preview.loading").to_owned();
         let truncated_label = self.t("preview.truncated").to_owned();
-        let mut open = true;
-        egui::Window::new(title)
-            .resizable(true)
-            .default_size([760.0, 540.0])
-            .open(&mut open)
-            .show(ctx, |ui| {
+        let viewport_id = egui::ViewportId::from_hash_of("filemanager-preview");
+        let builder = floating_dialog_viewport(
+            ctx,
+            title,
+            egui::vec2(760.0, 540.0),
+            self.preview.viewport_placed,
+        )
+        .with_resizable(true);
+        let mut close_requested = false;
+        ctx.show_viewport_immediate(viewport_id, builder, |viewport_ui, _class| {
+            let viewport_ctx = viewport_ui.ctx().clone();
+            if viewport_ctx.input(|i| i.viewport().close_requested()) {
+                viewport_ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                close_requested = true;
+                return;
+            }
+            egui::CentralPanel::default().show(viewport_ui, |ui| {
                 if self.preview.loading {
                     ui.horizontal(|ui| {
                         ui.spinner();
@@ -129,7 +140,9 @@ impl FileManagerApp {
                     });
                 }
             });
-        if !open {
+        });
+        self.preview.viewport_placed = !close_requested;
+        if close_requested {
             self.preview.clear();
         }
     }
