@@ -3,6 +3,19 @@
 use super::*;
 
 impl FileManagerApp {
+    pub(crate) fn can_start_zip_operation(&self) -> bool {
+        !self.zip_busy
+    }
+
+    pub(crate) fn create_zip_from_selection(&mut self, sources: Vec<PathBuf>, ctx: &egui::Context) {
+        if sources.is_empty() {
+            return;
+        }
+        let tab_id = self.tabs[self.active].id;
+        let destination = self.tabs[self.active].path.clone();
+        self.spawn_zip_creation(sources, destination, tab_id, ctx);
+    }
+
     pub(crate) fn extract_zip_file(&mut self, member: String, ctx: &egui::Context) {
         let archive = self.tabs[self.active].path.clone();
         let destination = archive
@@ -56,6 +69,7 @@ impl FileManagerApp {
         }
         self.zip_generation = self.zip_generation.wrapping_add(1);
         self.zip_busy = true;
+        self.zip_creating = false;
         self.zip_message = None;
         let generation = self.zip_generation;
         let tx = self.msg_tx.clone();
@@ -64,6 +78,37 @@ impl FileManagerApp {
             let result = extraction();
             let _ = tx.send(WorkerMsg::ZipExtracted { generation, result });
             ctx.request_repaint();
+        });
+    }
+
+    fn spawn_zip_creation(
+        &mut self,
+        sources: Vec<PathBuf>,
+        destination: PathBuf,
+        tab_id: u64,
+        ctx: &egui::Context,
+    ) {
+        if self.zip_busy {
+            return;
+        }
+        self.zip_generation = self.zip_generation.wrapping_add(1);
+        self.zip_busy = true;
+        self.zip_creating = true;
+        self.zip_message = None;
+        let generation = self.zip_generation;
+        let tx = self.msg_tx.clone();
+        let message_destination = destination.clone();
+        let repaint_ctx = ctx.clone();
+        ctx.request_repaint();
+        thread::spawn(move || {
+            let result = crate::platform::create_zip_archive(&sources, &destination);
+            let _ = tx.send(WorkerMsg::ZipCreated {
+                generation,
+                tab_id,
+                destination: message_destination,
+                result,
+            });
+            repaint_ctx.request_repaint();
         });
     }
 
@@ -98,12 +143,53 @@ impl FileManagerApp {
         }
     }
 
+    pub(super) fn zip_create_error_text(&self, error: &std::io::Error) -> String {
+        if error
+            .raw_os_error()
+            .is_some_and(|code| code == 32 || code == 33)
+        {
+            return self.t("zip.error_busy").to_owned();
+        }
+        match error.kind() {
+            std::io::ErrorKind::PermissionDenied => self.t("error.access_denied").to_owned(),
+            std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidInput => {
+                self.t("zip.create_error_path").to_owned()
+            }
+            std::io::ErrorKind::InvalidData
+                if error.to_string().contains("ZIP size limit")
+                    || error.to_string().contains("ZIP member limit")
+                    || error.to_string().contains("ZIP listing limit") =>
+            {
+                self.t("zip.create_error_limit").to_owned()
+            }
+            std::io::ErrorKind::InvalidData => {
+                format!("{}: {error}", self.t("zip.create_error"))
+            }
+            std::io::ErrorKind::AlreadyExists => self.t("zip.error_exists").to_owned(),
+            std::io::ErrorKind::StorageFull => self.t("zip.create_error_space").to_owned(),
+            std::io::ErrorKind::WouldBlock => self.t("zip.error_busy").to_owned(),
+            _ => format!("{}: {error}", self.t("zip.create_error")),
+        }
+    }
+
     pub(super) fn zip_status_window(&mut self, ctx: &egui::Context) {
         if !self.zip_busy && self.zip_message.is_none() {
             return;
         }
-        let title = self.t("zip.window").to_owned();
-        let extracting = self.t("zip.extracting").to_owned();
+        let title = self
+            .t(if self.zip_creating {
+                "zip.create_window"
+            } else {
+                "zip.window"
+            })
+            .to_owned();
+        let busy_label = self
+            .t(if self.zip_creating {
+                "zip.creating"
+            } else {
+                "zip.extracting"
+            })
+            .to_owned();
         let close_label = self.t("common.close").to_owned();
         let mut open = true;
         let mut close_requested = false;
@@ -115,7 +201,7 @@ impl FileManagerApp {
                 if self.zip_busy {
                     ui.horizontal(|ui| {
                         ui.spinner();
-                        ui.label(&extracting);
+                        ui.label(&busy_label);
                     });
                 } else if let Some(message) = &self.zip_message {
                     ui.label(message);
@@ -126,6 +212,9 @@ impl FileManagerApp {
             });
         if !open || close_requested {
             self.zip_message = None;
+            if !self.zip_busy {
+                self.zip_creating = false;
+            }
         }
     }
 }

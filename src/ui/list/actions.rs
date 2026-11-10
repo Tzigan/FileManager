@@ -153,6 +153,18 @@ impl FileManagerApp {
                     self.extract_zip_all_from(entry.path.clone(), ctx);
                     ui.close();
                 }
+                let zip_sources = self.selected_paths();
+                if !zip_sources.is_empty()
+                    && ui
+                        .add_enabled(
+                            self.can_start_zip_operation(),
+                            egui::Button::new(self.t("zip.create_archive").to_owned()),
+                        )
+                        .clicked()
+                {
+                    self.create_zip_from_selection(zip_sources, ctx);
+                    ui.close();
+                }
                 ui.separator();
                 if ui.button(self.t("ctx.copy").to_owned()).clicked() {
                     self.act_copy();
