@@ -66,6 +66,13 @@ pub(crate) enum WorkerMsg {
         generation: u64,
         result: std::io::Result<PathBuf>,
     },
+    /// Завершилось создание ZIP-архива.
+    ZipCreated {
+        generation: u64,
+        tab_id: u64,
+        destination: PathBuf,
+        result: std::io::Result<PathBuf>,
+    },
     /// A folder tree node's children finished loading.
     TreeChildren {
         path: PathBuf,
@@ -180,6 +187,7 @@ pub struct FileManagerApp {
     thumbnail_failed: HashSet<ThumbnailKey>,
     zip_generation: u64,
     zip_busy: bool,
+    zip_creating: bool,
     zip_message: Option<String>,
     detached_tabs: HashMap<u64, window_frame::DetachedTabWindow>,
     tab_detach_error: Option<String>,
@@ -343,6 +351,7 @@ impl FileManagerApp {
             thumbnail_failed: HashSet::new(),
             zip_generation: 0,
             zip_busy: false,
+            zip_creating: false,
             zip_message: None,
             detached_tabs: HashMap::new(),
             tab_detach_error: None,
@@ -586,11 +595,36 @@ impl FileManagerApp {
                         continue;
                     }
                     self.zip_busy = false;
+                    self.zip_creating = false;
                     self.zip_message = Some(match result {
                         Ok(path) => {
                             format!("{}: {}", self.t("zip.extracted"), path.display())
                         }
                         Err(error) => self.zip_error_text(&error),
+                    });
+                }
+                WorkerMsg::ZipCreated {
+                    generation,
+                    tab_id,
+                    destination,
+                    result,
+                } => {
+                    if generation != self.zip_generation {
+                        continue;
+                    }
+                    self.zip_busy = false;
+                    if result.is_ok()
+                        && let Some(index) = self.tabs.iter().position(|tab| tab.id == tab_id)
+                        && self.tabs[index].path == destination
+                        && self.tabs[index].archive_prefix.is_none()
+                    {
+                        self.navigate_fresh(index, ctx);
+                    }
+                    self.zip_message = Some(match result {
+                        Ok(path) => {
+                            format!("{}: {}", self.t("zip.created"), path.display())
+                        }
+                        Err(error) => self.zip_create_error_text(&error),
                     });
                 }
                 WorkerMsg::TreeChildren { path, result } => {

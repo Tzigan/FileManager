@@ -30,5 +30,6 @@ pub(crate) use tab_drag::{
 pub use time_fmt::format_local_time;
 pub use update_support::{launch_updater, prepare_update_archive, signal_update_started};
 pub use zip::{
-    extract_zip_all, extract_zip_file, extract_zip_folder, read_zip_dir_cancellable, search_zip,
+    create_zip_archive, extract_zip_all, extract_zip_file, extract_zip_folder,
+    read_zip_dir_cancellable, search_zip,
 };
