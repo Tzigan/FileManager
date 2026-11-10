@@ -111,6 +111,7 @@ fn read_zip_dir_with_cancel(
         };
         entries.push(FileEntry {
             hidden: name.starts_with('.'),
+            system: false,
             name,
             path: archive.to_path_buf(),
             is_dir,
@@ -216,6 +217,7 @@ fn zip_entry(archive: &Path, member: &str, name: &str, is_dir: bool) -> FileEntr
         is_dir,
         is_symlink: false,
         hidden: name.rsplit('/').next().unwrap_or(name).starts_with('.'),
+        system: false,
         readonly: true,
         size: None,
         modified: None,

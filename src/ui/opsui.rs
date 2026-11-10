@@ -613,6 +613,7 @@ mod tests {
             is_dir: false,
             is_symlink: false,
             hidden: false,
+            system: false,
             readonly: false,
             size: Some(1),
             modified: None,

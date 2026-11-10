@@ -12,6 +12,7 @@ pub struct FileEntry {
     pub is_dir: bool,
     pub is_symlink: bool,
     pub hidden: bool,
+    pub system: bool,
     pub readonly: bool,
     /// `None` for directories (their size is not computed on listing).
     pub size: Option<u64>,
@@ -63,10 +64,12 @@ pub fn read_dir(path: &Path, cancel: &AtomicBool) -> Result<Vec<FileEntry>, Read
 }
 
 pub fn filter_hidden(mut entries: Vec<FileEntry>, show_hidden_files: bool) -> Vec<FileEntry> {
-    if !show_hidden_files {
-        entries.retain(|entry| !entry.hidden);
-    }
+    entries.retain(|entry| is_visible_entry(entry, show_hidden_files));
     entries
+}
+
+pub fn is_visible_entry(entry: &FileEntry, show_hidden_files: bool) -> bool {
+    !entry.system && (show_hidden_files || !entry.hidden)
 }
 
 pub fn sort_entries(entries: &mut Vec<FileEntry>) {
@@ -105,6 +108,8 @@ pub(crate) fn map_entry(item: &fs::DirEntry) -> Option<FileEntry> {
     // metadata() follows symlinks; on Windows it reuses the find data
     // already fetched by the directory enumeration, so it is cheap.
     let meta = item.metadata().ok();
+    // Скрытый и системный атрибуты извлекаем из уже полученной метаинформации.
+    let (hidden, system) = visibility_attributes(item, meta.as_ref());
 
     let is_dir = meta.as_ref().map(|m| m.is_dir()).unwrap_or(file_type.is_dir());
     let size = if is_dir { None } else { meta.as_ref().map(|m| m.len()) };
@@ -127,7 +132,8 @@ pub(crate) fn map_entry(item: &fs::DirEntry) -> Option<FileEntry> {
         path,
         is_dir,
         is_symlink: file_type.is_symlink(),
-        hidden: is_hidden(item),
+        hidden,
+        system,
         readonly,
         size,
         modified,
@@ -143,7 +149,7 @@ pub fn read_subdirs(path: &Path) -> io::Result<Vec<PathBuf>> {
     let mut dirs = Vec::new();
     for item in fs::read_dir(path)? {
         let item = item?;
-        if item.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+        if item.file_type().map(|t| t.is_dir()).unwrap_or(false) && !is_system(&item) {
             dirs.push(item.path());
         }
     }
@@ -156,25 +162,57 @@ pub fn read_subdirs(path: &Path) -> io::Result<Vec<PathBuf>> {
 }
 
 #[cfg(windows)]
-fn is_hidden(item: &fs::DirEntry) -> bool {
+fn visibility_attributes(
+    _item: &fs::DirEntry,
+    metadata: Option<&fs::Metadata>,
+) -> (bool, bool) {
+    use std::os::windows::fs::MetadataExt;
+    let Some(metadata) = metadata else {
+        // Неизвестные атрибуты скрываем, чтобы не показывать защищённую запись.
+        return (false, true);
+    };
+    let attributes = metadata.file_attributes();
+    (
+        windows_attributes_are_hidden(attributes),
+        windows_attributes_are_system(attributes),
+    )
+}
+
+#[cfg(windows)]
+fn is_system(item: &fs::DirEntry) -> bool {
     use std::os::windows::fs::MetadataExt;
     item.metadata()
-        .map(|metadata| windows_attributes_are_hidden(metadata.file_attributes()))
-        .unwrap_or(false)
+        .map(|metadata| windows_attributes_are_system(metadata.file_attributes()))
+        .unwrap_or(true)
 }
 
 #[cfg(windows)]
 fn windows_attributes_are_hidden(attributes: u32) -> bool {
-    const FILE_ATTRIBUTE_HIDDEN_OR_SYSTEM: u32 = 0x2 | 0x4;
-    attributes & FILE_ATTRIBUTE_HIDDEN_OR_SYSTEM != 0
+    const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
+    attributes & FILE_ATTRIBUTE_HIDDEN != 0
+}
+
+#[cfg(windows)]
+fn windows_attributes_are_system(attributes: u32) -> bool {
+    const FILE_ATTRIBUTE_SYSTEM: u32 = 0x4;
+    attributes & FILE_ATTRIBUTE_SYSTEM != 0
 }
 
 #[cfg(not(windows))]
-fn is_hidden(item: &fs::DirEntry) -> bool {
+fn visibility_attributes(
+    item: &fs::DirEntry,
+    _metadata: Option<&fs::Metadata>,
+) -> (bool, bool) {
     item.file_name()
         .to_str()
         .map(|n| n.starts_with('.'))
-        .unwrap_or(false)
+        .map(|hidden| (hidden, false))
+        .unwrap_or((false, false))
+}
+
+#[cfg(not(windows))]
+fn is_system(_item: &fs::DirEntry) -> bool {
+    false
 }
 
 #[cfg(test)]
@@ -188,6 +226,7 @@ mod tests {
             is_dir,
             is_symlink: false,
             hidden: false,
+            system: false,
             readonly: false,
             size: None,
             modified: None,
@@ -223,12 +262,17 @@ mod tests {
         let visible = entry("visible.txt", false);
         let mut hidden = entry("desktop.ini", false);
         hidden.hidden = true;
-        let entries = vec![visible, hidden];
+        let mut system = entry("system-only.dat", false);
+        system.system = true;
+        let entries = vec![visible, hidden, system];
 
         let default_entries = filter_hidden(entries.clone(), false);
         assert_eq!(default_entries.len(), 1);
         assert_eq!(default_entries[0].name, "visible.txt");
-        assert_eq!(filter_hidden(entries, true).len(), 2);
+        let shown_hidden = filter_hidden(entries, true);
+        assert_eq!(shown_hidden.len(), 2);
+        assert!(shown_hidden.iter().any(|entry| entry.name == "desktop.ini"));
+        assert!(!shown_hidden.iter().any(|entry| entry.name == "system-only.dat"));
     }
 
     #[test]
@@ -399,10 +443,12 @@ mod tests_windows_metadata {
     use super::*;
 
     #[test]
-    fn hidden_and_system_attributes_are_treated_as_hidden() {
+    fn hidden_and_system_attributes_are_tracked_separately() {
         assert!(!windows_attributes_are_hidden(0));
         assert!(windows_attributes_are_hidden(0x2));
-        assert!(windows_attributes_are_hidden(0x4));
+        assert!(!windows_attributes_are_hidden(0x4));
+        assert!(!windows_attributes_are_system(0x2));
+        assert!(windows_attributes_are_system(0x4));
     }
 
     #[test]
@@ -430,7 +476,7 @@ mod tests_v06 {
     fn entry(name: &str, is_dir: bool) -> FileEntry {
         FileEntry {
             name: name.to_string(), path: PathBuf::from(name), is_dir, is_symlink: false,
-            hidden: false, readonly: false, size: None, modified: None, created: None, extension: None,
+            hidden: false, system: false, readonly: false, size: None, modified: None, created: None, extension: None,
             archive_member: None,
         }
     }
