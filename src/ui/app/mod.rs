@@ -161,6 +161,8 @@ pub struct FileManagerApp {
     update_err: Option<String>,
     tab_drag_state: tab_drag_preview::TabDragState,
     tab_drag_preview: tab_drag_preview::TabDragPreviewState,
+    /// ID новой активной вкладки, которую нужно показать в строке.
+    tab_strip_scroll_target: Option<u64>,
     /// Path shown in the properties dialog.
     pub(crate) props_target: Option<PathBuf>,
     props_viewport_placed: bool,
@@ -326,6 +328,7 @@ impl FileManagerApp {
             update_err: None,
             tab_drag_state: tab_drag_preview::TabDragState::Idle,
             tab_drag_preview: tab_drag_preview::TabDragPreviewState::default(),
+            tab_strip_scroll_target: None,
             props_target: None,
             props_viewport_placed: false,
             preview: PreviewState::default(),
@@ -360,6 +363,7 @@ impl FileManagerApp {
         if let Some(p) = initial_path {
             app.tabs.push(Tab::new(p));
             app.active = app.tabs.len() - 1;
+            app.request_tab_strip_scroll_to_active(&cc.egui_ctx);
         }
         if let Some(name) = initial_select {
             app.pending_select = Some((app.tabs[app.active].id, name));
@@ -903,7 +907,13 @@ fn tab_close_button_hovered(
 }
 
 fn tab_strip_content_margin() -> egui::Margin {
-    egui::Margin::symmetric(style::FRAME_PADDING_X, 0)
+    // Кнопка «+» снаружи прокрутки, поэтому справа дополнительный отступ не нужен.
+    egui::Margin {
+        left: style::FRAME_PADDING_X,
+        right: 0,
+        top: 0,
+        bottom: 0,
+    }
 }
 
 fn configure_tab_scroll_style(style: &mut egui::Style) {

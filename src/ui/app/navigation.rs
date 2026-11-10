@@ -7,6 +7,7 @@ impl FileManagerApp {
     pub(crate) fn open_path_in_new_tab(&mut self, path: PathBuf, ctx: &egui::Context) {
         self.active = crate::ui::tabs::append_tab(&mut self.tabs, path);
         self.navigate_fresh(self.active, ctx);
+        self.request_tab_strip_scroll_to_active(ctx);
     }
 
     pub(crate) fn queue_open_path_in_new_tab(&mut self, path: PathBuf) {
@@ -16,6 +17,14 @@ impl FileManagerApp {
     pub(super) fn flush_pending_open_tabs(&mut self, ctx: &egui::Context) {
         for path in std::mem::take(&mut self.pending_open_tabs) {
             self.open_path_in_new_tab(path, ctx);
+        }
+    }
+
+    pub(super) fn request_tab_strip_scroll_to_active(&mut self, ctx: &egui::Context) {
+        // Прокрутка выполнится после расчёта фактического прямоугольника вкладки.
+        self.tab_strip_scroll_target = self.tabs.get(self.active).map(|tab| tab.id);
+        if self.tab_strip_scroll_target.is_some() {
+            ctx.request_repaint();
         }
     }
 
@@ -264,6 +273,7 @@ impl FileManagerApp {
         self.active = crate::ui::tabs::append_tab(&mut self.tabs, path);
         self.tabs[self.active].archive_prefix = archive_prefix;
         self.navigate_fresh(self.active, ctx);
+        self.request_tab_strip_scroll_to_active(ctx);
     }
 
     pub(super) fn close_tab(&mut self, idx: usize, ctx: &egui::Context) {
@@ -313,6 +323,7 @@ impl FileManagerApp {
         self.tabs.insert(idx + 1, tab);
         self.active = idx + 1;
         self.navigate_fresh(self.active, ctx);
+        self.request_tab_strip_scroll_to_active(ctx);
     }
 
     pub(super) fn close_others(&mut self, idx: usize, ctx: &egui::Context) {
