@@ -193,23 +193,28 @@ impl FileManagerApp {
         let close_label = self.t("common.close").to_owned();
         let mut open = true;
         let mut close_requested = false;
-        egui::Window::new(title)
-            .collapsible(false)
-            .resizable(false)
-            .open(&mut open)
-            .show(ctx, |ui| {
-                if self.zip_busy {
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label(&busy_label);
-                    });
-                } else if let Some(message) = &self.zip_message {
-                    ui.label(message);
-                    if ui.button(&close_label).clicked() {
-                        close_requested = true;
-                    }
+        let mut window = egui::Window::new(title).collapsible(false).resizable(false);
+        if self.zip_creating {
+            let content_rect = ctx.content_rect();
+            // Центрируем только окно создания в логических координатах viewport менеджера.
+            window = window
+                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                .constrain_to(content_rect)
+                .max_size(content_rect.size());
+        }
+        window.open(&mut open).show(ctx, |ui| {
+            if self.zip_busy {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(&busy_label);
+                });
+            } else if let Some(message) = &self.zip_message {
+                ui.label(message);
+                if ui.button(&close_label).clicked() {
+                    close_requested = true;
                 }
-            });
+            }
+        });
         if !open || close_requested {
             self.zip_message = None;
             if !self.zip_busy {
