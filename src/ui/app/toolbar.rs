@@ -94,13 +94,20 @@ impl FileManagerApp {
             ),
         )
         .expand2(egui::vec2(style::FRAME_PADDING_X as f32, 0.0));
+        self.advance_tab_drag_state(ctx);
         let pointer_pos = self.tab_drag_preview.pointer_pos(ctx);
         let mut tab_rects = Vec::new();
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = style::SPACE_XS;
             let mut act: Option<(&str, usize)> = None;
-            let mut drag_src = None;
-            let mut dragging_tab = is_tab_dragging(self.tab_drag, self.tab_press, pointer_pos);
+            let mut dragging_tab = self.tab_drag_state.is_dragging();
+            let primary_press_origin = ctx.input(|input| {
+                input
+                    .pointer
+                    .button_pressed(egui::PointerButton::Primary)
+                    .then(|| input.pointer.press_origin())
+                    .flatten()
+            });
             let metas: Vec<(usize, bool, String)> = self
                 .tabs
                 .iter()
@@ -151,13 +158,49 @@ impl FileManagerApp {
                                         super::window_frame::TAB_VERTICAL_EXTRA_HEIGHT,
                                     );
                                 // Обычный клик сохраняет работу глобальных сочетаний клавиш.
+                                // Drag-ответ остаётся активным, даже если указатель вышел за вкладку.
                                 let (rect, resp) =
-                                    ui.allocate_exact_size(size, egui::Sense::click());
+                                    ui.allocate_exact_size(size, egui::Sense::click_and_drag());
                                 tab_rects.push((display_index, rect));
                                 let x_rect = egui::Rect::from_min_max(
                                     egui::pos2(rect.max.x - close_w, rect.min.y),
                                     rect.max,
                                 );
+                                // Начало нажатия проверяется по текущей геометрии вкладки.
+                                if matches!(
+                                    self.tab_drag_state,
+                                    super::tab_drag_preview::TabDragState::Idle
+                                ) && let Some(press_origin) = primary_press_origin
+                                    && ctx.layer_id_at(press_origin) == Some(resp.layer_id)
+                                    && super::tab_drag_preview::tab_drag_press_hits_body(
+                                        resp.interact_rect,
+                                        x_rect.intersect(resp.interact_rect),
+                                        press_origin,
+                                    )
+                                {
+                                    let pixels_per_point = ctx.pixels_per_point();
+                                    let start_screen_position = ctx
+                                        .input(|input| input.viewport().inner_rect)
+                                        .map(|inner_rect| {
+                                            super::tab_drag_preview::viewport_position_to_screen(
+                                                press_origin,
+                                                inner_rect.min,
+                                                pixels_per_point,
+                                            )
+                                        })
+                                        .or_else(crate::platform::cursor_screen_position);
+                                    if let Some(start_screen_position) = start_screen_position {
+                                        let tab_id = self.tabs[*i].id;
+                                        self.tab_drag_state =
+                                            super::tab_drag_preview::TabDragState::Pressed {
+                                                tab_id,
+                                                start_screen_position,
+                                                start_pixels_per_point: pixels_per_point,
+                                            };
+                                        self.advance_tab_drag_state(ctx);
+                                    }
+                                }
+                                dragging_tab = self.tab_drag_state.is_dragging();
                                 let over_x = tab_close_button_hovered(
                                     dragging_tab,
                                     *pinned,
@@ -272,7 +315,12 @@ impl FileManagerApp {
                                         ui.close();
                                     }
                                 });
-                                if !dragging_tab && resp.clicked() {
+                                let suppress_tab_clicks = dragging_tab
+                                    || matches!(
+                                        self.tab_drag_state,
+                                        super::tab_drag_preview::TabDragState::Cancelled
+                                    );
+                                if !suppress_tab_clicks && resp.clicked() {
                                     let in_x = resp
                                         .interact_pointer_pos()
                                         .map(|p| x_rect.contains(p))
@@ -283,26 +331,10 @@ impl FileManagerApp {
                                         act = Some(("switch", *i));
                                     }
                                 }
-                                if !dragging_tab && resp.middle_clicked() && !*pinned {
+                                if !suppress_tab_clicks && resp.middle_clicked() && !*pinned {
                                     act = Some(("close", *i));
                                 }
-                                // Начинаем перестановку после выхода указателя за порог перетаскивания.
-                                if resp.is_pointer_button_down_on()
-                                    && let Some(p) = pointer_pos
-                                {
-                                    if self.tab_press.is_none() {
-                                        self.tab_press = Some((*i, p));
-                                    }
-                                    if let Some((si, start)) = self.tab_press
-                                        && si == *i
-                                        && p.distance(start)
-                                            > super::window_frame::TAB_DRAG_THRESHOLD
-                                    {
-                                        drag_src = Some(*i);
-                                        dragging_tab = true;
-                                    }
-                                }
-                                if (drag_src.is_some() || self.tab_drag.is_some())
+                                if self.tab_drag_state.is_dragging()
                                     && let Some(pos) = pointer_pos
                                     && rect.contains(pos)
                                 {
@@ -358,14 +390,6 @@ impl FileManagerApp {
                 super::window_frame::toggle_maximized(ctx);
             }
             self.window_controls(ctx, ui);
-            if let Some(src) = drag_src {
-                self.tab_drag = Some(src);
-                if !self.tab_drag_preview.is_active()
-                    && let Some(tab) = self.tabs.get(src)
-                {
-                    self.tab_drag_preview.begin(tab.id);
-                }
-            }
             if let Some((what, i)) = act {
                 match what {
                     "switch" => self.switch_tab(i),
@@ -379,15 +403,46 @@ impl FileManagerApp {
         });
         self.tab_drag_preview
             .set_drop_geometry(frame_rect, tab_rects);
-        let pointer_released = ctx.input(|input| input.pointer.any_released());
-        let pointer_left_window =
-            ctx.pointer_latest_pos().is_none() && !crate::platform::left_mouse_button_down();
-        if !self.tab_drag_preview.is_active()
-            && self.tab_press.is_some()
-            && (pointer_released || pointer_left_window)
+        if matches!(
+            self.tab_drag_state,
+            super::tab_drag_preview::TabDragState::Cancelled
+        ) && !primary_button_down(ctx)
         {
-            self.tab_press = None;
+            self.tab_drag_state = super::tab_drag_preview::TabDragState::Idle;
         }
+        if matches!(
+            self.tab_drag_state,
+            super::tab_drag_preview::TabDragState::Pressed { .. }
+                | super::tab_drag_preview::TabDragState::Cancelled
+        ) {
+            ctx.request_repaint_after(std::time::Duration::from_millis(
+                super::tab_drag_preview::TAB_DRAG_PREVIEW_REPAINT_MS,
+            ));
+        }
+    }
+
+    fn advance_tab_drag_state(&mut self, ctx: &egui::Context) {
+        let super::tab_drag_preview::TabDragState::Pressed { tab_id, .. } = self.tab_drag_state
+        else {
+            return;
+        };
+        if !self.tabs.iter().any(|tab| tab.id == tab_id) {
+            self.tab_drag_state = super::tab_drag_preview::TabDragState::Cancelled;
+            return;
+        }
+
+        let escape_pressed = ctx.input(|input| input.key_pressed(egui::Key::Escape))
+            || crate::platform::escape_key_down();
+        let next = super::tab_drag_preview::advance_tab_drag_state(
+            self.tab_drag_state,
+            current_screen_position(ctx),
+            primary_button_down(ctx),
+            escape_pressed,
+        );
+        if let super::tab_drag_preview::TabDragState::Dragging { tab_id } = next {
+            self.tab_drag_preview.begin(tab_id);
+        }
+        self.tab_drag_state = next;
     }
 
     pub(super) fn toolbar(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
@@ -550,4 +605,22 @@ impl FileManagerApp {
             }
         });
     }
+}
+
+fn current_screen_position(ctx: &egui::Context) -> Option<(i32, i32)> {
+    // Сначала берём экранные координаты, доступные вне окна.
+    crate::platform::cursor_screen_position().or_else(|| {
+        let pointer = ctx.pointer_latest_pos()?;
+        let inner_min = ctx.input(|input| input.viewport().inner_rect.map(|rect| rect.min))?;
+        Some(super::tab_drag_preview::viewport_position_to_screen(
+            pointer,
+            inner_min,
+            ctx.pixels_per_point(),
+        ))
+    })
+}
+
+fn primary_button_down(ctx: &egui::Context) -> bool {
+    crate::platform::left_mouse_button_down()
+        || ctx.input(|input| input.pointer.button_down(egui::PointerButton::Primary))
 }
