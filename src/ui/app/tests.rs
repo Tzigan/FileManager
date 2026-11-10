@@ -144,6 +144,34 @@ fn window_frame_maps_resize_edges_and_drop_targets() {
 }
 
 #[test]
+fn tab_drag_preview_converts_negative_screen_coordinates_and_preserves_drop_slots() {
+    use super::tab_drag_preview::{
+        preview_window_position, screen_position_to_viewport, tab_drop_slot_at,
+    };
+
+    let local = screen_position_to_viewport((-1500, -150), egui::pos2(-1280.0, -200.0), 1.5);
+    assert_eq!(local, egui::pos2(280.0, 100.0));
+    assert_eq!(
+        preview_window_position((-1500, -150), egui::vec2(10.0, -16.0), 1.5),
+        (-1515, -126)
+    );
+
+    let tabs = [
+        (
+            0,
+            egui::Rect::from_min_size(egui::pos2(10.0, 10.0), egui::vec2(100.0, 30.0)),
+        ),
+        (
+            1,
+            egui::Rect::from_min_size(egui::pos2(112.0, 10.0), egui::vec2(100.0, 30.0)),
+        ),
+    ];
+    assert_eq!(tab_drop_slot_at(egui::pos2(20.0, 20.0), &tabs), Some(0));
+    assert_eq!(tab_drop_slot_at(egui::pos2(100.0, 20.0), &tabs), Some(1));
+    assert_eq!(tab_drop_slot_at(egui::pos2(300.0, 20.0), &tabs), None);
+}
+
+#[test]
 fn detached_tab_viewport_is_borderless_resizable_and_keeps_its_size() {
     use super::window_frame::detached_viewport_builder;
 

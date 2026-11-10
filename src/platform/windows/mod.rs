@@ -8,6 +8,7 @@ mod recycle;
 mod shell;
 mod single_instance;
 mod space;
+mod tab_drag;
 mod time_fmt;
 mod update_support;
 mod zip;
@@ -22,6 +23,9 @@ pub use recycle::recycle_bin;
 pub use shell::{open_recycle_bin, open_terminal, set_attributes, shell_open};
 pub use space::free_space;
 pub use single_instance::{acquire_single_instance, notify_already_running, AcquireResult, SingleInstanceGuard};
+pub(crate) use tab_drag::{
+    TabDragPreviewWindow, cursor_screen_position, escape_key_down, left_mouse_button_down,
+};
 pub use time_fmt::format_local_time;
 pub use update_support::{launch_updater, prepare_update_archive, signal_update_started};
 pub use zip::{

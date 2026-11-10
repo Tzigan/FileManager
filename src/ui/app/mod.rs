@@ -4,6 +4,7 @@ mod input;
 mod navigation;
 mod preview;
 mod search;
+mod tab_drag_preview;
 mod toolbar;
 mod window_frame;
 
@@ -162,6 +163,7 @@ pub struct FileManagerApp {
     tab_drag: Option<usize>,
     /// Tab press anchor for manual drag detection (index, press position).
     tab_press: Option<(usize, egui::Pos2)>,
+    tab_drag_preview: tab_drag_preview::TabDragPreviewState,
     /// Path shown in the properties dialog.
     pub(crate) props_target: Option<PathBuf>,
     props_viewport_placed: bool,
@@ -327,6 +329,7 @@ impl FileManagerApp {
             update_err: None,
             tab_drag: None,
             tab_press: None,
+            tab_drag_preview: tab_drag_preview::TabDragPreviewState::default(),
             props_target: None,
             props_viewport_placed: false,
             preview: PreviewState::default(),
@@ -869,6 +872,7 @@ impl eframe::App for FileManagerApp {
         egui::Panel::bottom("status_bar").show(ui, |ui| self.show_active_tab_status(ui));
         egui::CentralPanel::default().show(ui, |ui| self.show_active_file_content(&ctx, ui));
 
+        self.show_tab_drag_preview(&ctx);
         self.flush_pending_open_tabs(&ctx);
         self.show_detached_tab_windows(&ctx);
         self.finish_thumbnail_frame();

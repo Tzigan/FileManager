@@ -95,7 +95,8 @@ impl FileManagerApp {
             return;
         }
 
-        if allow_tab_management {
+        // Во время перетаскивания горячие клавиши не должны менять список вкладок.
+        if allow_tab_management && !self.tab_drag_preview.is_active() {
             if mods.ctrl && mods.shift && ctx.input(|i| i.key_pressed(egui::Key::Tab)) {
                 let visible = self.visible_tab_indices();
                 if !visible.is_empty() {
