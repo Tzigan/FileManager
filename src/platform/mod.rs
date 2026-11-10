@@ -90,11 +90,29 @@ pub struct DecodedImage {
     pub rgba: Vec<u8>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DiskUsage {
+    pub total_bytes: u64,
+    pub free_bytes: u64,
+}
+
+impl DiskUsage {
+    pub fn used_percent(self) -> Option<u8> {
+        let used = self.total_bytes.checked_sub(self.free_bytes)?;
+        if self.total_bytes == 0 {
+            return None;
+        }
+        let percent = (used as u128 * 100 + self.total_bytes as u128 / 2)
+            / self.total_bytes as u128;
+        Some(percent.min(100) as u8)
+    }
+}
+
 #[cfg(windows)]
 mod windows;
 
 #[cfg(windows)]
-pub use self::windows::{acquire_single_instance, create_zip_archive, decode_image, drives, extract_zip_all, extract_zip_file, extract_zip_folder, format_local_time, free_space, get_clipboard_files, get_clipboard_text, install_context_menu, launch_updater, notify_already_running, open_recycle_bin, open_terminal, pipe_listen, pipe_send, prepare_update_archive, read_zip_dir_cancellable, recycle_bin, replace_file, search_zip, set_attributes, set_clipboard_files, shell_open, signal_update_started, uninstall_context_menu, AcquireResult, SingleInstanceGuard};
+pub use self::windows::{acquire_single_instance, create_zip_archive, decode_image, disk_usage, drives, extract_zip_all, extract_zip_file, extract_zip_folder, format_local_time, free_space, get_clipboard_files, get_clipboard_text, install_context_menu, launch_updater, notify_already_running, open_recycle_bin, open_terminal, pipe_listen, pipe_send, prepare_update_archive, read_zip_dir_cancellable, recycle_bin, replace_file, search_zip, set_attributes, set_clipboard_files, shell_open, signal_update_started, uninstall_context_menu, AcquireResult, SingleInstanceGuard};
 
 #[cfg(windows)]
 pub(crate) use self::windows::{
@@ -188,6 +206,9 @@ mod stubs {
     }
 
     pub fn free_space(_path: &std::path::Path) -> Option<u64> {
+        None
+    }
+    pub fn disk_usage(_path: &std::path::Path) -> Option<super::DiskUsage> {
         None
     }
     pub fn decode_image(_path: &std::path::Path, _max_dimension: u32) -> std::io::Result<super::DecodedImage> {
@@ -286,7 +307,7 @@ mod stubs {
 }
 
 #[cfg(not(windows))]
-pub use stubs::{acquire_single_instance, create_zip_archive, decode_image, drives, extract_zip_all, extract_zip_file, extract_zip_folder, format_local_time, free_space, get_clipboard_files, get_clipboard_text, install_context_menu, launch_updater, notify_already_running, open_recycle_bin, open_terminal, pipe_listen, pipe_send, prepare_update_archive, read_zip_dir_cancellable, recycle_bin, replace_file, search_zip, set_attributes, set_clipboard_files, shell_open, signal_update_started, uninstall_context_menu, AcquireResult, SingleInstanceGuard};
+pub use stubs::{acquire_single_instance, create_zip_archive, decode_image, disk_usage, drives, extract_zip_all, extract_zip_file, extract_zip_folder, format_local_time, free_space, get_clipboard_files, get_clipboard_text, install_context_menu, launch_updater, notify_already_running, open_recycle_bin, open_terminal, pipe_listen, pipe_send, prepare_update_archive, read_zip_dir_cancellable, recycle_bin, replace_file, search_zip, set_attributes, set_clipboard_files, shell_open, signal_update_started, uninstall_context_menu, AcquireResult, SingleInstanceGuard};
 
 #[cfg(not(windows))]
 pub(crate) use stubs::{
@@ -309,5 +330,46 @@ mod zip_name_tests {
         for name in ["", " ", "../report", "C:report", "CON", "bad?name"] {
             assert!(normalize_zip_archive_name(name).is_err(), "{name}");
         }
+    }
+}
+
+#[cfg(test)]
+mod disk_usage_tests {
+    use super::DiskUsage;
+
+    #[test]
+    fn usage_percent_rounds_and_rejects_unknown_or_inconsistent_capacity() {
+        assert_eq!(
+            DiskUsage {
+                total_bytes: 100,
+                free_bytes: 58,
+            }
+            .used_percent(),
+            Some(42)
+        );
+        assert_eq!(
+            DiskUsage {
+                total_bytes: 3,
+                free_bytes: 2,
+            }
+            .used_percent(),
+            Some(33)
+        );
+        assert_eq!(
+            DiskUsage {
+                total_bytes: 0,
+                free_bytes: 0,
+            }
+            .used_percent(),
+            None
+        );
+        assert_eq!(
+            DiskUsage {
+                total_bytes: 10,
+                free_bytes: 11,
+            }
+            .used_percent(),
+            None
+        );
     }
 }
