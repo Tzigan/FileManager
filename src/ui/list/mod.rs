@@ -136,7 +136,9 @@ impl FileManagerApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
     use std::path::PathBuf;
+    use std::time::{Duration, UNIX_EPOCH};
 
     fn entry(name: &str, is_dir: bool, extension: Option<&str>) -> FileEntry {
         FileEntry {
@@ -233,6 +235,58 @@ mod tests {
                 ListRow::Item(1),
                 ListRow::Item(0),
             ]
+        );
+        assert!(table_rows(&[], true, &[], "Folders", "Files").is_empty());
+    }
+
+    #[test]
+    fn filtered_search_results_keep_only_nonempty_type_groups() {
+        let from = UNIX_EPOCH + Duration::from_secs(10_000);
+        let before = from + Duration::from_secs(2 * 24 * 60 * 60);
+        let mut matching = entry("report.txt", false, Some("txt"));
+        matching.size = Some(1024);
+        matching.modified = Some(from + Duration::from_secs(60));
+        let mut wrong_name = entry("notes.txt", false, Some("txt"));
+        wrong_name.size = Some(1024);
+        wrong_name.modified = Some(from + Duration::from_secs(60));
+        let mut wrong_size = entry("report-large.txt", false, Some("txt"));
+        wrong_size.size = Some(4096);
+        wrong_size.modified = Some(from + Duration::from_secs(60));
+        let mut wrong_type = entry("report.md", false, Some("md"));
+        wrong_type.size = Some(1024);
+        wrong_type.modified = Some(from + Duration::from_secs(60));
+        let mut wrong_date = entry("report-old.txt", false, Some("txt"));
+        wrong_date.size = Some(1024);
+        wrong_date.modified = Some(from - Duration::from_secs(60));
+
+        let options = crate::core::search::SearchOptions {
+            query: "report".into(),
+            extensions: BTreeSet::from(["txt".to_owned()]),
+            min_size: Some(512),
+            max_size: Some(2048),
+            modified_from: Some(from),
+            modified_before: Some(before),
+            ..Default::default()
+        };
+        let filtered: Vec<_> = [matching, wrong_name, wrong_size, wrong_type, wrong_date]
+            .into_iter()
+            .filter(|entry| crate::core::search::matches_entry(entry, &options))
+            .collect();
+
+        let rows = table_rows(&filtered, true, &[], "Folders", "Files");
+        assert_eq!(
+            rows,
+            vec![
+                ListRow::Header {
+                    key: "ext:txt".into(),
+                    label: "TXT".into()
+                },
+                ListRow::Item(0),
+            ]
+        );
+        assert_eq!(
+            table_rows(&filtered, false, &[], "Folders", "Files"),
+            vec![ListRow::Item(0)]
         );
         assert!(table_rows(&[], true, &[], "Folders", "Files").is_empty());
     }

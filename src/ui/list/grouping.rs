@@ -20,7 +20,7 @@ pub(super) fn table_rows(
         return (0..entries.len()).map(ListRow::Item).collect();
     }
     let mut order: Vec<usize> = (0..entries.len()).collect();
-    order.sort_by_key(|&i| {
+    order.sort_by_cached_key(|&i| {
         let e = &entries[i];
         (
             !e.is_dir,
@@ -29,6 +29,7 @@ pub(super) fn table_rows(
         )
     });
     let mut groups: Vec<(String, String, Vec<usize>)> = Vec::new();
+    // Заголовки создаются только по фактически оставшимся записям.
     for i in order {
         let e = &entries[i];
         let (key, label) = if e.is_dir {
@@ -101,7 +102,8 @@ impl FileManagerApp {
         let tab = &self.tabs[self.active];
         table_rows(
             &tab.entries,
-            self.store.settings.group_by_type && !tab.search.results_active,
+            // Поиск уже отфильтровал записи в фоне; группируем только оставшиеся элементы.
+            self.store.settings.group_by_type,
             &self.store.settings.group_order,
             self.t("type.folder"),
             self.t("type.file"),
