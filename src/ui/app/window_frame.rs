@@ -190,6 +190,9 @@ fn draw_window_control_square(painter: &egui::Painter, rect: egui::Rect, stroke:
 pub(super) struct DetachedTabWindow {
     pub(super) placed: bool,
     pub(super) confirmed: bool,
+    pub(super) initial_screen_position: Option<(i32, i32)>,
+    pub(super) initial_pixels_per_point: Option<f32>,
+    pub(super) position_requested: bool,
 }
 
 pub(super) fn resize_direction_at(
@@ -310,11 +313,23 @@ impl FileManagerApp {
             .collect()
     }
 
-    pub(super) fn request_detach_tab(&mut self, tab_id: u64) {
+    pub(super) fn request_detach_tab(
+        &mut self,
+        tab_id: u64,
+        initial_screen_position: (i32, i32),
+        initial_pixels_per_point: f32,
+    ) {
         if self.tabs.iter().any(|tab| tab.id == tab_id) && !self.detached_tabs.contains_key(&tab_id)
         {
             self.detached_tabs
-                .insert(tab_id, DetachedTabWindow::default());
+                .insert(
+                    tab_id,
+                    DetachedTabWindow {
+                        initial_screen_position: Some(initial_screen_position),
+                        initial_pixels_per_point: Some(initial_pixels_per_point),
+                        ..DetachedTabWindow::default()
+                    },
+                );
             self.tab_detach_error = None;
         }
     }
@@ -328,23 +343,62 @@ impl FileManagerApp {
                 continue;
             };
             let state = self.detached_tabs.get(&tab_id).copied().unwrap_or_default();
+            if !state.placed
+                && (state.initial_screen_position.is_none()
+                    || state.initial_pixels_per_point.is_none())
+            {
+                self.detached_tabs.remove(&tab_id);
+                self.tab_detach_error = Some(self.t("tab.detach_failed").to_owned());
+                ctx.request_repaint();
+                continue;
+            }
             let title = self.tabs[index].title();
             let viewport_id = egui::ViewportId::from_hash_of(("filemanager-detached-tab", tab_id));
-            let builder =
-                detached_viewport_builder(ctx, format!("FileManager — {title}"), state.placed);
+            let initial_position = state
+                .initial_screen_position
+                .zip(state.initial_pixels_per_point)
+                .map(|((x, y), pixels_per_point)| {
+                    let pixels_per_point = pixels_per_point.max(f32::EPSILON);
+                    egui::pos2(x as f32 / pixels_per_point, y as f32 / pixels_per_point)
+            });
+            let builder = detached_viewport_builder_at(
+                format!("FileManager — {title}"),
+                state.placed,
+                initial_position,
+            );
             let root_active_id = self.tabs.get(self.active).map(|tab| tab.id);
             let mut callback_ran = false;
             let mut close_requested = false;
             let mut confirmed_now = false;
             let mut persist_after = false;
+            let mut position_requested_now = false;
+            let mut embedded_viewport = false;
             self.active = index;
-            ctx.show_viewport_immediate(viewport_id, builder, |viewport_ui, _class| {
+            ctx.show_viewport_immediate(viewport_id, builder, |viewport_ui, class| {
                 callback_ran = true;
+                if class == egui::ViewportClass::EmbeddedWindow {
+                    embedded_viewport = true;
+                    return;
+                }
                 let viewport_ctx = viewport_ui.ctx().clone();
                 if viewport_ctx.input(|input| input.viewport().close_requested()) {
                     viewport_ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     close_requested = true;
                     return;
+                }
+
+                if !state.position_requested
+                    && let Some((x, y)) = state.initial_screen_position
+                {
+                    let pixels_per_point = viewport_ctx.pixels_per_point().max(f32::EPSILON);
+                    viewport_ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(
+                        egui::pos2(
+                            x as f32 / pixels_per_point,
+                            y as f32 / pixels_per_point,
+                        ),
+                    ));
+                    viewport_ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    position_requested_now = true;
                 }
 
                 handle_resize_edges(&viewport_ctx);
@@ -387,9 +441,14 @@ impl FileManagerApp {
                 self.detached_tabs.remove(&tab_id);
                 persist_after = true;
                 ctx.request_repaint();
+            } else if embedded_viewport {
+                self.detached_tabs.remove(&tab_id);
+                self.tab_detach_error = Some(self.t("tab.detach_failed").to_owned());
+                ctx.request_repaint();
             } else if callback_ran {
                 if let Some(window) = self.detached_tabs.get_mut(&tab_id) {
                     window.placed = true;
+                    window.position_requested |= position_requested_now;
                     confirmed_now = !window.confirmed;
                     window.confirmed = true;
                 } else {
@@ -626,10 +685,10 @@ impl FileManagerApp {
     }
 }
 
-pub(super) fn detached_viewport_builder(
-    ctx: &egui::Context,
+pub(super) fn detached_viewport_builder_at(
     title: String,
     already_placed: bool,
+    initial_position: Option<egui::Pos2>,
 ) -> egui::ViewportBuilder {
     let inner_size = egui::vec2(DETACHED_WINDOW_INNER_SIZE[0], DETACHED_WINDOW_INNER_SIZE[1]);
     let mut builder = egui::ViewportBuilder::default()
@@ -638,12 +697,10 @@ pub(super) fn detached_viewport_builder(
         .with_resizable(true)
         .with_min_inner_size(DETACHED_WINDOW_MIN_SIZE);
     if !already_placed {
-        let parent_rect = ctx
-            .input(|input| input.viewport().outer_rect)
-            .unwrap_or_else(|| ctx.content_rect());
-        builder = builder
-            .with_inner_size(inner_size)
-            .with_position(parent_rect.center() - inner_size / 2.0);
+        builder = builder.with_inner_size(inner_size);
+        if let Some(position) = initial_position {
+            builder = builder.with_position(position).with_visible(false);
+        }
     }
     builder
 }

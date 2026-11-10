@@ -172,19 +172,42 @@ fn tab_drag_preview_converts_negative_screen_coordinates_and_preserves_drop_slot
 }
 
 #[test]
-fn detached_tab_viewport_is_borderless_resizable_and_keeps_its_size() {
-    use super::window_frame::detached_viewport_builder;
+fn detached_window_position_stays_on_the_release_monitor() {
+    use super::tab_drag_preview::detached_window_position;
 
-    let ctx = egui::Context::default();
-    let initial = detached_viewport_builder(&ctx, "Detached".into(), false);
+    let right_monitor = detached_window_position(
+        (3830, 1060),
+        1.5,
+        egui::vec2(1000.0, 640.0),
+        (1920, 0, 3840, 1080),
+    );
+    assert_eq!(right_monitor, (2328, 108));
+
+    let left_monitor = detached_window_position(
+        (-10, -190),
+        1.0,
+        egui::vec2(1000.0, 640.0),
+        (-1920, -200, 0, 1080),
+    );
+    assert_eq!(left_monitor, (-1008, -182));
+}
+
+#[test]
+fn detached_tab_viewport_is_borderless_resizable_and_keeps_its_size() {
+    use super::window_frame::detached_viewport_builder_at;
+
+    let release_position = egui::pos2(-720.0, 140.0);
+    let initial = detached_viewport_builder_at("Detached".into(), false, Some(release_position));
     assert_eq!(initial.decorations, Some(false));
     assert_eq!(initial.resizable, Some(true));
     assert_eq!(initial.inner_size, Some(egui::vec2(1000.0, 640.0)));
-    assert!(initial.position.is_some());
+    assert_eq!(initial.position, Some(release_position));
+    assert_eq!(initial.visible, Some(false));
 
-    let placed = detached_viewport_builder(&ctx, "Detached".into(), true);
+    let placed = detached_viewport_builder_at("Detached".into(), true, None);
     assert_eq!(placed.inner_size, None);
     assert_eq!(placed.position, None);
+    assert_eq!(placed.visible, None);
 }
 
 #[test]

@@ -25,6 +25,7 @@ pub use space::free_space;
 pub use single_instance::{acquire_single_instance, notify_already_running, AcquireResult, SingleInstanceGuard};
 pub(crate) use tab_drag::{
     TabDragPreviewWindow, cursor_screen_position, escape_key_down, left_mouse_button_down,
+    monitor_work_area_at_screen_position,
 };
 pub use time_fmt::format_local_time;
 pub use update_support::{launch_updater, prepare_update_archive, signal_update_started};
