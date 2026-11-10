@@ -118,6 +118,7 @@ impl FileManagerApp {
             self.settings_viewport_placed,
         );
         let mut close_requested = false;
+        let mut hidden_files_changed = false;
         ctx.show_viewport_immediate(viewport_id, builder, |viewport_ui, _class| {
             let viewport_ctx = viewport_ui.ctx().clone();
             if viewport_ctx.input(|i| i.viewport().close_requested()) {
@@ -177,10 +178,32 @@ impl FileManagerApp {
                             egui::RichText::new(self.t("settings.mouse_side_navigation_hint"))
                                 .weak(),
                         );
+                        ui.add_space(style::SPACE_MD);
+                        let show_hidden_label =
+                            self.t("settings.show_hidden_files").to_owned();
+                        if ui
+                            .checkbox(
+                                &mut self.store.settings.show_hidden_files,
+                                show_hidden_label,
+                            )
+                            .changed()
+                        {
+                            hidden_files_changed = true;
+                        }
+                        ui.add_space(style::SPACE_SM);
+                        ui.label(
+                            egui::RichText::new(self.t("settings.show_hidden_files_hint")).weak(),
+                        );
                     });
                 });
             });
         });
+        if hidden_files_changed {
+            self.persist();
+            for tab in 0..self.tabs.len() {
+                self.navigate_fresh(tab, ctx);
+            }
+        }
         self.settings_viewport_placed = !close_requested;
         if close_requested {
             self.show_settings = false;
