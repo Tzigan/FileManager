@@ -2,6 +2,7 @@ pub mod format;
 pub mod cli;
 pub mod fs;
 pub mod history;
+pub mod known_folders;
 pub mod ops;
 pub mod preview;
 pub mod i18n;

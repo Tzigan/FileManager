@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use crate::core::known_folders::{SystemBookmark, SystemBookmarkTarget};
 use crate::platform::DiskUsage;
 use crate::ui::icons;
 use crate::ui::style;
@@ -92,7 +93,65 @@ impl crate::ui::FileManagerApp {
         let heading = self.t("tree.bookmarks").to_owned();
         ui.label(egui::RichText::new(heading).strong());
         ui.add_space(style::SPACE_XS);
+
+        let system_bookmarks = self.system_bookmarks.clone();
+        if !system_bookmarks.is_empty() {
+            ui.label(egui::RichText::new(self.t("tree.bookmarks.system")).weak());
+            for bookmark in system_bookmarks {
+                let active_path = self.tabs[self.active].path.clone();
+                let current = matches!(
+                    &bookmark.target,
+                    SystemBookmarkTarget::Folder(path) if path == &active_path
+                );
+                let mut action = None;
+                ui.horizontal(|ui| {
+                    let (icon_rect, icon_response) = ui.allocate_exact_size(
+                        egui::vec2(style::TREE_ICON_WIDTH, style::TREE_ICON_HEIGHT),
+                        egui::Sense::click(),
+                    );
+                    icons::paint_system_bookmark_icon(
+                        ui.painter(),
+                        icon_rect,
+                        bookmark.kind,
+                        ui.visuals().dark_mode,
+                        ui.visuals().selection.stroke.color,
+                    );
+                    if icon_response.clicked() {
+                        action = Some(false);
+                    }
+                    let response = ui.selectable_label(
+                        current,
+                        self.t(bookmark.kind.label_key()).to_owned(),
+                    );
+                    if response.clicked() {
+                        action = Some(false);
+                    }
+                    response.context_menu(|ui| {
+                        style::compact_context_menu(ui);
+                        if ui.button(self.t("ctx.open").to_owned()).clicked() {
+                            action = Some(false);
+                            ui.close();
+                        }
+                        if matches!(&bookmark.target, SystemBookmarkTarget::Folder(_))
+                            && ui.button(self.t("ctx.open_new_tab").to_owned()).clicked()
+                        {
+                            action = Some(true);
+                            ui.close();
+                        }
+                    });
+                });
+                if let Some(open_new_tab) = action {
+                    self.open_system_bookmark(&bookmark, open_new_tab, ctx);
+                }
+            }
+        }
+
         let bookmarks = self.store.settings.bookmarks.clone();
+        if !bookmarks.is_empty() && !self.system_bookmarks.is_empty() {
+            ui.separator();
+            ui.label(egui::RichText::new(self.t("tree.bookmarks.user")).weak());
+            ui.add_space(style::SPACE_XXS);
+        }
         for bm in bookmarks {
             let name = bm
                 .file_name()
@@ -120,6 +179,33 @@ impl crate::ui::FileManagerApp {
                     ui.close();
                 }
             });
+        }
+    }
+
+    fn open_system_bookmark(
+        &mut self,
+        bookmark: &SystemBookmark,
+        open_new_tab: bool,
+        ctx: &egui::Context,
+    ) {
+        match &bookmark.target {
+            SystemBookmarkTarget::Folder(path) if path.is_dir() => {
+                if open_new_tab {
+                    self.queue_open_path_in_new_tab(path.clone());
+                } else {
+                    self.navigate(self.active, path.clone(), ctx);
+                }
+            }
+            SystemBookmarkTarget::Folder(_) => {
+                self.system_bookmarks
+                    .retain(|entry| entry.kind != bookmark.kind);
+            }
+            SystemBookmarkTarget::RecycleBin => {
+                if crate::platform::open_recycle_bin().is_err() {
+                    self.system_bookmarks
+                        .retain(|entry| entry.kind != bookmark.kind);
+                }
+            }
         }
     }
 

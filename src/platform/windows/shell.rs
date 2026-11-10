@@ -29,7 +29,7 @@ pub fn open_terminal(path: &Path) -> io::Result<()> {
 
 /// Opens the Windows Recycle Bin in Explorer.
 pub fn open_recycle_bin() -> io::Result<()> {
-    unsafe {
+    let result = unsafe {
         ShellExecuteW(
             None,
             &HSTRING::from("open"),
@@ -37,9 +37,16 @@ pub fn open_recycle_bin() -> io::Result<()> {
             &HSTRING::from("shell:RecycleBinFolder"),
             PCWSTR::null(),
             SW_NORMAL,
-        );
+        )
+    };
+    if result.0 as isize > 32 {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::Other,
+            "could not open the Recycle Bin shell item",
+        ))
     }
-    Ok(())
 }
 
 /// Toggles FILE_ATTRIBUTE_READONLY / FILE_ATTRIBUTE_HIDDEN, preserving other flags.
