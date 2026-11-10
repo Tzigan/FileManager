@@ -211,7 +211,7 @@ pub fn search(
             let Some(mapped) = file_system::map_entry(&entry) else {
                 continue;
             };
-            if mapped.hidden && !options.show_hidden {
+            if !file_system::is_visible_entry(&mapped, options.show_hidden) {
                 continue;
             }
             if options.recursive

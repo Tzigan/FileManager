@@ -131,6 +131,7 @@ mod tests {
             is_dir,
             is_symlink: false,
             hidden: false,
+            system: false,
             readonly: false,
             size: None,
             modified: None,
