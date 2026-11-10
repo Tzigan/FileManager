@@ -7,7 +7,7 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use ::windows::Win32::Storage::FileSystem::MoveFileW;
-use ::windows::core::PCWSTR;
+use ::windows::core::{Error as WindowsError, PCWSTR};
 
 use crate::core::fs::FileEntry;
 use crate::core::fs::ReadDirError;
@@ -16,10 +16,13 @@ use crate::system_tools::system_executable;
 use zip::CompressionMethod;
 use zip::write::{SimpleFileOptions, ZipWriter};
 
-const MAX_UNCOMPRESSED_BYTES: u64 = 1024 * 1024 * 1024;
+// ZIP64 поддерживает большие файлы; сохраняем высокий предел для защиты от zip-бомб.
+const MAX_UNCOMPRESSED_BYTES: u64 = 16 * 1024 * 1024 * 1024 * 1024;
 const MAX_ARCHIVE_LISTING_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_ARCHIVE_MEMBERS: usize = 100_000;
 const MAX_ARCHIVE_NAME_ATTEMPTS: u32 = 10_000;
+const ZIP64_FILE_SIZE_THRESHOLD: u64 = u32::MAX as u64;
+const ZIP64_FILE_SIZE_MARGIN: u64 = 16 * 1024 * 1024;
 const COPY_BUFFER_SIZE: usize = 64 * 1024;
 
 static NEXT_STAGE_ID: AtomicU64 = AtomicU64::new(1);
@@ -672,8 +675,9 @@ fn write_zip_path<W: Write + Seek>(
             )?;
         }
     } else if metadata.is_file() {
+        let file_options = zip_file_options(options, metadata.len());
         writer
-            .start_file(member.trim_end_matches('/'), options)
+            .start_file(member.trim_end_matches('/'), file_options)
             .map_err(zip_writer_error)?;
         let mut source = fs::File::open(&canonical_path)?;
         copy_with_limit(
@@ -689,6 +693,12 @@ fn write_zip_path<W: Write + Seek>(
         ));
     }
     Ok(())
+}
+
+fn zip_file_options(options: SimpleFileOptions, source_size: u64) -> SimpleFileOptions {
+    // Включаем ZIP64 заранее у границы ZIP32, чтобы учесть возможный рост Deflate.
+    options
+        .large_file(source_size >= ZIP64_FILE_SIZE_THRESHOLD.saturating_sub(ZIP64_FILE_SIZE_MARGIN))
 }
 
 fn zip_writer_error(error: zip::result::ZipError) -> io::Error {
@@ -818,13 +828,7 @@ fn move_directory_no_replace(source: &Path, destination: &Path) -> io::Result<()
             PCWSTR(destination_wide.as_ptr()),
         )
     }
-    .map_err(|error| {
-        if fs::symlink_metadata(destination).is_ok() {
-            io::Error::new(io::ErrorKind::AlreadyExists, "destination already exists")
-        } else {
-            io::Error::other(error.to_string())
-        }
-    })
+    .map_err(|error| move_error_to_io(error, destination))
 }
 
 fn move_file_no_replace(source: &Path, destination: &Path) -> io::Result<()> {
@@ -836,13 +840,21 @@ fn move_file_no_replace(source: &Path, destination: &Path) -> io::Result<()> {
             PCWSTR(destination_wide.as_ptr()),
         )
     }
-    .map_err(|error| {
-        if fs::symlink_metadata(destination).is_ok() {
-            io::Error::new(io::ErrorKind::AlreadyExists, "destination already exists")
-        } else {
-            io::Error::other(error.to_string())
-        }
-    })
+    .map_err(|error| move_error_to_io(error, destination))
+}
+
+fn move_error_to_io(error: WindowsError, destination: &Path) -> io::Error {
+    if fs::symlink_metadata(destination).is_ok() {
+        return io::Error::new(io::ErrorKind::AlreadyExists, "destination already exists");
+    }
+
+    // Win32 API возвращает HRESULT_FROM_WIN32; сохраняем код, чтобы UI распознал тип ошибки.
+    let hresult = error.code().0 as u32;
+    if hresult & 0xffff_0000 == 0x8007_0000 {
+        io::Error::from_raw_os_error((hresult & 0xffff) as i32)
+    } else {
+        io::Error::other(error.to_string())
+    }
 }
 
 fn create_stage_dir(parent: &Path) -> io::Result<PathBuf> {
@@ -1223,6 +1235,51 @@ mod tests {
             Some("archive (2).zip")
         );
         assert!(read_zip_dir(&archive, "").is_ok());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn reads_and_extracts_zip64_entries() {
+        let root = temp_dir();
+        let archive_path = root.join("zip64.zip");
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&archive_path)
+            .unwrap();
+        let mut writer = ZipWriter::new(file);
+        writer.set_raw_zip64_extensible_data_sector(Vec::new().into_boxed_slice());
+        let options = zip_file_options(
+            SimpleFileOptions::default().compression_method(CompressionMethod::Deflated),
+            ZIP64_FILE_SIZE_THRESHOLD,
+        );
+        writer.start_file("zip64/readme.txt", options).unwrap();
+        writer.write_all(b"ZIP64 content").unwrap();
+        writer.finish().unwrap().sync_all().unwrap();
+
+        assert!(
+            read_zip_dir(&archive_path, "zip64")
+                .unwrap()
+                .iter()
+                .any(|entry| entry.name == "readme.txt" && !entry.is_dir)
+        );
+        let output = root.join("extracted");
+        let extracted = extract_zip_file(&archive_path, "zip64/readme.txt", &output).unwrap();
+        assert_eq!(fs::read(extracted).unwrap(), b"ZIP64 content");
+
+        let folder_output = root.join("folder-output");
+        let extracted_folder = extract_zip_folder(&archive_path, "zip64", &folder_output).unwrap();
+        assert_eq!(
+            fs::read(extracted_folder.join("readme.txt")).unwrap(),
+            b"ZIP64 content"
+        );
+
+        let all_output = root.join("all-output");
+        let extracted_all = extract_zip_all(&archive_path, &all_output).unwrap();
+        assert_eq!(
+            fs::read(extracted_all.join("zip64/readme.txt")).unwrap(),
+            b"ZIP64 content"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 }

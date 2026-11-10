@@ -121,10 +121,14 @@ impl FileManagerApp {
         }
         match error.kind() {
             std::io::ErrorKind::PermissionDenied => self.t("error.access_denied").to_owned(),
+            std::io::ErrorKind::FileTooLarge => self.t("zip.error_too_large").to_owned(),
+            std::io::ErrorKind::Unsupported => self.t("zip.error_zip64_unsupported").to_owned(),
             std::io::ErrorKind::NotFound => self.t("zip.error_invalid").to_owned(),
             std::io::ErrorKind::InvalidData => {
                 if error.to_string().contains("unsafe path") {
                     self.t("zip.error_path").to_owned()
+                } else if error.to_string().contains("extraction limit") {
+                    self.t("zip.error_limit").to_owned()
                 } else {
                     self.t("zip.error_invalid").to_owned()
                 }
@@ -152,6 +156,8 @@ impl FileManagerApp {
         }
         match error.kind() {
             std::io::ErrorKind::PermissionDenied => self.t("error.access_denied").to_owned(),
+            std::io::ErrorKind::FileTooLarge => self.t("zip.error_too_large").to_owned(),
+            std::io::ErrorKind::Unsupported => self.t("zip.create_error").to_owned(),
             std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidInput => {
                 self.t("zip.create_error_path").to_owned()
             }
@@ -162,13 +168,11 @@ impl FileManagerApp {
             {
                 self.t("zip.create_error_limit").to_owned()
             }
-            std::io::ErrorKind::InvalidData => {
-                format!("{}: {error}", self.t("zip.create_error"))
-            }
+            std::io::ErrorKind::InvalidData => self.t("zip.create_error").to_owned(),
             std::io::ErrorKind::AlreadyExists => self.t("zip.error_exists").to_owned(),
             std::io::ErrorKind::StorageFull => self.t("zip.create_error_space").to_owned(),
             std::io::ErrorKind::WouldBlock => self.t("zip.error_busy").to_owned(),
-            _ => format!("{}: {error}", self.t("zip.create_error")),
+            _ => self.t("zip.create_error").to_owned(),
         }
     }
 
