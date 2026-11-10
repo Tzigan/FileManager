@@ -113,8 +113,7 @@ impl FileManagerApp {
             let scroll_width = (ui.available_width()
                 - super::window_frame::WINDOW_CONTROLS_WIDTH
                 - super::window_frame::MAIN_WINDOW_DRAG_AREA_MIN_WIDTH
-                - super::window_frame::TAB_PLUS_AREA_WIDTH
-                - spacing * 3.0)
+                - spacing * 2.0)
                 .max(1.0);
             egui::ScrollArea::horizontal()
                 .id_salt("tab_strip_scroll")
@@ -320,11 +319,25 @@ impl FileManagerApp {
                                 }
                             });
                         }
+
+                        // Кнопка идёт последней в прокручиваемом ряду вкладок.
+                        let plus_galley = ui.painter().layout_no_wrap(
+                            "+".to_owned(),
+                            egui::TextStyle::Small.resolve(ui.style()),
+                            ui.visuals().text_color(),
+                        );
+                        let plus_size = super::window_frame::new_tab_button_size(
+                            plus_galley.size().y,
+                            ui.spacing().interact_size.y,
+                        );
+                        if ui
+                            .add_sized(plus_size, egui::Button::new("+").small())
+                            .clicked()
+                        {
+                            self.new_tab(ctx);
+                        }
                     });
                 });
-            if ui.small_button("+").clicked() {
-                self.new_tab(ctx);
-            }
             let drag_width =
                 (ui.available_width() - super::window_frame::WINDOW_CONTROLS_WIDTH - spacing)
                     .max(0.0);

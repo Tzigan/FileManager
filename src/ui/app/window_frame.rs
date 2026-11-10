@@ -25,7 +25,7 @@ pub(super) const WINDOW_CONTROL_ICON_STROKE: f32 = 1.4;
 pub(super) const WINDOW_CONTROL_CROSS_FACTOR: f32 = 0.7;
 
 pub(super) const TAB_DRAG_THRESHOLD: f32 = 5.0;
-pub(super) const TAB_PLUS_AREA_WIDTH: f32 = 30.0;
+pub(super) const TAB_PLUS_BUTTON_WIDTH: f32 = 30.0;
 pub(super) const TAB_PIN_WIDTH: f32 = 16.0;
 pub(super) const TAB_PIN_ICON_SIZE: f32 = 12.0;
 pub(super) const TAB_PIN_ICON_OFFSET: f32 = 4.0;
@@ -47,6 +47,13 @@ pub(super) const DETACHED_TREE_DEFAULT_WIDTH: f32 = 210.0;
 pub(super) const DETACHED_TREE_WIDTH_RANGE: std::ops::RangeInclusive<f32> = 140.0..=360.0;
 pub(super) const DETACHED_PROPS_DEFAULT_WIDTH: f32 = 340.0;
 pub(super) const DETACHED_PROPS_WIDTH_RANGE: std::ops::RangeInclusive<f32> = 260.0..=460.0;
+
+pub(super) fn new_tab_button_size(text_height: f32, min_interact_height: f32) -> egui::Vec2 {
+    egui::vec2(
+        TAB_PLUS_BUTTON_WIDTH,
+        (text_height + TAB_VERTICAL_EXTRA_HEIGHT).max(min_interact_height),
+    )
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum WindowControlIcon {

@@ -165,6 +165,20 @@ fn main_window_drag_area_avoids_resize_edges() {
 }
 
 #[test]
+fn new_tab_button_size_tracks_tab_text_and_click_target() {
+    use super::window_frame::{
+        TAB_PLUS_BUTTON_WIDTH, TAB_VERTICAL_EXTRA_HEIGHT, new_tab_button_size,
+    };
+
+    let compact = new_tab_button_size(14.0, 20.0);
+    assert_eq!(compact.x, TAB_PLUS_BUTTON_WIDTH);
+    assert_eq!(compact.y, 20.0);
+
+    let larger_font = new_tab_button_size(18.0, 20.0);
+    assert_eq!(larger_font.y, 18.0 + TAB_VERTICAL_EXTRA_HEIGHT);
+}
+
+#[test]
 fn tab_drag_preview_converts_negative_screen_coordinates_and_preserves_drop_slots() {
     use super::tab_drag_preview::{
         preview_window_position, screen_position_to_viewport, tab_drop_slot_at,
