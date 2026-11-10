@@ -1,3 +1,88 @@
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ZipCompressionMethod {
+    Store,
+    Deflate,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ZipCompressionLevel {
+    Fast,
+    Standard,
+    Maximum,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ZipExistingBehavior {
+    AddSuffix,
+    Replace,
+    Ask,
+}
+
+#[derive(Clone, Debug)]
+pub struct ZipCreateOptions {
+    pub source_root: std::path::PathBuf,
+    pub destination: std::path::PathBuf,
+    pub archive_name: String,
+    pub compression_method: ZipCompressionMethod,
+    pub compression_level: ZipCompressionLevel,
+    pub preserve_folder_structure: bool,
+    pub existing_behavior: ZipExistingBehavior,
+}
+
+pub fn normalize_zip_archive_name(name: &str) -> Result<String, std::io::Error> {
+    let name = name.trim();
+    let has_zip_extension = name
+        .get(name.len().saturating_sub(4)..)
+        .is_some_and(|suffix| suffix.eq_ignore_ascii_case(".zip"));
+    let stem = if has_zip_extension {
+        &name[..name.len() - 4]
+    } else {
+        name
+    };
+    if !valid_zip_archive_stem(stem) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "invalid ZIP archive filename",
+        ));
+    }
+    Ok(format!("{stem}.zip"))
+}
+
+fn valid_zip_archive_stem(stem: &str) -> bool {
+    if stem.is_empty()
+        || stem == "."
+        || stem == ".."
+        || stem.ends_with('.')
+        || stem.ends_with(' ')
+        || stem.chars().any(|ch| {
+            ch.is_control() || matches!(ch, '<' | '>' | '"' | '|' | '?' | '*' | '/' | '\\' | ':')
+        })
+    {
+        return false;
+    }
+
+    let device = stem
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches(|ch| ch == '.' || ch == ' ')
+        .to_ascii_uppercase();
+    !matches!(
+        device.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$" | "CLOCK$"
+    ) && !reserved_zip_numbered_device(&device, "COM")
+        && !reserved_zip_numbered_device(&device, "LPT")
+}
+
+fn reserved_zip_numbered_device(stem: &str, prefix: &str) -> bool {
+    stem.strip_prefix(prefix).is_some_and(|suffix| {
+        matches!(
+            suffix,
+            "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+        )
+    })
+}
+
 #[derive(Debug)]
 pub struct DecodedImage {
     pub width: u32,
@@ -163,7 +248,7 @@ mod stubs {
     }
     pub fn create_zip_archive(
         _sources: &[std::path::PathBuf],
-        _destination: &std::path::Path,
+        _options: &super::ZipCreateOptions,
     ) -> std::io::Result<std::path::PathBuf> {
         Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
@@ -211,4 +296,18 @@ pub(crate) use stubs::{
 
 pub(crate) fn ops_platform() -> crate::core::ops::OpsPlatform {
     crate::core::ops::OpsPlatform::new(free_space, recycle_bin, replace_file)
+}
+
+#[cfg(test)]
+mod zip_name_tests {
+    use super::normalize_zip_archive_name;
+
+    #[test]
+    fn normalizes_extension_and_rejects_invalid_archive_names() {
+        assert_eq!(normalize_zip_archive_name("report").unwrap(), "report.zip");
+        assert_eq!(normalize_zip_archive_name("report.ZIP").unwrap(), "report.zip");
+        for name in ["", " ", "../report", "C:report", "CON", "bad?name"] {
+            assert!(normalize_zip_archive_name(name).is_err(), "{name}");
+        }
+    }
 }

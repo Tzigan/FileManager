@@ -69,7 +69,6 @@ pub(crate) enum WorkerMsg {
     /// Завершилось создание ZIP-архива.
     ZipCreated {
         generation: u64,
-        tab_id: u64,
         destination: PathBuf,
         result: std::io::Result<PathBuf>,
     },
@@ -189,6 +188,7 @@ pub struct FileManagerApp {
     zip_busy: bool,
     zip_creating: bool,
     zip_message: Option<String>,
+    zip_create_dialog: Option<archive::ZipCreateDialog>,
     detached_tabs: HashMap<u64, window_frame::DetachedTabWindow>,
     tab_detach_error: Option<String>,
 
@@ -353,6 +353,7 @@ impl FileManagerApp {
             zip_busy: false,
             zip_creating: false,
             zip_message: None,
+            zip_create_dialog: None,
             detached_tabs: HashMap::new(),
             tab_detach_error: None,
             tabs: paths.into_iter().map(|p| { let mut t = Tab::new(p); t.pinned = pins.contains(&t.path); t }).collect(),
@@ -605,7 +606,6 @@ impl FileManagerApp {
                 }
                 WorkerMsg::ZipCreated {
                     generation,
-                    tab_id,
                     destination,
                     result,
                 } => {
@@ -614,9 +614,10 @@ impl FileManagerApp {
                     }
                     self.zip_busy = false;
                     if result.is_ok()
-                        && let Some(index) = self.tabs.iter().position(|tab| tab.id == tab_id)
-                        && self.tabs[index].path == destination
-                        && self.tabs[index].archive_prefix.is_none()
+                        && let Some(index) = self
+                            .tabs
+                            .iter()
+                            .position(|tab| tab.path == destination && tab.archive_prefix.is_none())
                     {
                         self.navigate_fresh(index, ctx);
                     }

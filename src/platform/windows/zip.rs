@@ -6,12 +6,15 @@ use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use ::windows::Win32::Storage::FileSystem::MoveFileW;
+use ::windows::Win32::Storage::FileSystem::{MOVEFILE_REPLACE_EXISTING, MoveFileExW, MoveFileW};
 use ::windows::core::{Error as WindowsError, PCWSTR};
 
 use crate::core::fs::FileEntry;
 use crate::core::fs::ReadDirError;
 use crate::core::search::{self, SearchOptions};
+use crate::platform::{
+    ZipCompressionLevel, ZipCompressionMethod, ZipCreateOptions, ZipExistingBehavior,
+};
 use crate::system_tools::system_executable;
 use zip::CompressionMethod;
 use zip::write::{SimpleFileOptions, ZipWriter};
@@ -454,7 +457,7 @@ pub fn extract_zip_all(archive: &Path, destination: &Path) -> io::Result<PathBuf
     extract_tree(archive, &members, None, destination, &output)
 }
 
-pub fn create_zip_archive(sources: &[PathBuf], destination: &Path) -> io::Result<PathBuf> {
+pub fn create_zip_archive(sources: &[PathBuf], options: &ZipCreateOptions) -> io::Result<PathBuf> {
     if sources.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -462,17 +465,30 @@ pub fn create_zip_archive(sources: &[PathBuf], destination: &Path) -> io::Result
         ));
     }
 
-    let display_root = destination.to_path_buf();
-    let root = fs::canonicalize(destination)?;
-    if !root.is_dir() {
+    let source_root = fs::canonicalize(&options.source_root)?;
+    let display_destination = options.destination.clone();
+    let destination = fs::canonicalize(&display_destination)?;
+    if !source_root.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "archive source folder is not a directory",
+        ));
+    }
+    if !destination.is_dir() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "archive destination is not a directory",
         ));
     }
-    let archive_stem = zip_archive_stem(sources)?;
+    let archive_filename = crate::platform::normalize_zip_archive_name(&options.archive_name)?;
+    let archive_stem = archive_filename.strip_suffix(".zip").ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid normalized archive name",
+        )
+    })?;
     let mut entries = Vec::with_capacity(sources.len());
-    let mut selected_names = HashSet::new();
+    let mut selected_paths = HashSet::new();
     for source in sources {
         let metadata = fs::symlink_metadata(source)?;
         if metadata.file_type().is_symlink() {
@@ -482,14 +498,26 @@ pub fn create_zip_archive(sources: &[PathBuf], destination: &Path) -> io::Result
             ));
         }
         let canonical_source = fs::canonicalize(source)?;
-        let relative = canonical_source.strip_prefix(&root).map_err(|_| {
+        let relative = canonical_source.strip_prefix(&source_root).map_err(|_| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "selected item is outside the current folder",
             )
         })?;
-        let member = zip_member_name(relative, metadata.is_dir())?;
-        if selected_names.insert(member.clone()) {
+        if metadata.is_dir() && destination.starts_with(&canonical_source) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "archive destination is inside a selected folder",
+            ));
+        }
+        let member = if options.preserve_folder_structure {
+            zip_member_name(relative, metadata.is_dir())?
+        } else if metadata.is_dir() {
+            String::new()
+        } else {
+            zip_flat_file_name(&canonical_source)?
+        };
+        if selected_paths.insert(canonical_source.clone()) {
             entries.push((canonical_source, member));
         }
     }
@@ -500,8 +528,8 @@ pub fn create_zip_archive(sources: &[PathBuf], destination: &Path) -> io::Result
         ));
     }
 
-    // Сначала собираем архив отдельно, затем переносим его без перезаписи.
-    let stage = create_stage_dir(&root)?;
+    // Сначала собираем архив отдельно, затем применяем выбранное поведение при совпадении имени.
+    let stage = create_stage_dir(&destination)?;
     let staged_archive = stage.join("archive.zip");
     let result = (|| {
         let file = OpenOptions::new()
@@ -509,26 +537,51 @@ pub fn create_zip_archive(sources: &[PathBuf], destination: &Path) -> io::Result
             .create_new(true)
             .open(&staged_archive)?;
         let mut writer = ZipWriter::new(file);
-        let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+        let zip_options = zip_compression_options(options);
         let mut total_bytes = 0u64;
         let mut total_name_bytes = 0u64;
         let mut member_count = 0usize;
+        let mut files_written = 0usize;
+        let mut seen_files = HashSet::new();
         for (source, member) in &entries {
             write_zip_path(
                 &mut writer,
-                &root,
+                &source_root,
                 source,
                 member,
-                options,
+                zip_options,
+                options.preserve_folder_structure,
                 &mut total_bytes,
                 &mut total_name_bytes,
                 &mut member_count,
+                &mut files_written,
+                &mut seen_files,
             )?;
+        }
+        if !options.preserve_folder_structure && files_written == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "selection contains no files",
+            ));
         }
         let archive_file = writer.finish().map_err(zip_writer_error)?;
         archive_file.sync_all()?;
         drop(archive_file);
-        move_zip_to_unique_name(&staged_archive, &root, &archive_stem)
+        match options.existing_behavior {
+            ZipExistingBehavior::AddSuffix => {
+                move_zip_to_unique_name(&staged_archive, &destination, archive_stem)
+            }
+            ZipExistingBehavior::Replace => {
+                let target = destination.join(&archive_filename);
+                move_file_replace(&staged_archive, &target)?;
+                Ok(target)
+            }
+            ZipExistingBehavior::Ask => {
+                let target = destination.join(&archive_filename);
+                move_file_no_replace(&staged_archive, &target)?;
+                Ok(target)
+            }
+        }
     })();
     let _ = fs::remove_dir_all(&stage);
     result.and_then(|path| {
@@ -538,34 +591,24 @@ pub fn create_zip_archive(sources: &[PathBuf], destination: &Path) -> io::Result
                 "created archive has no filename",
             )
         })?;
-        Ok(display_root.join(name))
+        Ok(display_destination.join(name))
     })
 }
 
-fn zip_archive_stem(sources: &[PathBuf]) -> io::Result<String> {
-    if sources.len() != 1 {
-        return Ok("archive".to_owned());
-    }
-    let source = &sources[0];
-    let metadata = fs::symlink_metadata(source)?;
-    let name = if metadata.is_dir() {
-        source.file_name()
-    } else {
-        source.file_stem().or_else(|| source.file_name())
-    }
-    .and_then(|name| name.to_str())
-    .filter(|name| !name.is_empty())
-    .ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "filename encoding is unsupported",
-        )
-    })?;
-    Ok(if valid_component(name) {
-        name.to_owned()
-    } else {
-        "archive".to_owned()
-    })
+fn zip_compression_options(options: &ZipCreateOptions) -> SimpleFileOptions {
+    let method = match options.compression_method {
+        ZipCompressionMethod::Store => CompressionMethod::Stored,
+        ZipCompressionMethod::Deflate => CompressionMethod::Deflated,
+    };
+    let level = match (options.compression_method, options.compression_level) {
+        (ZipCompressionMethod::Store, _) => None,
+        (ZipCompressionMethod::Deflate, ZipCompressionLevel::Fast) => Some(1),
+        (ZipCompressionMethod::Deflate, ZipCompressionLevel::Standard) => Some(6),
+        (ZipCompressionMethod::Deflate, ZipCompressionLevel::Maximum) => Some(9),
+    };
+    SimpleFileOptions::default()
+        .compression_method(method)
+        .compression_level(level)
 }
 
 fn zip_member_name(relative: &Path, is_dir: bool) -> io::Result<String> {
@@ -599,15 +642,32 @@ fn zip_member_name(relative: &Path, is_dir: bool) -> io::Result<String> {
     })
 }
 
+fn zip_flat_file_name(path: &Path) -> io::Result<String> {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| valid_component(name))
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "filename encoding or component is unsupported",
+            )
+        })?;
+    Ok(name.to_owned())
+}
+
 fn write_zip_path<W: Write + Seek>(
     writer: &mut ZipWriter<W>,
     root: &Path,
     path: &Path,
     member: &str,
     options: SimpleFileOptions,
+    preserve_folder_structure: bool,
     total_bytes: &mut u64,
     total_name_bytes: &mut u64,
     member_count: &mut usize,
+    files_written: &mut usize,
+    seen_files: &mut HashSet<String>,
 ) -> io::Result<()> {
     let metadata = fs::symlink_metadata(path)?;
     let file_type = metadata.file_type();
@@ -643,14 +703,16 @@ fn write_zip_path<W: Write + Seek>(
         })?;
 
     if metadata.is_dir() {
-        let directory_name = if member.ends_with('/') {
-            member.to_owned()
-        } else {
-            format!("{member}/")
-        };
-        writer
-            .add_directory(directory_name, options)
-            .map_err(zip_writer_error)?;
+        if preserve_folder_structure && !member.is_empty() {
+            let directory_name = if member.ends_with('/') {
+                member.to_owned()
+            } else {
+                format!("{member}/")
+            };
+            writer
+                .add_directory(directory_name, options)
+                .map_err(zip_writer_error)?;
+        }
         for child in fs::read_dir(&canonical_path)? {
             let child = child?;
             let child_path = child.path();
@@ -662,19 +724,40 @@ fn write_zip_path<W: Write + Seek>(
                     "folder contents are outside the current folder",
                 )
             })?;
-            let child_member = zip_member_name(child_relative, child_metadata.is_dir())?;
+            let child_member = if preserve_folder_structure {
+                zip_member_name(child_relative, child_metadata.is_dir())?
+            } else if child_metadata.is_dir() {
+                String::new()
+            } else {
+                zip_flat_file_name(&canonical_child)?
+            };
             write_zip_path(
                 writer,
                 root,
                 &canonical_child,
                 &child_member,
                 options,
+                preserve_folder_structure,
                 total_bytes,
                 total_name_bytes,
                 member_count,
+                files_written,
+                seen_files,
             )?;
         }
     } else if metadata.is_file() {
+        if member.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "file has no archive name",
+            ));
+        }
+        if !seen_files.insert(member.to_lowercase()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "archive would contain duplicate file names",
+            ));
+        }
         let file_options = zip_file_options(options, metadata.len());
         writer
             .start_file(member.trim_end_matches('/'), file_options)
@@ -686,6 +769,7 @@ fn write_zip_path<W: Write + Seek>(
             total_bytes,
             "selected content exceeds the ZIP size limit",
         )?;
+        *files_written = files_written.saturating_add(1);
     } else {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -828,7 +912,7 @@ fn move_directory_no_replace(source: &Path, destination: &Path) -> io::Result<()
             PCWSTR(destination_wide.as_ptr()),
         )
     }
-    .map_err(|error| move_error_to_io(error, destination))
+    .map_err(|error| move_error_to_io(error, destination, true))
 }
 
 fn move_file_no_replace(source: &Path, destination: &Path) -> io::Result<()> {
@@ -840,11 +924,28 @@ fn move_file_no_replace(source: &Path, destination: &Path) -> io::Result<()> {
             PCWSTR(destination_wide.as_ptr()),
         )
     }
-    .map_err(|error| move_error_to_io(error, destination))
+    .map_err(|error| move_error_to_io(error, destination, true))
 }
 
-fn move_error_to_io(error: WindowsError, destination: &Path) -> io::Error {
-    if fs::symlink_metadata(destination).is_ok() {
+fn move_file_replace(source: &Path, destination: &Path) -> io::Result<()> {
+    let source_wide: Vec<u16> = source.as_os_str().encode_wide().chain([0]).collect();
+    let destination_wide: Vec<u16> = destination.as_os_str().encode_wide().chain([0]).collect();
+    unsafe {
+        MoveFileExW(
+            PCWSTR(source_wide.as_ptr()),
+            PCWSTR(destination_wide.as_ptr()),
+            MOVEFILE_REPLACE_EXISTING,
+        )
+    }
+    .map_err(|error| move_error_to_io(error, destination, false))
+}
+
+fn move_error_to_io(
+    error: WindowsError,
+    destination: &Path,
+    collision_is_error: bool,
+) -> io::Error {
+    if collision_is_error && fs::symlink_metadata(destination).is_ok() {
         return io::Error::new(io::ErrorKind::AlreadyExists, "destination already exists");
     }
 
@@ -1059,6 +1160,42 @@ mod tests {
         path
     }
 
+    fn create_options(root: &Path, name: &str) -> ZipCreateOptions {
+        ZipCreateOptions {
+            source_root: root.to_path_buf(),
+            destination: root.to_path_buf(),
+            archive_name: name.to_owned(),
+            compression_method: ZipCompressionMethod::Deflate,
+            compression_level: ZipCompressionLevel::Standard,
+            preserve_folder_structure: true,
+            existing_behavior: ZipExistingBehavior::AddSuffix,
+        }
+    }
+
+    #[test]
+    fn compression_presets_map_to_supported_deflate_levels() {
+        let mut options = create_options(Path::new("."), "test");
+        assert_eq!(
+            zip_compression_options(&options).get_compression_level(),
+            Some(6)
+        );
+        options.compression_level = ZipCompressionLevel::Fast;
+        assert_eq!(
+            zip_compression_options(&options).get_compression_level(),
+            Some(1)
+        );
+        options.compression_level = ZipCompressionLevel::Maximum;
+        assert_eq!(
+            zip_compression_options(&options).get_compression_level(),
+            Some(9)
+        );
+        options.compression_method = ZipCompressionMethod::Store;
+        assert_eq!(
+            zip_compression_options(&options).get_compression_level(),
+            None
+        );
+    }
+
     #[test]
     fn rejects_traversal_and_windows_device_paths() {
         assert!(normalize_member("../outside.txt").is_err());
@@ -1166,7 +1303,11 @@ mod tests {
         fs::write(&second_file, b"second selected file").unwrap();
         fs::write(folder.join("nested").join("payload.bin"), b"nested file").unwrap();
 
-        let file_archive = create_zip_archive(std::slice::from_ref(&file), &root).unwrap();
+        let file_archive = create_zip_archive(
+            std::slice::from_ref(&file),
+            &create_options(&root, "readme"),
+        )
+        .unwrap();
         assert_eq!(
             file_archive.file_name().and_then(|name| name.to_str()),
             Some("readme.zip")
@@ -1178,7 +1319,11 @@ mod tests {
                 .any(|entry| entry.name == "readme.txt" && !entry.is_dir)
         );
 
-        let folder_archive = create_zip_archive(std::slice::from_ref(&folder), &root).unwrap();
+        let folder_archive = create_zip_archive(
+            std::slice::from_ref(&folder),
+            &create_options(&root, "folder"),
+        )
+        .unwrap();
         assert_eq!(
             folder_archive.file_name().and_then(|name| name.to_str()),
             Some("folder.zip")
@@ -1196,7 +1341,7 @@ mod tests {
             folder.clone(),
             second_folder.clone(),
         ];
-        let archive = create_zip_archive(&sources, &root).unwrap();
+        let archive = create_zip_archive(&sources, &create_options(&root, "archive")).unwrap();
         assert_eq!(
             archive.file_name().and_then(|name| name.to_str()),
             Some("archive.zip")
@@ -1229,12 +1374,104 @@ mod tests {
             b"second selected file"
         );
 
-        let second_archive = create_zip_archive(&sources, &root).unwrap();
+        let second_archive =
+            create_zip_archive(&sources, &create_options(&root, "archive")).unwrap();
         assert_eq!(
             second_archive.file_name().and_then(|name| name.to_str()),
             Some("archive (2).zip")
         );
         assert!(read_zip_dir(&archive, "").is_ok());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn zip_options_use_custom_destination_method_and_conflict_behavior() {
+        let root = temp_dir();
+        let source_root = root.join("source");
+        let destination = root.join("archives");
+        fs::create_dir_all(&source_root).unwrap();
+        fs::create_dir_all(&destination).unwrap();
+        let file = source_root.join("payload.txt");
+        fs::write(&file, b"first content").unwrap();
+
+        let mut options = create_options(&source_root, "custom-name");
+        options.destination = destination.clone();
+        options.compression_method = ZipCompressionMethod::Store;
+        let archive = create_zip_archive(std::slice::from_ref(&file), &options).unwrap();
+        assert_eq!(
+            archive.file_name().and_then(|name| name.to_str()),
+            Some("custom-name.zip")
+        );
+        assert_eq!(archive.parent().unwrap(), destination.as_path());
+        {
+            let mut zip = zip::ZipArchive::new(fs::File::open(&archive).unwrap()).unwrap();
+            assert_eq!(
+                zip.by_name("payload.txt").unwrap().compression(),
+                CompressionMethod::Stored
+            );
+        }
+
+        fs::write(&file, b"replacement content").unwrap();
+        options.existing_behavior = ZipExistingBehavior::Replace;
+        assert_eq!(
+            create_zip_archive(std::slice::from_ref(&file), &options).unwrap(),
+            archive
+        );
+        {
+            let mut zip = zip::ZipArchive::new(fs::File::open(&archive).unwrap()).unwrap();
+            let mut content = Vec::new();
+            zip.by_name("payload.txt")
+                .unwrap()
+                .read_to_end(&mut content)
+                .unwrap();
+            assert_eq!(content, b"replacement content");
+        }
+
+        options.existing_behavior = ZipExistingBehavior::Ask;
+        assert_eq!(
+            create_zip_archive(std::slice::from_ref(&file), &options)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn flattening_keeps_only_files_and_rejects_duplicate_names() {
+        let root = temp_dir();
+        let source_root = root.join("source");
+        let destination = root.join("archives");
+        let first = source_root.join("first").join("nested");
+        let second = source_root.join("second");
+        fs::create_dir_all(&first).unwrap();
+        fs::create_dir_all(&second).unwrap();
+        fs::create_dir_all(&destination).unwrap();
+        let first_file = first.join("same.txt");
+        let second_file = second.join("same.txt");
+        fs::write(&first_file, b"first").unwrap();
+        fs::write(&second_file, b"second").unwrap();
+
+        let mut options = create_options(&source_root, "flat");
+        options.destination = destination.clone();
+        options.preserve_folder_structure = false;
+        let error = create_zip_archive(
+            &[source_root.join("first"), source_root.join("second")],
+            &options,
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(!destination.join("flat.zip").exists());
+
+        options.archive_name = "flattened".to_owned();
+        let archive = create_zip_archive(std::slice::from_ref(&first_file), &options).unwrap();
+        let entries = read_zip_dir(&archive, "").unwrap();
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.name == "same.txt" && !entry.is_dir)
+        );
+        assert!(!entries.iter().any(|entry| entry.name.contains('/')));
         fs::remove_dir_all(root).unwrap();
     }
 
