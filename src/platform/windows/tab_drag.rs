@@ -1,4 +1,8 @@
 use windows::Win32::Foundation::{HWND, POINT};
+use windows::Win32::Graphics::Gdi::{
+    GetMonitorInfoW, HMONITOR, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint,
+};
+use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, GetCapture, ReleaseCapture, SetCapture, VK_ESCAPE, VK_LBUTTON,
 };
@@ -20,6 +24,11 @@ impl TabDragPreviewWindow {
 
     pub(crate) fn is_valid(&self) -> bool {
         unsafe { IsWindow(Some(self.0)).as_bool() }
+    }
+
+    pub(crate) fn native_pixels_per_point(&self) -> Option<f32> {
+        let dpi = unsafe { GetDpiForWindow(self.0) };
+        (dpi > 0).then_some(dpi as f32 / 96.0)
     }
 
     pub(crate) fn set_position(&self, x: i32, y: i32) -> bool {
@@ -61,6 +70,37 @@ pub(crate) fn cursor_screen_position() -> Option<(i32, i32)> {
         GetCursorPos(&mut point).ok()?;
     }
     Some((point.x, point.y))
+}
+
+pub(crate) fn monitor_work_area_at_screen_position(
+    screen_position: (i32, i32),
+) -> Option<(i32, i32, i32, i32)> {
+    let monitor = unsafe {
+        MonitorFromPoint(
+            POINT {
+                x: screen_position.0,
+                y: screen_position.1,
+            },
+            MONITOR_DEFAULTTONEAREST,
+        )
+    };
+    if monitor == HMONITOR::default() {
+        return None;
+    }
+
+    let mut info = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    if !unsafe { GetMonitorInfoW(monitor, &mut info).as_bool() } {
+        return None;
+    }
+    Some((
+        info.rcWork.left,
+        info.rcWork.top,
+        info.rcWork.right,
+        info.rcWork.bottom,
+    ))
 }
 
 pub(crate) fn left_mouse_button_down() -> bool {

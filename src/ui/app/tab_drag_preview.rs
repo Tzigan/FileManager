@@ -6,6 +6,8 @@ const TAB_DRAG_PREVIEW_TITLE_PREFIX: &str = "FileManager Tab Drag Preview";
 const TAB_DRAG_PREVIEW_SIZE: egui::Vec2 = egui::vec2(260.0, 52.0);
 const TAB_DRAG_PREVIEW_CREATE_RETRIES: u8 = 3;
 const TAB_DRAG_PREVIEW_REPAINT_MS: u64 = 16;
+pub(super) const DETACHED_WINDOW_RELEASE_OFFSET_POINTS: f32 = 8.0;
+const DETACHED_WINDOW_EDGE_MARGIN_POINTS: f32 = 8.0;
 static NEXT_TAB_DRAG_PREVIEW_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Default)]
@@ -17,6 +19,7 @@ pub(super) struct TabDragPreviewState {
     placed: bool,
     captured: bool,
     create_retries: u8,
+    last_pixels_per_point: Option<f32>,
     frame_rect: Option<egui::Rect>,
     tab_rects: Vec<(usize, egui::Rect)>,
 }
@@ -116,6 +119,36 @@ pub(super) fn tab_drop_slot_at(
         })
 }
 
+pub(super) fn detached_window_position(
+    cursor_screen_position: (i32, i32),
+    pixels_per_point: f32,
+    window_size_points: egui::Vec2,
+    work_area: (i32, i32, i32, i32),
+) -> (i32, i32) {
+    let pixels_per_point = pixels_per_point.max(f32::EPSILON);
+    let edge_margin = (DETACHED_WINDOW_EDGE_MARGIN_POINTS * pixels_per_point).round() as i32;
+    let width = (window_size_points.x * pixels_per_point).ceil() as i32;
+    let height = (window_size_points.y * pixels_per_point).ceil() as i32;
+    let left = work_area.0.saturating_add(edge_margin);
+    let top = work_area.1.saturating_add(edge_margin);
+    let right = work_area.2.saturating_sub(edge_margin);
+    let bottom = work_area.3.saturating_sub(edge_margin);
+    let max_x = right.saturating_sub(width).max(left);
+    let max_y = bottom.saturating_sub(height).max(top);
+    let offset = (DETACHED_WINDOW_RELEASE_OFFSET_POINTS * pixels_per_point).round() as i32;
+
+    (
+        cursor_screen_position
+            .0
+            .saturating_add(offset)
+            .clamp(left, max_x),
+        cursor_screen_position
+            .1
+            .saturating_add(offset)
+            .clamp(top, max_y),
+    )
+}
+
 impl FileManagerApp {
     pub(super) fn show_tab_drag_preview(&mut self, ctx: &egui::Context) {
         let Some(tab_id) = self.tab_drag_preview.tab_id else {
@@ -150,10 +183,6 @@ impl FileManagerApp {
         let button_down = crate::platform::left_mouse_button_down()
             || (!self.tab_drag_preview.captured
                 && ctx.input(|input| input.pointer.button_down(egui::PointerButton::Primary)));
-        if !button_down {
-            self.finish_tab_drag(ctx, tab_id, cursor_screen_position);
-            return;
-        }
 
         let root_pixels_per_point = ctx.pixels_per_point();
         let cursor_offset = egui::vec2(
@@ -183,8 +212,12 @@ impl FileManagerApp {
         let state = &mut self.tab_drag_preview;
         let mut callback_ran = false;
         let mut preview_failed = false;
-        ctx.show_viewport_immediate(viewport_id, builder, |preview_ui, _class| {
+        ctx.show_viewport_immediate(viewport_id, builder, |preview_ui, class| {
             callback_ran = true;
+            if class == egui::ViewportClass::EmbeddedWindow {
+                preview_failed = true;
+                return;
+            }
             let preview_ctx = preview_ui.ctx().clone();
             if preview_ctx.input(|input| input.viewport().close_requested()) {
                 preview_ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -198,7 +231,7 @@ impl FileManagerApp {
                 .or_else(|| crate::platform::TabDragPreviewWindow::find(&window_title));
             if let Some(window) = window {
                 state.window = Some(window);
-                if !state.captured || !window.owns_mouse_capture() {
+                if button_down && (!state.captured || !window.owns_mouse_capture()) {
                     if !window.capture_mouse() {
                         preview_failed = true;
                         return;
@@ -206,12 +239,26 @@ impl FileManagerApp {
                     state.captured = true;
                 }
 
-                let position = preview_window_position(
+                let initial_position = preview_window_position(
                     cursor_screen_position,
                     cursor_offset,
                     preview_ctx.pixels_per_point(),
                 );
-                if !window.set_position(position.0, position.1) {
+                if !window.set_position(initial_position.0, initial_position.1) {
+                    preview_failed = true;
+                    return;
+                }
+                let pixels_per_point = window
+                    .native_pixels_per_point()
+                    .map(|native| native * preview_ctx.zoom_factor())
+                    .unwrap_or_else(|| preview_ctx.pixels_per_point());
+                state.last_pixels_per_point = Some(pixels_per_point);
+                let position = preview_window_position(
+                    cursor_screen_position,
+                    cursor_offset,
+                    pixels_per_point,
+                );
+                if position != initial_position && !window.set_position(position.0, position.1) {
                     preview_failed = true;
                     return;
                 }
@@ -258,6 +305,23 @@ impl FileManagerApp {
             self.cancel_tab_drag_preview(ctx);
             return;
         }
+        let button_still_down = crate::platform::left_mouse_button_down()
+            || (!self.tab_drag_preview.captured
+                && ctx.input(|input| input.pointer.button_down(egui::PointerButton::Primary)));
+        if !button_still_down {
+            if self.tab_drag_preview.window.is_none() {
+                self.cancel_tab_drag_preview(ctx);
+                return;
+            }
+            let release_position =
+                crate::platform::cursor_screen_position().unwrap_or(cursor_screen_position);
+            let pixels_per_point = self
+                .tab_drag_preview
+                .last_pixels_per_point
+                .unwrap_or_else(|| ctx.pixels_per_point());
+            self.finish_tab_drag(ctx, tab_id, release_position, pixels_per_point);
+            return;
+        }
         ctx.request_repaint_after(Duration::from_millis(TAB_DRAG_PREVIEW_REPAINT_MS));
     }
 
@@ -266,6 +330,7 @@ impl FileManagerApp {
         ctx: &egui::Context,
         tab_id: u64,
         cursor_screen_position: (i32, i32),
+        pixels_per_point: f32,
     ) {
         let Some(inner_rect) = ctx.input(|input| input.viewport().inner_rect) else {
             self.cancel_tab_drag_preview(ctx);
@@ -287,7 +352,23 @@ impl FileManagerApp {
                 self.move_visible_tab(source, drop_slot);
             }
         } else {
-            self.request_detach_tab(tab_id);
+            let Some(work_area) =
+                crate::platform::monitor_work_area_at_screen_position(cursor_screen_position)
+            else {
+                self.tab_detach_error = Some(self.t("tab.detach_failed").to_owned());
+                self.clear_tab_drag_preview(ctx);
+                return;
+            };
+            let position = detached_window_position(
+                cursor_screen_position,
+                pixels_per_point,
+                egui::vec2(
+                    super::window_frame::DETACHED_WINDOW_INNER_SIZE[0],
+                    super::window_frame::DETACHED_WINDOW_INNER_SIZE[1],
+                ),
+                work_area,
+            );
+            self.request_detach_tab(tab_id, position, pixels_per_point);
         }
         self.clear_tab_drag_preview(ctx);
     }

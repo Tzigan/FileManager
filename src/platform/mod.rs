@@ -14,6 +14,7 @@ pub use self::windows::{acquire_single_instance, decode_image, drives, extract_z
 #[cfg(windows)]
 pub(crate) use self::windows::{
     TabDragPreviewWindow, cursor_screen_position, escape_key_down, left_mouse_button_down,
+    monitor_work_area_at_screen_position,
 };
 
 /// Stubs for non-Windows hosts so the crate still compiles for docs/tests.
@@ -29,6 +30,10 @@ mod stubs {
 
         pub(crate) fn is_valid(&self) -> bool {
             false
+        }
+
+        pub(crate) fn native_pixels_per_point(&self) -> Option<f32> {
+            None
         }
 
         pub(crate) fn set_position(&self, _x: i32, _y: i32) -> bool {
@@ -56,6 +61,12 @@ mod stubs {
 
     pub(crate) fn escape_key_down() -> bool {
         false
+    }
+
+    pub(crate) fn monitor_work_area_at_screen_position(
+        _screen_position: (i32, i32),
+    ) -> Option<(i32, i32, i32, i32)> {
+        None
     }
 
     pub enum AcquireResult {
@@ -186,6 +197,7 @@ pub use stubs::{acquire_single_instance, decode_image, drives, extract_zip_all, 
 #[cfg(not(windows))]
 pub(crate) use stubs::{
     TabDragPreviewWindow, cursor_screen_position, escape_key_down, left_mouse_button_down,
+    monitor_work_area_at_screen_position,
 };
 
 pub(crate) fn ops_platform() -> crate::core::ops::OpsPlatform {
