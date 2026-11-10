@@ -144,6 +144,27 @@ fn window_frame_maps_resize_edges_and_drop_targets() {
 }
 
 #[test]
+fn main_window_drag_area_avoids_resize_edges() {
+    use super::window_frame::{
+        MAIN_WINDOW_DRAG_AREA_MIN_WIDTH, WINDOW_DRAG_AREA_MIN_WIDTH, WINDOW_FRAME_HEIGHT,
+        WINDOW_RESIZE_HANDLE_WIDTH, main_window_drag_hit_rect,
+    };
+
+    let frame = egui::Rect::from_min_size(
+        egui::pos2(-400.0, -200.0),
+        egui::vec2(640.0, WINDOW_FRAME_HEIGHT),
+    );
+    let drag_area = main_window_drag_hit_rect(frame);
+
+    assert_eq!(drag_area.left(), frame.left());
+    assert_eq!(drag_area.right(), frame.right());
+    assert!(drag_area.top() > frame.top() + WINDOW_RESIZE_HANDLE_WIDTH);
+    assert!(drag_area.bottom() < frame.bottom() - WINDOW_RESIZE_HANDLE_WIDTH);
+    assert!(drag_area.contains(frame.center()));
+    assert!(MAIN_WINDOW_DRAG_AREA_MIN_WIDTH > WINDOW_DRAG_AREA_MIN_WIDTH);
+}
+
+#[test]
 fn tab_drag_preview_converts_negative_screen_coordinates_and_preserves_drop_slots() {
     use super::tab_drag_preview::{
         preview_window_position, screen_position_to_viewport, tab_drop_slot_at,

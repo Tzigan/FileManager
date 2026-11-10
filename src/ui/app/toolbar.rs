@@ -112,7 +112,7 @@ impl FileManagerApp {
             let spacing = ui.spacing().item_spacing.x;
             let scroll_width = (ui.available_width()
                 - super::window_frame::WINDOW_CONTROLS_WIDTH
-                - super::window_frame::WINDOW_DRAG_AREA_MIN_WIDTH
+                - super::window_frame::MAIN_WINDOW_DRAG_AREA_MIN_WIDTH
                 - super::window_frame::TAB_PLUS_AREA_WIDTH
                 - spacing * 3.0)
                 .max(1.0);
@@ -328,14 +328,20 @@ impl FileManagerApp {
             let drag_width =
                 (ui.available_width() - super::window_frame::WINDOW_CONTROLS_WIDTH - spacing)
                     .max(0.0);
-            let (_, drag_response) = ui.allocate_exact_size(
-                egui::vec2(drag_width, super::window_frame::WINDOW_FRAME_HEIGHT),
+            // Здесь остаётся пустое место между вкладками и кнопками рамки.
+            let (drag_id, drag_rect) = ui.allocate_space(egui::vec2(
+                drag_width,
+                super::window_frame::WINDOW_FRAME_HEIGHT,
+            ));
+            let drag_response = ui.interact(
+                super::window_frame::main_window_drag_hit_rect(drag_rect),
+                drag_id,
                 egui::Sense::click_and_drag(),
             );
-            if drag_response.drag_started() {
+            if drag_response.drag_started_by(egui::PointerButton::Primary) {
                 ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
             }
-            if drag_response.double_clicked() {
+            if drag_response.double_clicked_by(egui::PointerButton::Primary) {
                 super::window_frame::toggle_maximized(ctx);
             }
             self.window_controls(ctx, ui);
