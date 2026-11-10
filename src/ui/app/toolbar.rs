@@ -406,7 +406,7 @@ impl FileManagerApp {
         if matches!(
             self.tab_drag_state,
             super::tab_drag_preview::TabDragState::Cancelled
-        ) && !primary_button_down(ctx)
+        ) && !primary_button_held(ctx)
         {
             self.tab_drag_state = super::tab_drag_preview::TabDragState::Idle;
         }
@@ -436,7 +436,7 @@ impl FileManagerApp {
         let next = super::tab_drag_preview::advance_tab_drag_state(
             self.tab_drag_state,
             current_screen_position(ctx),
-            primary_button_down(ctx),
+            primary_button_held(ctx),
             escape_pressed,
         );
         if let super::tab_drag_preview::TabDragState::Dragging { tab_id } = next {
@@ -620,7 +620,10 @@ fn current_screen_position(ctx: &egui::Context) -> Option<(i32, i32)> {
     })
 }
 
-fn primary_button_down(ctx: &egui::Context) -> bool {
-    crate::platform::left_mouse_button_down()
-        || ctx.input(|input| input.pointer.button_down(egui::PointerButton::Primary))
+fn primary_button_held(ctx: &egui::Context) -> bool {
+    if crate::platform::cursor_screen_position().is_some() {
+        crate::platform::left_mouse_button_down()
+    } else {
+        ctx.input(|input| input.pointer.button_down(egui::PointerButton::Primary))
+    }
 }

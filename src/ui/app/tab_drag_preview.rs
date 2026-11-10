@@ -273,7 +273,7 @@ impl FileManagerApp {
         };
         let button_down = crate::platform::left_mouse_button_down()
             || (!self.tab_drag_preview.captured
-                && ctx.input(|input| input.pointer.button_down(egui::PointerButton::Primary)));
+                && ctx.input(|input| input.pointer.button_pressed(egui::PointerButton::Primary)));
 
         let root_pixels_per_point = ctx.pixels_per_point();
         let cursor_offset = egui::vec2(
@@ -396,9 +396,7 @@ impl FileManagerApp {
             self.cancel_tab_drag_preview(ctx);
             return;
         }
-        let button_still_down = crate::platform::left_mouse_button_down()
-            || (!self.tab_drag_preview.captured
-                && ctx.input(|input| input.pointer.button_down(egui::PointerButton::Primary)));
+        let button_still_down = crate::platform::left_mouse_button_down();
         if !button_still_down {
             if self.tab_drag_preview.window.is_none() {
                 self.cancel_tab_drag_preview(ctx);
