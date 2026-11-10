@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use crate::platform::DiskUsage;
 use crate::ui::icons;
 use crate::ui::style;
 
@@ -14,6 +15,8 @@ pub struct TreeState {
     pub expanded: HashSet<PathBuf>,
     pub children: HashMap<PathBuf, Vec<PathBuf>>,
     pub pending: HashSet<PathBuf>,
+    /// Кэш занятости корневых томов; строки дерева не читают системные данные сами.
+    pub disk_usage: HashMap<PathBuf, DiskUsage>,
 }
 
 impl TreeState {
@@ -23,6 +26,7 @@ impl TreeState {
             expanded: HashSet::new(),
             children: HashMap::new(),
             pending: HashSet::new(),
+            disk_usage: HashMap::new(),
         }
     }
 
@@ -135,6 +139,15 @@ impl crate::ui::FileManagerApp {
         let expanded = self.tree.expanded.contains(path);
         let kids = self.tree.children.get(path).cloned();
         let loading = self.tree.pending.contains(path);
+        // Неизвестную ёмкость скрываем; известное значение берём только из кэша.
+        let usage_percent = if depth == 0 {
+            self.tree
+                .disk_usage
+                .get(path)
+                .and_then(|usage| usage.used_percent())
+        } else {
+            None
+        };
         // Before the first load we optimistically assume the dir has children.
         let has_arrow = expanded || kids.as_deref().map(|k| !k.is_empty()).unwrap_or(true);
 
@@ -181,6 +194,14 @@ impl crate::ui::FileManagerApp {
                     ui.close();
                 }
             });
+            if let Some(percent) = usage_percent {
+                let right_reserved = if loading {
+                    ui.spacing().interact_size.x + ui.spacing().item_spacing.x
+                } else {
+                    0.0
+                };
+                disk_usage_indicator(ui, percent, right_reserved);
+            }
             if loading {
                 ui.spinner();
             }
@@ -206,6 +227,59 @@ impl crate::ui::FileManagerApp {
             }
         }
     }
+}
+
+fn disk_usage_indicator(ui: &mut egui::Ui, percent: u8, right_reserved: f32) {
+    // Полоса занимает остаток строки после имени и процента, не меняя высоту строки.
+    let label = format!("{percent}%");
+    let text_color = ui.visuals().weak_text_color();
+    let font = egui::TextStyle::Small.resolve(ui.style());
+    let text_width = ui
+        .painter()
+        .layout_no_wrap(label.clone(), font, text_color)
+        .size()
+        .x;
+    let gap = style::SPACE_XXS;
+    let minimum_bar_width = style::SPACE_XXS;
+    let width = (ui.available_width() - right_reserved).max(0.0);
+    if width < text_width + gap + minimum_bar_width {
+        return;
+    }
+
+    ui.allocate_ui_with_layout(
+        egui::vec2(width, ui.spacing().interact_size.y),
+        egui::Layout::right_to_left(egui::Align::Center),
+        |ui| {
+            ui.spacing_mut().item_spacing.x = gap;
+            ui.label(
+                egui::RichText::new(label)
+                    .text_style(egui::TextStyle::Small)
+                    .color(text_color),
+            );
+            let track_width = ui.available_width();
+            if track_width < minimum_bar_width {
+                return;
+            }
+            let bar_height = style::SPACE_XS;
+            let (track, _) =
+                ui.allocate_exact_size(egui::vec2(track_width, bar_height), egui::Sense::hover());
+            let radius = egui::CornerRadius::same((bar_height / 2.0).round() as u8);
+            let visuals = ui.visuals();
+            ui.painter()
+                .rect_filled(track, radius, visuals.widgets.inactive.bg_fill);
+            if percent > 0 {
+                let fill = egui::Rect::from_min_max(
+                    track.min,
+                    egui::pos2(
+                        track.min.x + track.width() * percent as f32 / 100.0,
+                        track.max.y,
+                    ),
+                );
+                ui.painter()
+                    .rect_filled(fill, radius, visuals.selection.stroke.color);
+            }
+        },
+    );
 }
 
 

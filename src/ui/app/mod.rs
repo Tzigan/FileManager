@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, sync_channel, Receiver, Sender, SyncSender, TrySendError};
 use std::sync::Arc;
 use std::thread;
+use std::time::{Duration, Instant};
 
 use super::style;
 use crate::core::fs::{self, FileEntry, ReadDirError, SortKey};
@@ -25,10 +26,12 @@ use crate::core::preview::TextPreview;
 use crate::core::search::SearchValidationError;
 use crate::core::settings::{SettingsStore, Theme, ViewMode};
 use crate::core::update::UpdateManifest;
-use crate::platform::{drives, install_context_menu, pipe_listen, uninstall_context_menu};
+use crate::platform::{DiskUsage, drives, install_context_menu, pipe_listen, uninstall_context_menu};
 use crate::ui::opsui::OpsUi;
 use crate::ui::tabs::{ListStatus, Tab};
 use crate::ui::tree::TreeState;
+
+const DISK_USAGE_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Results produced by background worker threads.
 pub(crate) enum WorkerMsg {
@@ -76,6 +79,10 @@ pub(crate) enum WorkerMsg {
     TreeChildren {
         path: PathBuf,
         result: std::io::Result<Vec<PathBuf>>,
+    },
+    /// Обновились сведения о занятости томов.
+    DiskUsage {
+        values: HashMap<PathBuf, DiskUsage>,
     },
     /// A path forwarded by another instance / CLI — open in a new tab.
     OpenPath(PathBuf),
@@ -189,6 +196,9 @@ pub struct FileManagerApp {
     zip_creating: bool,
     zip_message: Option<String>,
     zip_create_dialog: Option<archive::ZipCreateDialog>,
+    disk_usage_tx: Sender<Vec<PathBuf>>,
+    disk_usage_loading: bool,
+    disk_usage_refresh_at: Instant,
     detached_tabs: HashMap<u64, window_frame::DetachedTabWindow>,
     tab_detach_error: Option<String>,
 
@@ -223,6 +233,7 @@ impl FileManagerApp {
     ) -> Self {
         let (msg_tx, msg_rx) = channel();
         let (tree_req, tree_req_rx) = channel::<PathBuf>();
+        let (disk_usage_tx, disk_usage_rx) = channel::<Vec<PathBuf>>();
         let (ops_tx, jobs_rx) = channel::<OpJob>();
         let (op_reply, reply_rx) = channel::<OpReply>();
         let (events_tx, ops_evt) = channel::<OpEvent>();
@@ -252,6 +263,26 @@ impl FileManagerApp {
                         })
                         .is_err()
                     {
+                        break;
+                    }
+                    ctx.request_repaint();
+                }
+            });
+        }
+
+        {
+            let msg_tx = msg_tx.clone();
+            let ctx = cc.egui_ctx.clone();
+            // Системные запросы к томам не выполняются во время отрисовки дерева.
+            thread::spawn(move || {
+                while let Ok(roots) = disk_usage_rx.recv() {
+                    let values = roots
+                        .into_iter()
+                        .filter_map(|root| {
+                            crate::platform::disk_usage(&root).map(|usage| (root, usage))
+                        })
+                        .collect();
+                    if msg_tx.send(WorkerMsg::DiskUsage { values }).is_err() {
                         break;
                     }
                     ctx.request_repaint();
@@ -354,6 +385,9 @@ impl FileManagerApp {
             zip_creating: false,
             zip_message: None,
             zip_create_dialog: None,
+            disk_usage_tx,
+            disk_usage_loading: false,
+            disk_usage_refresh_at: Instant::now(),
             detached_tabs: HashMap::new(),
             tab_detach_error: None,
             tabs: paths.into_iter().map(|p| { let mut t = Tab::new(p); t.pinned = pins.contains(&t.path); t }).collect(),
@@ -631,6 +665,11 @@ impl FileManagerApp {
                 WorkerMsg::TreeChildren { path, result } => {
                     self.tree.complete_children_load(path, result);
                 }
+                WorkerMsg::DiskUsage { values } => {
+                    self.tree.disk_usage = values;
+                    self.disk_usage_loading = false;
+                    self.disk_usage_refresh_at = Instant::now() + DISK_USAGE_REFRESH_INTERVAL;
+                }
                 WorkerMsg::OpenPath(path) => self.open_path_in_new_tab(path, ctx),
                 WorkerMsg::UpdateFound { manifest } => {
                     self.update_busy = false;
@@ -673,6 +712,26 @@ impl FileManagerApp {
                     self.update_err = Some(self.t("update.failed").to_owned());
                     ctx.request_repaint();
                 }
+            }
+        }
+    }
+
+    // Запрашиваем объём томов редко и только в фоне, не во время отрисовки дерева.
+    fn schedule_disk_usage_refresh(&mut self, ctx: &egui::Context) {
+        let now = Instant::now();
+        if !self.disk_usage_loading && now >= self.disk_usage_refresh_at {
+            self.disk_usage_loading = true;
+            self.disk_usage_refresh_at = now + DISK_USAGE_REFRESH_INTERVAL;
+            if self.disk_usage_tx.send(self.tree.roots.clone()).is_err() {
+                self.disk_usage_loading = false;
+            }
+        }
+        if !self.disk_usage_loading {
+            let delay = self
+                .disk_usage_refresh_at
+                .saturating_duration_since(Instant::now());
+            if !delay.is_zero() {
+                ctx.request_repaint_after(delay);
             }
         }
     }
@@ -873,6 +932,7 @@ impl eframe::App for FileManagerApp {
             }
         }
         self.drain_messages(&ctx);
+        self.schedule_disk_usage_refresh(&ctx);
         self.drain_ops_events(&ctx);
         self.handle_keys(&ctx);
         self.handle_dropped_files(&ctx);

@@ -21,7 +21,7 @@ pub use file_ops::replace_file;
 pub use image_decode::decode_image;
 pub use recycle::recycle_bin;
 pub use shell::{open_recycle_bin, open_terminal, set_attributes, shell_open};
-pub use space::free_space;
+pub use space::{disk_usage, free_space};
 pub use single_instance::{acquire_single_instance, notify_already_running, AcquireResult, SingleInstanceGuard};
 pub(crate) use tab_drag::{
     TabDragPreviewWindow, cursor_screen_position, escape_key_down, left_mouse_button_down,
