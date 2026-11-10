@@ -129,6 +129,7 @@ impl FileManagerApp {
         t.cursor = 0;
         let path = t.path.clone();
         let archive_prefix = t.archive_prefix.clone();
+        let show_hidden_files = self.store.settings.show_hidden_files;
         t.address_input = match &archive_prefix {
             Some(prefix) => format!("{}!/{prefix}", path.display()),
             None => path.display().to_string(),
@@ -153,6 +154,8 @@ impl FileManagerApp {
                 Some(prefix) => crate::platform::read_zip_dir_cancellable(&path, &prefix, &cancel),
                 None => fs::read_dir(&path, &cancel),
             };
+            // Фильтруем в worker, чтобы список скрытых файлов не собирался в UI.
+            let result = result.map(|entries| fs::filter_hidden(entries, show_hidden_files));
             match &result {
                 Ok(entries) => tracing::info!(
                     tab_id,

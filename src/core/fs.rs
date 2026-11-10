@@ -62,6 +62,13 @@ pub fn read_dir(path: &Path, cancel: &AtomicBool) -> Result<Vec<FileEntry>, Read
     Ok(entries)
 }
 
+pub fn filter_hidden(mut entries: Vec<FileEntry>, show_hidden_files: bool) -> Vec<FileEntry> {
+    if !show_hidden_files {
+        entries.retain(|entry| !entry.hidden);
+    }
+    entries
+}
+
 pub fn sort_entries(entries: &mut Vec<FileEntry>) {
     entries.sort_by_cached_key(|e| (!e.is_dir, e.name.to_lowercase()));
 }
@@ -151,10 +158,15 @@ pub fn read_subdirs(path: &Path) -> io::Result<Vec<PathBuf>> {
 #[cfg(windows)]
 fn is_hidden(item: &fs::DirEntry) -> bool {
     use std::os::windows::fs::MetadataExt;
-    const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
     item.metadata()
-        .map(|m| m.file_attributes() & FILE_ATTRIBUTE_HIDDEN != 0)
+        .map(|metadata| windows_attributes_are_hidden(metadata.file_attributes()))
         .unwrap_or(false)
+}
+
+#[cfg(windows)]
+fn windows_attributes_are_hidden(attributes: u32) -> bool {
+    const FILE_ATTRIBUTE_HIDDEN_OR_SYSTEM: u32 = 0x2 | 0x4;
+    attributes & FILE_ATTRIBUTE_HIDDEN_OR_SYSTEM != 0
 }
 
 #[cfg(not(windows))]
@@ -204,6 +216,19 @@ mod tests {
         sort_entries(&mut v);
         let names: Vec<_> = v.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, ["a", "B", "C"]);
+    }
+
+    #[test]
+    fn hidden_entries_are_filtered_by_default_and_can_be_shown() {
+        let visible = entry("visible.txt", false);
+        let mut hidden = entry("desktop.ini", false);
+        hidden.hidden = true;
+        let entries = vec![visible, hidden];
+
+        let default_entries = filter_hidden(entries.clone(), false);
+        assert_eq!(default_entries.len(), 1);
+        assert_eq!(default_entries[0].name, "visible.txt");
+        assert_eq!(filter_hidden(entries, true).len(), 2);
     }
 
     #[test]
@@ -372,6 +397,13 @@ mod tests_acc {
 #[cfg(all(test, windows))]
 mod tests_windows_metadata {
     use super::*;
+
+    #[test]
+    fn hidden_and_system_attributes_are_treated_as_hidden() {
+        assert!(!windows_attributes_are_hidden(0));
+        assert!(windows_attributes_are_hidden(0x2));
+        assert!(windows_attributes_are_hidden(0x4));
+    }
 
     #[test]
     fn directory_listing_reports_hidden_and_readonly_windows_attributes() {

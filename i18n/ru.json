@@ -5,6 +5,8 @@
   "menu.help": "Справка",
   "settings.category.general": "Общие",
   "settings.single_instance_hint": "Повторный запуск откроет папку в уже запущенном окне. Выключите настройку, чтобы разрешить несколько окон.",
+  "settings.show_hidden_files": "Показывать скрытые и системные файлы",
+  "settings.show_hidden_files_hint": "Если выключено, файлы с атрибутом «Скрытый» или «Системный» (например, desktop.ini) не отображаются в списках и поиске.",
   "file.quit": "Выход",
   "view.theme": "Тема",
   "view.language": "Язык",

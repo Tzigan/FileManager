@@ -34,6 +34,7 @@ pub struct Settings {
     pub pinned_tabs: Vec<PathBuf>,
     pub active_tab: usize,
     pub bookmarks: Vec<PathBuf>,
+    pub show_hidden_files: bool,
     pub view_mode: ViewMode,
     /// Table-column visibility (name is always shown).
     #[serde(default = "default_true")]
@@ -67,6 +68,7 @@ impl Default for Settings {
             pinned_tabs: Vec::new(),
             active_tab: 0,
             bookmarks: Vec::new(),
+            show_hidden_files: false,
             view_mode: ViewMode::default(),
             col_size: true,
             col_type: true,
@@ -137,6 +139,7 @@ mod tests {
     fn defaults_are_safe() {
         let s = Settings::default();
         assert!(s.tabs.is_empty() && s.active_tab == 0 && s.bookmarks.is_empty());
+        assert!(!s.show_hidden_files);
         assert!(s.enable_mouse_side_navigation);
     }
 
@@ -146,11 +149,13 @@ mod tests {
             tabs: vec![PathBuf::from("C:\\a")],
             active_tab: 0,
             bookmarks: vec![PathBuf::from("D:\\b")],
+            show_hidden_files: true,
             ..Default::default()
         };
         let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
         assert_eq!(back.tabs, s.tabs);
         assert_eq!(back.bookmarks, s.bookmarks);
+        assert_eq!(back.show_hidden_files, s.show_hidden_files);
         assert_eq!(back.language, s.language);
     }
 
@@ -162,6 +167,7 @@ mod tests {
         store.settings.active_tab = 1;
         store.settings.pinned_tabs = vec![PathBuf::from("C:\\work")];
         store.settings.bookmarks = vec![PathBuf::from("D:\\docs")];
+        store.settings.show_hidden_files = true;
         store.settings.language = Language::En;
         store.settings.theme = Theme::Light;
         store.settings.view_mode = ViewMode::Grid;
@@ -179,6 +185,7 @@ mod tests {
         assert_eq!(loaded.settings.active_tab, 1);
         assert_eq!(loaded.settings.pinned_tabs, vec![PathBuf::from("C:\\work")]);
         assert_eq!(loaded.settings.bookmarks, vec![PathBuf::from("D:\\docs")]);
+        assert!(loaded.settings.show_hidden_files);
         assert_eq!(loaded.settings.language, Language::En);
         assert_eq!(loaded.settings.theme, Theme::Light);
         assert_eq!(loaded.settings.view_mode, ViewMode::Grid);
@@ -205,6 +212,7 @@ mod tests {
         let loaded = SettingsStore::load(&dir);
         assert_eq!(loaded.settings.tabs, vec![PathBuf::from("C:\\work")]);
         assert_eq!(loaded.settings.bookmarks, vec![PathBuf::from("D:\\docs")]);
+        assert!(!loaded.settings.show_hidden_files);
         assert_eq!(loaded.settings.view_mode, ViewMode::Table);
         assert!(
             loaded.settings.col_size && loaded.settings.col_type && loaded.settings.col_modified

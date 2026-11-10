@@ -29,7 +29,7 @@ impl FileManagerApp {
                 &search.modified_to,
             )
         };
-        let options = match options {
+        let mut options = match options {
             Ok(options) => options,
             Err(error) => {
                 let key = match error {
@@ -47,6 +47,7 @@ impl FileManagerApp {
                 return;
             }
         };
+        options.show_hidden = self.store.settings.show_hidden_files;
 
         let state = &mut self.tabs[tab];
         state.generation = state.generation.wrapping_add(1);

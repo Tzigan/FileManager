@@ -19,6 +19,7 @@ pub struct SearchOptions {
     pub max_size: Option<u64>,
     pub modified_from: Option<SystemTime>,
     pub modified_before: Option<SystemTime>,
+    pub show_hidden: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -71,6 +72,7 @@ pub fn parse_options(
         max_size,
         modified_from,
         modified_before,
+        show_hidden: false,
     })
 }
 
@@ -209,6 +211,9 @@ pub fn search(
             let Some(mapped) = file_system::map_entry(&entry) else {
                 continue;
             };
+            if mapped.hidden && !options.show_hidden {
+                continue;
+            }
             if options.recursive
                 && mapped.is_dir
                 && !mapped.is_symlink
@@ -422,6 +427,33 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].name, "Alpha.txt");
 
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn hidden_files_and_folders_follow_the_visibility_option() {
+        let root = temp_dir();
+        let hidden_file = root.join(".desktop.ini");
+        let hidden_dir = root.join(".hidden-folder");
+        fs::write(&hidden_file, b"settings").unwrap();
+        fs::create_dir(&hidden_dir).unwrap();
+        fs::write(hidden_dir.join("secret.txt"), b"secret").unwrap();
+        #[cfg(windows)]
+        {
+            crate::platform::set_attributes(&hidden_file, false, true).unwrap();
+            crate::platform::set_attributes(&hidden_dir, false, true).unwrap();
+        }
+
+        let mut options = parse_options("", true, false, "", "", "", "", "").unwrap();
+        let cancel = AtomicBool::new(false);
+        assert!(search(&root, &options, &cancel).unwrap().is_empty());
+
+        options.show_hidden = true;
+        let results = search(&root, &options, &cancel).unwrap();
+        assert_eq!(results.len(), 3);
+        assert!(results.iter().any(|entry| entry.name == ".desktop.ini"));
+        assert!(results.iter().any(|entry| entry.name == ".hidden-folder"));
+        assert!(results.iter().any(|entry| entry.name == "secret.txt"));
         fs::remove_dir_all(root).unwrap();
     }
 
