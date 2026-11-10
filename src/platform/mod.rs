@@ -115,6 +115,12 @@ mod windows;
 pub use self::windows::{acquire_single_instance, create_zip_archive, decode_image, disk_usage, drives, extract_zip_all, extract_zip_file, extract_zip_folder, format_local_time, free_space, get_clipboard_files, get_clipboard_text, install_context_menu, launch_updater, notify_already_running, open_recycle_bin, open_terminal, pipe_listen, pipe_send, prepare_update_archive, read_zip_dir_cancellable, recycle_bin, replace_file, search_zip, set_attributes, set_clipboard_files, shell_open, signal_update_started, uninstall_context_menu, AcquireResult, SingleInstanceGuard};
 
 #[cfg(windows)]
+pub use self::windows::{
+    is_local_drive, is_wsl_path, read_wsl_dir, read_wsl_subdirs, wsl_distributions,
+    wsl_distribution_root,
+};
+
+#[cfg(windows)]
 pub(crate) use self::windows::{
     TabDragPreviewWindow, cursor_screen_position, escape_key_down, left_mouse_button_down,
     monitor_work_area_at_screen_position,
@@ -203,6 +209,39 @@ mod stubs {
 
     pub fn drives() -> Vec<std::path::PathBuf> {
         vec![std::path::PathBuf::from("/")]
+    }
+
+    pub fn is_local_drive(_path: &std::path::Path) -> bool {
+        false
+    }
+
+    pub fn wsl_distributions() -> Vec<String> {
+        Vec::new()
+    }
+
+    pub fn wsl_distribution_root(_name: &str) -> Option<std::path::PathBuf> {
+        None
+    }
+
+    pub fn is_wsl_path(_path: &std::path::Path) -> bool {
+        false
+    }
+
+    pub fn read_wsl_dir(
+        _path: &std::path::Path,
+        _cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<Vec<crate::core::fs::FileEntry>, crate::core::fs::ReadDirError> {
+        Err(crate::core::fs::ReadDirError::Io(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "WSL browsing is supported only on Windows",
+        )))
+    }
+
+    pub fn read_wsl_subdirs(_path: &std::path::Path) -> std::io::Result<Vec<std::path::PathBuf>> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "WSL browsing is supported only on Windows",
+        ))
     }
 
     pub fn free_space(_path: &std::path::Path) -> Option<u64> {
@@ -308,6 +347,12 @@ mod stubs {
 
 #[cfg(not(windows))]
 pub use stubs::{acquire_single_instance, create_zip_archive, decode_image, disk_usage, drives, extract_zip_all, extract_zip_file, extract_zip_folder, format_local_time, free_space, get_clipboard_files, get_clipboard_text, install_context_menu, launch_updater, notify_already_running, open_recycle_bin, open_terminal, pipe_listen, pipe_send, prepare_update_archive, read_zip_dir_cancellable, recycle_bin, replace_file, search_zip, set_attributes, set_clipboard_files, shell_open, signal_update_started, uninstall_context_menu, AcquireResult, SingleInstanceGuard};
+
+#[cfg(not(windows))]
+pub use stubs::{
+    is_local_drive, is_wsl_path, read_wsl_dir, read_wsl_subdirs, wsl_distributions,
+    wsl_distribution_root,
+};
 
 #[cfg(not(windows))]
 pub(crate) use stubs::{

@@ -85,6 +85,8 @@ pub(crate) enum WorkerMsg {
     DiskUsage {
         values: HashMap<PathBuf, DiskUsage>,
     },
+    /// Обнаружены установленные дистрибутивы WSL.
+    WslDistributions(Vec<String>),
     /// A path forwarded by another instance / CLI — open in a new tab.
     OpenPath(PathBuf),
     /// Найдена более новая версия приложения.
@@ -200,6 +202,9 @@ pub struct FileManagerApp {
     disk_usage_tx: Sender<Vec<PathBuf>>,
     disk_usage_loading: bool,
     disk_usage_refresh_at: Instant,
+    wsl_req: Sender<()>,
+    pub(crate) wsl_loading: bool,
+    pub(crate) wsl_distributions: Vec<String>,
     detached_tabs: HashMap<u64, window_frame::DetachedTabWindow>,
     tab_detach_error: Option<String>,
 
@@ -236,6 +241,7 @@ impl FileManagerApp {
         let (msg_tx, msg_rx) = channel();
         let (tree_req, tree_req_rx) = channel::<PathBuf>();
         let (disk_usage_tx, disk_usage_rx) = channel::<Vec<PathBuf>>();
+        let (wsl_req, wsl_req_rx) = channel::<()>();
         let (ops_tx, jobs_rx) = channel::<OpJob>();
         let (op_reply, reply_rx) = channel::<OpReply>();
         let (events_tx, ops_evt) = channel::<OpEvent>();
@@ -324,8 +330,29 @@ impl FileManagerApp {
             let ctx = cc.egui_ctx.clone();
             thread::spawn(move || {
                 while let Ok(path) = tree_req_rx.recv() {
-                    let result = fs::read_subdirs(&path);
+                    let result = if crate::platform::is_wsl_path(&path) {
+                        crate::platform::read_wsl_subdirs(&path)
+                    } else {
+                        fs::read_subdirs(&path)
+                    };
                     if msg_tx.send(WorkerMsg::TreeChildren { path, result }).is_err() {
+                        break;
+                    }
+                    ctx.request_repaint();
+                }
+            });
+        }
+        {
+            let msg_tx = msg_tx.clone();
+            let ctx = cc.egui_ctx.clone();
+            thread::spawn(move || {
+                while wsl_req_rx.recv().is_ok() {
+                    if msg_tx
+                        .send(WorkerMsg::WslDistributions(
+                            crate::platform::wsl_distributions(),
+                        ))
+                        .is_err()
+                    {
                         break;
                     }
                     ctx.request_repaint();
@@ -350,6 +377,13 @@ impl FileManagerApp {
         let active = store.settings.active_tab.min(paths.len() - 1);
 
         let pins: BTreeSet<PathBuf> = store.settings.pinned_tabs.iter().cloned().collect();
+        let drive_roots = drives();
+        let wsl_insert_after = drive_roots
+            .iter()
+            .rposition(|path| crate::platform::is_local_drive(path))
+            .map_or(drive_roots.len(), |index| index + 1);
+        let mut tree = TreeState::new(drive_roots);
+        tree.wsl_insert_after = wsl_insert_after;
         let mut app = Self {
             store,
             i18n,
@@ -390,11 +424,14 @@ impl FileManagerApp {
             disk_usage_tx,
             disk_usage_loading: false,
             disk_usage_refresh_at: Instant::now(),
+            wsl_req,
+            wsl_loading: false,
+            wsl_distributions: Vec::new(),
             detached_tabs: HashMap::new(),
             tab_detach_error: None,
             tabs: paths.into_iter().map(|p| { let mut t = Tab::new(p); t.pinned = pins.contains(&t.path); t }).collect(),
             active,
-            tree: TreeState::new(drives()),
+            tree,
             system_bookmarks: crate::core::known_folders::system_bookmarks(),
             scroll_to_cursor: false,
             pending_select: None,
@@ -417,6 +454,9 @@ impl FileManagerApp {
         }
         for i in 0..app.tabs.len() {
             app.navigate_fresh(i, &cc.egui_ctx);
+        }
+        if app.store.settings.show_wsl_in_tree {
+            app.refresh_wsl_distributions();
         }
         let tab = &app.tabs[app.active];
         let reveal_path = if tab.archive_prefix.is_some() {
@@ -463,6 +503,22 @@ impl FileManagerApp {
         self.persist();
     }
 
+    pub(crate) fn refresh_wsl_distributions(&mut self) {
+        if !self.store.settings.show_wsl_in_tree || self.wsl_loading {
+            return;
+        }
+        self.wsl_loading = true;
+        self.tree
+            .children
+            .retain(|path, _| !crate::platform::is_wsl_path(path));
+        self.tree
+            .failed_children
+            .retain(|path| !crate::platform::is_wsl_path(path));
+        if self.wsl_req.send(()).is_err() {
+            self.wsl_loading = false;
+        }
+    }
+
     // ------------------------------------------------------------------
     // Messages and input
     // ------------------------------------------------------------------
@@ -495,6 +551,8 @@ impl FileManagerApp {
                             tracing::warn!(path = %self.tabs[tab].path.display(), "read_dir failed: {e}");
                             let text = if self.tabs[tab].archive_prefix.is_some() {
                                 self.zip_error_text(&e)
+                            } else if crate::platform::is_wsl_path(&self.tabs[tab].path) {
+                                self.t("tree.wsl.not_running").to_owned()
                             } else {
                                 self.error_text(&e)
                             };
@@ -672,6 +730,16 @@ impl FileManagerApp {
                     self.tree.disk_usage = values;
                     self.disk_usage_loading = false;
                     self.disk_usage_refresh_at = Instant::now() + DISK_USAGE_REFRESH_INTERVAL;
+                }
+                WorkerMsg::WslDistributions(distributions) => {
+                    self.wsl_distributions = distributions;
+                    self.wsl_loading = false;
+                    self.tree
+                        .children
+                        .retain(|path, _| !crate::platform::is_wsl_path(path));
+                    self.tree
+                        .failed_children
+                        .retain(|path| !crate::platform::is_wsl_path(path));
                 }
                 WorkerMsg::OpenPath(path) => self.open_path_in_new_tab(path, ctx),
                 WorkerMsg::UpdateFound { manifest } => {

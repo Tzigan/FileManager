@@ -11,12 +11,13 @@ mod space;
 mod tab_drag;
 mod time_fmt;
 mod update_support;
+mod wsl;
 mod zip;
 
 pub use args_pipe::{listen as pipe_listen, send as pipe_send};
 pub use clipboard::{get_clipboard_files, get_clipboard_text, set_clipboard_files};
 pub use context_menu::{install_context_menu, uninstall_context_menu};
-pub use drives::drives;
+pub use drives::{drives, is_local_drive};
 pub use file_ops::replace_file;
 pub use image_decode::decode_image;
 pub use recycle::recycle_bin;
@@ -29,6 +30,10 @@ pub(crate) use tab_drag::{
 };
 pub use time_fmt::format_local_time;
 pub use update_support::{launch_updater, prepare_update_archive, signal_update_started};
+pub use wsl::{
+    distribution_root as wsl_distribution_root, distributions as wsl_distributions, is_wsl_path,
+    read_dir as read_wsl_dir, read_subdirs as read_wsl_subdirs,
+};
 pub use zip::{
     create_zip_archive, extract_zip_all, extract_zip_file, extract_zip_folder,
     read_zip_dir_cancellable, search_zip,

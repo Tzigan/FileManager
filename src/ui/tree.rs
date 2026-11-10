@@ -13,8 +13,11 @@ use crate::ui::style;
 /// once, and results land in `children`.
 pub struct TreeState {
     pub roots: Vec<PathBuf>,
+    pub wsl_insert_after: usize,
+    pub wsl_expanded: bool,
     pub expanded: HashSet<PathBuf>,
     pub children: HashMap<PathBuf, Vec<PathBuf>>,
+    pub failed_children: HashSet<PathBuf>,
     pub pending: HashSet<PathBuf>,
     /// Кэш занятости корневых томов; строки дерева не читают системные данные сами.
     pub disk_usage: HashMap<PathBuf, DiskUsage>,
@@ -22,10 +25,14 @@ pub struct TreeState {
 
 impl TreeState {
     pub fn new(roots: Vec<PathBuf>) -> Self {
+        let wsl_insert_after = roots.len();
         Self {
             roots,
+            wsl_insert_after,
+            wsl_expanded: false,
             expanded: HashSet::new(),
             children: HashMap::new(),
+            failed_children: HashSet::new(),
             pending: HashSet::new(),
             disk_usage: HashMap::new(),
         }
@@ -63,9 +70,22 @@ impl TreeState {
 
     /// Settles a lazy request. Failed loads are cached as empty so the UI does
     /// not spin or issue the same failing request on every frame.
-    pub(crate) fn complete_children_load(&mut self, path: PathBuf, result: std::io::Result<Vec<PathBuf>>) {
+    pub(crate) fn complete_children_load(
+        &mut self,
+        path: PathBuf,
+        result: std::io::Result<Vec<PathBuf>>,
+    ) {
         self.pending.remove(&path);
-        self.children.insert(path, result.unwrap_or_default());
+        match result {
+            Ok(children) => {
+                self.failed_children.remove(&path);
+                self.children.insert(path, children);
+            }
+            Err(_) => {
+                self.failed_children.insert(path.clone());
+                self.children.insert(path, Vec::new());
+            }
+        }
     }
 }
 
@@ -82,11 +102,63 @@ impl crate::ui::FileManagerApp {
                 ui.label(egui::RichText::new(heading).strong());
                 ui.add_space(style::SPACE_XS);
                 let roots = self.tree.roots.clone();
-                for root in roots {
-                    let name = root.display().to_string();
-                    self.tree_node(ui, &root, name, 0, ctx);
+                let wsl_insert_after = self.tree.wsl_insert_after.min(roots.len());
+                // WSL идёт после локальных томов, до сетевых дисков.
+                for index in 0..=roots.len() {
+                    if index == wsl_insert_after {
+                        self.wsl_tree_section(ctx, ui);
+                    }
+                    if let Some(root) = roots.get(index) {
+                        let name = root.display().to_string();
+                        self.tree_node(ui, root, name, 0, ctx);
+                    }
                 }
             });
+    }
+
+    fn wsl_tree_section(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
+        if !self.store.settings.show_wsl_in_tree || self.wsl_distributions.is_empty() {
+            return;
+        }
+        let mut toggle = false;
+        let mut refresh = false;
+        let expanded = self.tree.wsl_expanded;
+        ui.horizontal(|ui| {
+            if tree_disclosure_button(ui, expanded) {
+                toggle = true;
+            }
+            paint_tree_icon(ui, false, false);
+            let response = ui.selectable_label(
+                false,
+                egui::RichText::new(self.t("tree.wsl.title")).strong(),
+            );
+            if response.clicked() {
+                toggle = true;
+            }
+            response.context_menu(|ui| {
+                style::compact_context_menu(ui);
+                if ui.button(self.t("tree.wsl.refresh").to_owned()).clicked() {
+                    refresh = true;
+                    ui.close();
+                }
+            });
+            if self.wsl_loading {
+                ui.spinner();
+            }
+        });
+        if toggle {
+            self.tree.wsl_expanded = !expanded;
+        }
+        if refresh {
+            self.refresh_wsl_distributions();
+        }
+        if self.tree.wsl_expanded {
+            for name in self.wsl_distributions.clone() {
+                if let Some(path) = crate::platform::wsl_distribution_root(&name) {
+                    self.tree_node(ui, &path, name, 1, ctx);
+                }
+            }
+        }
     }
 
     fn bookmark_section(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
@@ -248,7 +320,20 @@ impl crate::ui::FileManagerApp {
             }
             let is_current = path == self.tabs[self.active].path.as_path();
             paint_tree_icon(ui, depth == 0, is_current);
-            let resp = ui.selectable_label(is_current, name);
+            let resp = if depth == 1 && crate::platform::is_wsl_path(path) {
+                let reserved = if loading {
+                    ui.spacing().interact_size.x + ui.spacing().item_spacing.x
+                } else {
+                    0.0
+                };
+                let width = (ui.available_width() - reserved).max(0.0);
+                ui.add_sized(
+                    egui::vec2(width, ui.spacing().interact_size.y),
+                    egui::Button::selectable(is_current, name).truncate(),
+                )
+            } else {
+                ui.selectable_label(is_current, name)
+            };
             if resp.clicked() {
                 self.navigate(self.active, path.to_path_buf(), ctx);
             }
@@ -293,15 +378,31 @@ impl crate::ui::FileManagerApp {
             }
         });
 
+        let mut retry_wsl = false;
         if expanded {
             match kids {
                 Some(list) => {
-                    for child in list {
+                    for child in &list {
                         let cname = child
                             .file_name()
                             .map(|n| n.to_string_lossy().into_owned())
                             .unwrap_or_default();
-                        self.tree_node(ui, &child, cname, depth + 1, ctx);
+                        self.tree_node(ui, child, cname, depth + 1, ctx);
+                    }
+                    if list.is_empty()
+                        && depth == 1
+                        && crate::platform::is_wsl_path(path)
+                        && self.tree.failed_children.contains(path)
+                    {
+                        ui.horizontal(|ui| {
+                            ui.add_space((depth + 1) as f32 * style::TREE_INDENT);
+                            ui.label(
+                                egui::RichText::new(self.t("tree.wsl.not_running")).weak(),
+                            );
+                            if ui.button(self.t("tree.wsl.retry").to_owned()).clicked() {
+                                retry_wsl = true;
+                            }
+                        });
                     }
                 }
                 None => {
@@ -310,6 +411,13 @@ impl crate::ui::FileManagerApp {
                         let _ = self.tree_req.send(path.to_path_buf());
                     }
                 }
+            }
+        }
+        if retry_wsl {
+            self.tree.children.remove(path);
+            self.tree.failed_children.remove(path);
+            if self.tree.begin_children_load(path) {
+                let _ = self.tree_req.send(path.to_path_buf());
             }
         }
     }
@@ -418,6 +526,7 @@ mod tests {
         );
         assert!(!tree.pending.contains(&root));
         assert_eq!(tree.children.get(&root).unwrap().len(), 2);
+        assert!(!tree.failed_children.contains(&root));
         assert!(!tree.begin_children_load(&root));
     }
 
@@ -433,6 +542,7 @@ mod tests {
         );
         assert!(!tree.pending.contains(&root));
         assert_eq!(tree.children.get(&root), Some(&Vec::new()));
+        assert!(tree.failed_children.contains(&root));
         assert!(!tree.begin_children_load(&root));
     }
 }
