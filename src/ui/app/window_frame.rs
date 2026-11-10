@@ -6,7 +6,10 @@ pub(super) const WINDOW_CONTROL_GAP: f32 = 2.0;
 pub(super) const WINDOW_CONTROLS_WIDTH: f32 = WINDOW_CONTROL_WIDTH * 3.0 + WINDOW_CONTROL_GAP * 2.0;
 pub(super) const WINDOW_CONTROL_VERTICAL_GAP: f32 = 2.0;
 pub(super) const WINDOW_DRAG_AREA_MIN_WIDTH: f32 = 28.0;
+pub(super) const MAIN_WINDOW_DRAG_AREA_MIN_WIDTH: f32 = 64.0;
 pub(super) const WINDOW_RESIZE_HANDLE_WIDTH: f32 = 6.0;
+const MAIN_WINDOW_DRAG_RESIZE_GAP: f32 = 1.0;
+const MAIN_WINDOW_DRAG_INSET: f32 = WINDOW_RESIZE_HANDLE_WIDTH + MAIN_WINDOW_DRAG_RESIZE_GAP;
 pub(super) const WINDOW_FRAME_SIDE_INSET: i8 = 8;
 pub(super) const WINDOW_CONTROL_HEIGHT: f32 =
     WINDOW_FRAME_HEIGHT - WINDOW_RESIZE_HANDLE_WIDTH * 2.0 - WINDOW_CONTROL_VERTICAL_GAP * 2.0;
@@ -224,6 +227,11 @@ pub(super) fn release_is_outside_frame(
     pointer: Option<egui::Pos2>,
 ) -> bool {
     pointer.is_none_or(|position| !frame_rect.contains(position))
+}
+
+pub(super) fn main_window_drag_hit_rect(frame_rect: egui::Rect) -> egui::Rect {
+    // Оставляем полосы ресайза сверху и снизу вне зоны перетаскивания.
+    frame_rect.shrink2(egui::vec2(0.0, MAIN_WINDOW_DRAG_INSET))
 }
 
 pub(super) fn handle_resize_edges(ctx: &egui::Context) {
