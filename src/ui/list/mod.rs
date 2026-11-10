@@ -24,25 +24,9 @@ use crate::ui::style;
 pub(crate) const ROW_HEIGHT: f32 = 24.0;
 pub(crate) const ICON_WIDTH: f32 = 26.0;
 impl FileManagerApp {
-    /// Virtualized file list: view switcher + header + rows in the current mode.
+    /// Заголовок и виртуализированные строки выбранного режима отображения.
     pub(crate) fn file_list(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
         style::dense_vertical_spacing(ui.style_mut());
-        ui.horizontal(|ui| {
-            for (mode, key) in [
-                (ViewMode::Table, "view.table"),
-                (ViewMode::List, "view.list"),
-                (ViewMode::Grid, "view.grid"),
-            ] {
-                let cur = self.store.settings.view_mode;
-                if ui
-                    .selectable_label(cur == mode, self.t(key).to_owned())
-                    .clicked()
-                {
-                    self.set_view(mode);
-                }
-            }
-        });
-        ui.separator();
 
         let count = self.tabs[self.active].entries.len();
         // Background hit-test under the whole list: rows drawn later win their

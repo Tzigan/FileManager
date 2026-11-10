@@ -600,30 +600,83 @@ impl FileManagerApp {
             }
         });
 
-        // Breadcrumbs row.
+        // Breadcrumbs прокручиваются в оставшейся ширине, кнопки режимов закреплены справа.
         let path = self.tabs[self.active].path.clone();
         let archive_prefix = self.tabs[self.active].archive_prefix.clone();
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing.x = style::SPACE_XXS;
-            for (label, seg_path) in breadcrumb_segments(&path) {
-                if ui.selectable_label(false, label).clicked() {
-                    self.navigate(self.active, seg_path, ctx);
-                }
-                ui.label("›");
+        let modes = [
+            (ViewMode::Table, "view.table"),
+            (ViewMode::List, "view.list"),
+            (ViewMode::Grid, "view.grid"),
+        ];
+        let mode_labels: Vec<String> = modes
+            .iter()
+            .map(|(_, key)| self.t(key).to_owned())
+            .collect();
+        let row_spacing = style::SPACE_XXS;
+        let button_font = egui::TextStyle::Button.resolve(ui.style());
+        let button_padding = ui.spacing().button_padding.x * 2.0;
+        let mode_switcher_width: f32 = mode_labels
+            .iter()
+            .map(|label| {
+                let text_width = ui
+                    .painter()
+                    .layout_no_wrap(
+                        label.clone(),
+                        button_font.clone(),
+                        ui.visuals().text_color(),
+                    )
+                    .size()
+                    .x;
+                (text_width + button_padding).max(ui.spacing().interact_size.x)
+            })
+            .sum::<f32>()
+            + row_spacing * 2.0;
+        let breadcrumbs = breadcrumb_segments(&path);
+        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = row_spacing;
+            let gap = ui.spacing().item_spacing.x;
+            let breadcrumbs_width = (ui.available_width() - mode_switcher_width - gap).max(0.0);
+            if breadcrumbs_width > 0.0 {
+                egui::ScrollArea::horizontal()
+                    .id_salt("breadcrumb_path_scroll")
+                    .max_width(breadcrumbs_width)
+                    .auto_shrink([false, true])
+                    .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            for (label, seg_path) in &breadcrumbs {
+                                if ui.selectable_label(false, label).clicked() {
+                                    self.navigate(self.active, seg_path.clone(), ctx);
+                                }
+                                ui.label("›");
+                            }
+                            if let Some(prefix) = archive_prefix
+                                .as_deref()
+                                .filter(|prefix| !prefix.is_empty())
+                            {
+                                let mut current = String::new();
+                                for component in prefix.split('/') {
+                                    if !current.is_empty() {
+                                        current.push('/');
+                                    }
+                                    current.push_str(component);
+                                    if ui.selectable_label(false, component).clicked() {
+                                        self.navigate_zip(self.active, current.clone(), ctx);
+                                    }
+                                    ui.label("›");
+                                }
+                            }
+                        });
+                    });
             }
-            if let Some(prefix) = archive_prefix.filter(|prefix| !prefix.is_empty()) {
-                let mut current = String::new();
-                for component in prefix.split('/') {
-                    if !current.is_empty() {
-                        current.push('/');
+            ui.horizontal(|ui| {
+                for ((mode, _), label) in modes.iter().zip(mode_labels) {
+                    let active = self.store.settings.view_mode == *mode;
+                    if ui.selectable_label(active, label).clicked() {
+                        self.set_view(*mode);
                     }
-                    current.push_str(component);
-                    if ui.selectable_label(false, component).clicked() {
-                        self.navigate_zip(self.active, current.clone(), ctx);
-                    }
-                    ui.label("›");
                 }
-            }
+            });
         });
     }
 }
