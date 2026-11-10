@@ -117,19 +117,23 @@ impl FileManagerApp {
                 .collect();
 
             let spacing = ui.spacing().item_spacing.x;
+            let scroll_target = self.tab_strip_scroll_target;
+            let mut scroll_request_sent = false;
             let scroll_width = (ui.available_width()
                 - super::window_frame::WINDOW_CONTROLS_WIDTH
                 - super::window_frame::MAIN_WINDOW_DRAG_AREA_MIN_WIDTH
-                - spacing * 2.0)
+                - super::window_frame::TAB_PLUS_BUTTON_WIDTH
+                - spacing * 3.0)
                 .max(1.0);
             egui::ScrollArea::horizontal()
                 .id_salt("tab_strip_scroll")
                 .max_width(scroll_width)
-                .auto_shrink([false, true])
+                .auto_shrink([true, true])
                 .content_margin(tab_strip_content_margin())
                 .scroll_source(tab_scroll_source())
                 .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                 .show(ui, |ui| {
+                    let mut scroll_target_rect = None;
                     ui.horizontal(|ui| {
                         for (display_index, (i, pinned, title)) in metas.iter().enumerate() {
                             ui.horizontal(|ui| {
@@ -162,6 +166,9 @@ impl FileManagerApp {
                                 let (rect, resp) =
                                     ui.allocate_exact_size(size, egui::Sense::click_and_drag());
                                 tab_rects.push((display_index, rect));
+                                if scroll_target == Some(self.tabs[*i].id) {
+                                    scroll_target_rect = Some(rect);
+                                }
                                 let x_rect = egui::Rect::from_min_max(
                                     egui::pos2(rect.max.x - close_w, rect.min.y),
                                     rect.max,
@@ -351,25 +358,39 @@ impl FileManagerApp {
                                 }
                             });
                         }
-
-                        // Кнопка идёт последней в прокручиваемом ряду вкладок.
-                        let plus_galley = ui.painter().layout_no_wrap(
-                            "+".to_owned(),
-                            egui::TextStyle::Small.resolve(ui.style()),
-                            ui.visuals().text_color(),
-                        );
-                        let plus_size = super::window_frame::new_tab_button_size(
-                            plus_galley.size().y,
-                            ui.spacing().interact_size.y,
-                        );
-                        if ui
-                            .add_sized(plus_size, egui::Button::new("+").small())
-                            .clicked()
-                        {
-                            self.new_tab(ctx);
-                        }
                     });
+                    if let Some(rect) = scroll_target_rect {
+                        if let Some(align) = tab_strip_scroll_alignment(rect, ui.clip_rect()) {
+                            ui.scroll_to_rect(rect, Some(align));
+                        }
+                        scroll_request_sent = true;
+                    }
                 });
+            if scroll_request_sent && self.tab_strip_scroll_target == scroll_target {
+                self.tab_strip_scroll_target = None;
+            } else if let Some(tab_id) = scroll_target
+                && (!self.tabs.iter().any(|tab| tab.id == tab_id) || self.is_tab_detached(tab_id))
+            {
+                self.tab_strip_scroll_target = None;
+            }
+
+            // При переполнении кнопка остаётся рядом с видимой областью прокрутки;
+            // без переполнения список сжимается до вкладок, и кнопка идёт сразу за ними.
+            let plus_galley = ui.painter().layout_no_wrap(
+                "+".to_owned(),
+                egui::TextStyle::Small.resolve(ui.style()),
+                ui.visuals().text_color(),
+            );
+            let plus_size = super::window_frame::new_tab_button_size(
+                plus_galley.size().y,
+                ui.spacing().interact_size.y,
+            );
+            if ui
+                .add_sized(plus_size, egui::Button::new("+").small())
+                .clicked()
+            {
+                self.new_tab(ctx);
+            }
             let drag_width =
                 (ui.available_width() - super::window_frame::WINDOW_CONTROLS_WIDTH - spacing)
                     .max(0.0);
@@ -618,6 +639,22 @@ fn current_screen_position(ctx: &egui::Context) -> Option<(i32, i32)> {
             ctx.pixels_per_point(),
         ))
     })
+}
+
+pub(super) fn tab_strip_scroll_alignment(
+    target: egui::Rect,
+    viewport: egui::Rect,
+) -> Option<egui::Align> {
+    // Уже видимую вкладку не двигаем; слишком длинную показываем с начала названия.
+    if target.width() > viewport.width() {
+        Some(egui::Align::Min)
+    } else if target.left() < viewport.left() {
+        Some(egui::Align::Min)
+    } else if target.right() > viewport.right() {
+        Some(egui::Align::Max)
+    } else {
+        None
+    }
 }
 
 fn primary_button_held(ctx: &egui::Context) -> bool {

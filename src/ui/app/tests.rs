@@ -79,7 +79,7 @@ fn tab_strip_uses_mouse_wheel_without_showing_a_scrollbar() {
     );
     let margin = tab_strip_content_margin();
     assert_eq!(margin.left, super::style::FRAME_PADDING_X);
-    assert_eq!(margin.right, super::style::FRAME_PADDING_X);
+    assert_eq!(margin.right, 0);
     assert_eq!(margin.top, 0);
     assert_eq!(margin.bottom, 0);
 }
@@ -239,6 +239,32 @@ fn new_tab_button_size_tracks_tab_text_and_click_target() {
 
     let larger_font = new_tab_button_size(18.0, 20.0);
     assert_eq!(larger_font.y, 18.0 + TAB_VERTICAL_EXTRA_HEIGHT);
+}
+
+#[test]
+fn tab_strip_scroll_alignment_changes_only_when_target_is_clipped() {
+    use super::toolbar::tab_strip_scroll_alignment;
+
+    let viewport = egui::Rect::from_min_size(egui::pos2(50.0, 0.0), egui::vec2(100.0, 40.0));
+    let visible = egui::Rect::from_min_size(egui::pos2(70.0, 4.0), egui::vec2(40.0, 32.0));
+    let clipped_left = egui::Rect::from_min_size(egui::pos2(20.0, 4.0), egui::vec2(40.0, 32.0));
+    let clipped_right = egui::Rect::from_min_size(egui::pos2(130.0, 4.0), egui::vec2(40.0, 32.0));
+    let wider_than_viewport =
+        egui::Rect::from_min_size(egui::pos2(20.0, 4.0), egui::vec2(180.0, 32.0));
+
+    assert_eq!(tab_strip_scroll_alignment(visible, viewport), None);
+    assert_eq!(
+        tab_strip_scroll_alignment(clipped_left, viewport),
+        Some(egui::Align::Min)
+    );
+    assert_eq!(
+        tab_strip_scroll_alignment(clipped_right, viewport),
+        Some(egui::Align::Max)
+    );
+    assert_eq!(
+        tab_strip_scroll_alignment(wider_than_viewport, viewport),
+        Some(egui::Align::Min)
+    );
 }
 
 #[test]

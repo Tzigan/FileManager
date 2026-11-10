@@ -495,6 +495,7 @@ impl FileManagerApp {
             self.tabs.push(Tab::new(path));
             self.active = self.tabs.len() - 1;
             self.navigate_fresh(self.active, ctx);
+            self.request_tab_strip_scroll_to_active(ctx);
         } else if !visible.contains(&self.active) {
             self.active = visible[0];
         }
