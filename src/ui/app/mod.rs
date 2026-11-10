@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 use super::style;
 use crate::core::fs::{self, FileEntry, ReadDirError, SortKey};
 use crate::core::i18n::{I18n, Language};
+use crate::core::known_folders::SystemBookmark;
 use crate::core::ops::{self, OpEvent, OpJob, OpReply};
 use crate::core::paths::AppDirs;
 use crate::core::preview::TextPreview;
@@ -205,6 +206,7 @@ pub struct FileManagerApp {
     pub(crate) tabs: Vec<Tab>,
     pub(crate) active: usize,
     pub(crate) tree: TreeState,
+    pub(crate) system_bookmarks: Vec<SystemBookmark>,
     /// Scroll the focused row into view next repaint (set by keyboard nav).
     pub(crate) scroll_to_cursor: bool,
     /// `--select` target: select this entry when the listing arrives.
@@ -393,6 +395,7 @@ impl FileManagerApp {
             tabs: paths.into_iter().map(|p| { let mut t = Tab::new(p); t.pinned = pins.contains(&t.path); t }).collect(),
             active,
             tree: TreeState::new(drives()),
+            system_bookmarks: crate::core::known_folders::system_bookmarks(),
             scroll_to_cursor: false,
             pending_select: None,
             msg_tx,

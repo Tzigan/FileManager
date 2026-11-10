@@ -1,5 +1,6 @@
 use egui::{Color32, Painter, Rect, Shape, Stroke, StrokeKind, pos2, vec2};
 
+use crate::core::known_folders::SystemBookmarkKind;
 use crate::ui::style;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,6 +86,166 @@ pub(crate) fn paint_folder_icon(painter: &Painter, bounds: Rect) {
         [body.left_bottom(), body.right_bottom()],
         Stroke::new((width.min(height) * 0.035).max(0.7), back),
     );
+}
+
+// Для системных закладок используем свои знаки и существующие иконки категорий.
+pub(crate) fn paint_system_bookmark_icon(
+    painter: &Painter,
+    bounds: Rect,
+    kind: SystemBookmarkKind,
+    dark_mode: bool,
+    accent: Color32,
+) {
+    match kind {
+        SystemBookmarkKind::RecycleBin => paint_recycle_bin_icon(painter, bounds, accent),
+        SystemBookmarkKind::Downloads => paint_download_icon(painter, bounds, accent),
+        SystemBookmarkKind::Desktop => paint_desktop_icon(painter, bounds, accent),
+        SystemBookmarkKind::Documents => {
+            paint_file_icon(painter, bounds, FileIconKind::Document, dark_mode)
+        }
+        SystemBookmarkKind::Pictures => {
+            paint_file_icon(painter, bounds, FileIconKind::Image, dark_mode)
+        }
+        SystemBookmarkKind::Music => {
+            paint_file_icon(painter, bounds, FileIconKind::Audio, dark_mode)
+        }
+        SystemBookmarkKind::Videos => {
+            paint_file_icon(painter, bounds, FileIconKind::Video, dark_mode)
+        }
+    }
+}
+
+fn paint_desktop_icon(painter: &Painter, bounds: Rect, color: Color32) {
+    let width = bounds.width();
+    let height = bounds.height();
+    let stroke = Stroke::new((width.min(height) * 0.07).max(1.0), color);
+    let screen = Rect::from_min_max(
+        pos2(bounds.left() + width * 0.12, bounds.top() + height * 0.12),
+        pos2(bounds.right() - width * 0.12, bounds.top() + height * 0.68),
+    );
+    painter.rect_filled(
+        screen,
+        style::RADIUS_ICON_FINE,
+        color.gamma_multiply(0.16),
+    );
+    painter.rect_stroke(
+        screen,
+        style::RADIUS_ICON_FINE,
+        stroke,
+        StrokeKind::Inside,
+    );
+    let center_x = screen.center().x;
+    painter.line_segment(
+        [
+            pos2(center_x, screen.bottom()),
+            pos2(center_x, bounds.bottom() - height * 0.18),
+        ],
+        stroke,
+    );
+    painter.line_segment(
+        [
+            pos2(bounds.left() + width * 0.30, bounds.bottom() - height * 0.12),
+            pos2(bounds.right() - width * 0.30, bounds.bottom() - height * 0.12),
+        ],
+        stroke,
+    );
+}
+
+fn paint_download_icon(painter: &Painter, bounds: Rect, color: Color32) {
+    let width = bounds.width();
+    let height = bounds.height();
+    let stroke = Stroke::new((width.min(height) * 0.075).max(1.0), color);
+    let center_x = bounds.center().x;
+    let arrow_tip = pos2(center_x, bounds.top() + height * 0.62);
+    painter.line_segment(
+        [
+            pos2(center_x, bounds.top() + height * 0.12),
+            arrow_tip,
+        ],
+        stroke,
+    );
+    painter.line_segment(
+        [
+            arrow_tip,
+            pos2(center_x - width * 0.22, arrow_tip.y - height * 0.20),
+        ],
+        stroke,
+    );
+    painter.line_segment(
+        [
+            arrow_tip,
+            pos2(center_x + width * 0.22, arrow_tip.y - height * 0.20),
+        ],
+        stroke,
+    );
+    let tray_y = bounds.bottom() - height * 0.18;
+    painter.line_segment(
+        [
+            pos2(bounds.left() + width * 0.18, tray_y),
+            pos2(bounds.left() + width * 0.18, tray_y - height * 0.18),
+        ],
+        stroke,
+    );
+    painter.line_segment(
+        [
+            pos2(bounds.left() + width * 0.18, tray_y),
+            pos2(bounds.right() - width * 0.18, tray_y),
+        ],
+        stroke,
+    );
+    painter.line_segment(
+        [
+            pos2(bounds.right() - width * 0.18, tray_y),
+            pos2(bounds.right() - width * 0.18, tray_y - height * 0.18),
+        ],
+        stroke,
+    );
+}
+
+fn paint_recycle_bin_icon(painter: &Painter, bounds: Rect, color: Color32) {
+    let width = bounds.width();
+    let height = bounds.height();
+    let stroke = Stroke::new((width.min(height) * 0.07).max(1.0), color);
+    let body = Rect::from_min_max(
+        pos2(bounds.left() + width * 0.24, bounds.top() + height * 0.30),
+        pos2(bounds.right() - width * 0.22, bounds.bottom() - height * 0.10),
+    );
+    painter.rect_filled(
+        body,
+        style::RADIUS_ICON_FINE,
+        color.gamma_multiply(0.12),
+    );
+    painter.rect_stroke(
+        body,
+        style::RADIUS_ICON_FINE,
+        stroke,
+        StrokeKind::Inside,
+    );
+    let lid_y = bounds.top() + height * 0.23;
+    painter.line_segment(
+        [
+            pos2(bounds.left() + width * 0.17, lid_y),
+            pos2(bounds.right() - width * 0.15, lid_y),
+        ],
+        stroke,
+    );
+    painter.line_segment(
+        [
+            pos2(bounds.center().x - width * 0.12, bounds.top() + height * 0.14),
+            pos2(bounds.center().x + width * 0.12, bounds.top() + height * 0.14),
+        ],
+        stroke,
+    );
+    for fraction in [0.40, 0.60] {
+        let x = body.left() + body.width() * fraction;
+        painter.line_segment(
+            [
+                pos2(x, body.top() + height * 0.10),
+                pos2(x, body.bottom() - height * 0.10),
+            ],
+            stroke,
+        );
+    }
 }
 
 fn fitted_folder_rect(bounds: Rect) -> Rect {
