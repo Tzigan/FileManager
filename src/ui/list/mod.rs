@@ -10,7 +10,7 @@ use columns::{COL_GAP, paint_column_separators, table_rows_content_margin};
 use columns::{column_positions, column_separator_x};
 use grouping::{ListRow, move_group_order};
 #[cfg(test)]
-use grouping::{group_drag_threshold_crossed, table_rows};
+use grouping::{group_drag_threshold_crossed, table_rows, table_rows_sorted};
 use rows::entry_at;
 
 use crate::core::format::format_size;
@@ -156,6 +156,21 @@ mod tests {
         }
     }
 
+    fn names_in_group(rows: &[ListRow], entries: &[FileEntry], group_key: &str) -> Vec<String> {
+        let mut current_group = None;
+        let mut names = Vec::new();
+        for row in rows {
+            match row {
+                ListRow::Header { key, .. } => current_group = Some(key.as_str()),
+                ListRow::Item(index) if current_group == Some(group_key) => {
+                    names.push(entries[*index].name.clone());
+                }
+                ListRow::Item(_) => {}
+            }
+        }
+        names
+    }
+
     #[test]
     fn ungrouped_table_keeps_all_rows_in_input_order() {
         let entries = vec![
@@ -240,7 +255,7 @@ mod tests {
     }
 
     #[test]
-    fn filtered_search_results_keep_only_nonempty_type_groups() {
+    fn list_filters_keep_only_nonempty_type_groups() {
         let from = UNIX_EPOCH + Duration::from_secs(10_000);
         let before = from + Duration::from_secs(2 * 24 * 60 * 60);
         let mut matching = entry("report.txt", false, Some("txt"));
@@ -289,6 +304,107 @@ mod tests {
             vec![ListRow::Item(0)]
         );
         assert!(table_rows(&[], true, &[], "Folders", "Files").is_empty());
+    }
+
+    #[test]
+    fn grouped_rows_sort_naturally_and_follow_size_date_direction() {
+        let date = UNIX_EPOCH + Duration::from_secs(10_000);
+        let mut folder_10 = entry("folder10", true, None);
+        folder_10.modified = Some(date + Duration::from_secs(10));
+        let mut folder_2 = entry("folder2", true, None);
+        folder_2.modified = Some(date + Duration::from_secs(2));
+        let mut file_10 = entry("file10.txt", false, Some("txt"));
+        file_10.size = Some(10);
+        file_10.modified = Some(date + Duration::from_secs(10));
+        let mut file_2 = entry("file2.txt", false, Some("txt"));
+        file_2.size = Some(20);
+        file_2.modified = Some(date + Duration::from_secs(2));
+        let entries = vec![folder_10, folder_2, file_10, file_2];
+
+        let by_name = table_rows_sorted(
+            &entries,
+            true,
+            &[],
+            "Folders",
+            "Files",
+            SortKey::Name,
+            false,
+        );
+        assert_eq!(
+            names_in_group(&by_name, &entries, "folder"),
+            ["folder2", "folder10"]
+        );
+        assert_eq!(
+            names_in_group(&by_name, &entries, "ext:txt"),
+            ["file2.txt", "file10.txt"]
+        );
+
+        let by_name_desc =
+            table_rows_sorted(&entries, true, &[], "Folders", "Files", SortKey::Name, true);
+        assert_eq!(
+            names_in_group(&by_name_desc, &entries, "ext:txt"),
+            ["file10.txt", "file2.txt"]
+        );
+
+        let by_size = table_rows_sorted(
+            &entries,
+            true,
+            &[],
+            "Folders",
+            "Files",
+            SortKey::Size,
+            false,
+        );
+        assert_eq!(
+            names_in_group(&by_size, &entries, "ext:txt"),
+            ["file10.txt", "file2.txt"]
+        );
+        let by_size_desc =
+            table_rows_sorted(&entries, true, &[], "Folders", "Files", SortKey::Size, true);
+        assert_eq!(
+            names_in_group(&by_size_desc, &entries, "ext:txt"),
+            ["file2.txt", "file10.txt"]
+        );
+
+        let by_date = table_rows_sorted(
+            &entries,
+            true,
+            &[],
+            "Folders",
+            "Files",
+            SortKey::Modified,
+            false,
+        );
+        assert_eq!(
+            names_in_group(&by_date, &entries, "ext:txt"),
+            ["file2.txt", "file10.txt"]
+        );
+        let by_date_desc = table_rows_sorted(
+            &entries,
+            true,
+            &[],
+            "Folders",
+            "Files",
+            SortKey::Modified,
+            true,
+        );
+        assert_eq!(
+            names_in_group(&by_date_desc, &entries, "ext:txt"),
+            ["file10.txt", "file2.txt"]
+        );
+
+        assert_eq!(
+            table_rows_sorted(
+                &entries,
+                false,
+                &[],
+                "Folders",
+                "Files",
+                SortKey::Size,
+                true,
+            ),
+            (0..entries.len()).map(ListRow::Item).collect::<Vec<_>>()
+        );
     }
 
     #[test]

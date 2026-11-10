@@ -9,12 +9,33 @@ pub(super) enum ListRow {
     Item(usize),
 }
 
+#[cfg(test)]
 pub(super) fn table_rows(
     entries: &[FileEntry],
     group: bool,
     preferred_group_order: &[String],
     folders_label: &str,
     files_label: &str,
+) -> Vec<ListRow> {
+    table_rows_sorted(
+        entries,
+        group,
+        preferred_group_order,
+        folders_label,
+        files_label,
+        SortKey::Name,
+        false,
+    )
+}
+
+pub(super) fn table_rows_sorted(
+    entries: &[FileEntry],
+    group: bool,
+    preferred_group_order: &[String],
+    folders_label: &str,
+    files_label: &str,
+    sort_key: SortKey,
+    sort_desc: bool,
 ) -> Vec<ListRow> {
     if !group {
         return (0..entries.len()).map(ListRow::Item).collect();
@@ -67,11 +88,87 @@ pub(super) fn table_rows(
         )
     });
     let mut rows = Vec::with_capacity(entries.len() + group_count);
-    for (_, (key, label, items)) in ranked {
+    for (_, (key, label, mut items)) in ranked {
+        items.sort_by(|&left, &right| {
+            compare_group_entries(&entries[left], &entries[right], sort_key, sort_desc)
+        });
         rows.push(ListRow::Header { key, label });
         rows.extend(items.into_iter().map(ListRow::Item));
     }
     rows
+}
+
+fn compare_group_entries(
+    left: &FileEntry,
+    right: &FileEntry,
+    sort_key: SortKey,
+    sort_desc: bool,
+) -> std::cmp::Ordering {
+    let by_name = || natural_name_cmp(&left.name, &right.name);
+    let order = match sort_key {
+        SortKey::Name => by_name(),
+        SortKey::Extension => natural_name_cmp(
+            left.extension.as_deref().unwrap_or_default(),
+            right.extension.as_deref().unwrap_or_default(),
+        )
+        .then_with(by_name),
+        SortKey::Size => left.size.cmp(&right.size).then_with(by_name),
+        SortKey::Modified => left.modified.cmp(&right.modified).then_with(by_name),
+    };
+    if sort_desc { order.reverse() } else { order }
+}
+
+fn natural_name_cmp(left: &str, right: &str) -> std::cmp::Ordering {
+    let left_bytes = left.as_bytes();
+    let right_bytes = right.as_bytes();
+    let (mut left_index, mut right_index) = (0, 0);
+
+    while left_index < left_bytes.len() && right_index < right_bytes.len() {
+        let left_char = left[left_index..].chars().next().unwrap();
+        let right_char = right[right_index..].chars().next().unwrap();
+        if left_char.is_ascii_digit() && right_char.is_ascii_digit() {
+            let left_end = digit_run_end(left_bytes, left_index);
+            let right_end = digit_run_end(right_bytes, right_index);
+            let left_significant = significant_digit_start(left_bytes, left_index, left_end);
+            let right_significant = significant_digit_start(right_bytes, right_index, right_end);
+            let order = (left_end - left_significant)
+                .cmp(&(right_end - right_significant))
+                .then_with(|| {
+                    left_bytes[left_significant..left_end]
+                        .cmp(&right_bytes[right_significant..right_end])
+                })
+                .then_with(|| (left_end - left_index).cmp(&(right_end - right_index)));
+            if order != std::cmp::Ordering::Equal {
+                return order;
+            }
+            left_index = left_end;
+            right_index = right_end;
+        } else {
+            let order = left_char.to_lowercase().cmp(right_char.to_lowercase());
+            if order != std::cmp::Ordering::Equal {
+                return order;
+            }
+            left_index += left_char.len_utf8();
+            right_index += right_char.len_utf8();
+        }
+    }
+    (left_bytes.len() - left_index).cmp(&(right_bytes.len() - right_index))
+}
+
+fn digit_run_end(bytes: &[u8], start: usize) -> usize {
+    let mut end = start;
+    while end < bytes.len() && bytes[end].is_ascii_digit() {
+        end += 1;
+    }
+    end
+}
+
+fn significant_digit_start(bytes: &[u8], start: usize, end: usize) -> usize {
+    let mut significant = start;
+    while significant + 1 < end && bytes[significant] == b'0' {
+        significant += 1;
+    }
+    significant
 }
 
 pub(super) fn move_group_order(
@@ -100,13 +197,15 @@ impl FileManagerApp {
     /// (folders first, then per-extension, name-sorted inside a group).
     pub(super) fn build_rows(&self) -> Vec<ListRow> {
         let tab = &self.tabs[self.active];
-        table_rows(
+        table_rows_sorted(
             &tab.entries,
-            // Поиск уже отфильтровал записи в фоне; группируем только оставшиеся элементы.
+            // Группируем текущие entries после фильтрации, не создавая пустых групп.
             self.store.settings.group_by_type,
             &self.store.settings.group_order,
             self.t("type.folder"),
             self.t("type.file"),
+            tab.sort_key,
+            tab.sort_desc,
         )
     }
 
