@@ -24,7 +24,7 @@ pub(super) const WINDOW_CONTROL_RESTORE_OFFSET: f32 = 2.0;
 pub(super) const WINDOW_CONTROL_ICON_STROKE: f32 = 1.4;
 pub(super) const WINDOW_CONTROL_CROSS_FACTOR: f32 = 0.7;
 
-pub(super) const TAB_DRAG_THRESHOLD: f32 = 5.0;
+pub(super) const TAB_DRAG_THRESHOLD: f32 = 4.0;
 pub(super) const TAB_PLUS_BUTTON_WIDTH: f32 = 30.0;
 pub(super) const TAB_PIN_WIDTH: f32 = 16.0;
 pub(super) const TAB_PIN_ICON_SIZE: f32 = 12.0;

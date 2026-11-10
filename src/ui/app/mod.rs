@@ -159,10 +159,7 @@ pub struct FileManagerApp {
     update_status: Option<String>,
     /// Ошибка обновления, показываемая в окне «О программе».
     update_err: Option<String>,
-    /// Index of the tab currently being drag-reordered.
-    tab_drag: Option<usize>,
-    /// Tab press anchor for manual drag detection (index, press position).
-    tab_press: Option<(usize, egui::Pos2)>,
+    tab_drag_state: tab_drag_preview::TabDragState,
     tab_drag_preview: tab_drag_preview::TabDragPreviewState,
     /// Path shown in the properties dialog.
     pub(crate) props_target: Option<PathBuf>,
@@ -327,8 +324,7 @@ impl FileManagerApp {
             update_ready: None,
             update_status: None,
             update_err: None,
-            tab_drag: None,
-            tab_press: None,
+            tab_drag_state: tab_drag_preview::TabDragState::Idle,
             tab_drag_preview: tab_drag_preview::TabDragPreviewState::default(),
             props_target: None,
             props_viewport_placed: false,
@@ -895,15 +891,6 @@ impl eframe::App for FileManagerApp {
 
 fn tab_scroll_source() -> egui::scroll_area::ScrollSource {
     egui::scroll_area::ScrollSource::MOUSE_WHEEL
-}
-
-fn is_tab_dragging(
-    active_drag: Option<usize>,
-    press: Option<(usize, egui::Pos2)>,
-    pointer: Option<egui::Pos2>,
-) -> bool {
-    active_drag.is_some()
-        || matches!((press, pointer), (Some((_, start)), Some(pos)) if pos.distance(start) > window_frame::TAB_DRAG_THRESHOLD)
 }
 
 fn tab_close_button_hovered(

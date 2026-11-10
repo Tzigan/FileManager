@@ -5,10 +5,36 @@ use std::time::Duration;
 const TAB_DRAG_PREVIEW_TITLE_PREFIX: &str = "FileManager Tab Drag Preview";
 const TAB_DRAG_PREVIEW_SIZE: egui::Vec2 = egui::vec2(260.0, 52.0);
 const TAB_DRAG_PREVIEW_CREATE_RETRIES: u8 = 3;
-const TAB_DRAG_PREVIEW_REPAINT_MS: u64 = 16;
+pub(super) const TAB_DRAG_PREVIEW_REPAINT_MS: u64 = 16;
 pub(super) const DETACHED_WINDOW_RELEASE_OFFSET_POINTS: f32 = 8.0;
 const DETACHED_WINDOW_EDGE_MARGIN_POINTS: f32 = 8.0;
 static NEXT_TAB_DRAG_PREVIEW_ID: AtomicU64 = AtomicU64::new(1);
+
+// Состояния различают нажатие, активное перетаскивание и отмену до отпускания.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(super) enum TabDragState {
+    #[default]
+    Idle,
+    Pressed {
+        tab_id: u64,
+        start_screen_position: (i32, i32),
+        start_pixels_per_point: f32,
+    },
+    Dragging {
+        tab_id: u64,
+    },
+    Cancelled,
+}
+
+impl TabDragState {
+    pub(super) fn is_active(self) -> bool {
+        !matches!(self, Self::Idle)
+    }
+
+    pub(super) fn is_dragging(self) -> bool {
+        matches!(self, Self::Dragging { .. })
+    }
+}
 
 #[derive(Default)]
 pub(super) struct TabDragPreviewState {
@@ -87,6 +113,71 @@ pub(super) fn screen_position_to_viewport(
         screen_position.0 as f32 / pixels_per_point - viewport_inner_min.x,
         screen_position.1 as f32 / pixels_per_point - viewport_inner_min.y,
     )
+}
+
+pub(super) fn viewport_position_to_screen(
+    position: egui::Pos2,
+    viewport_inner_min: egui::Pos2,
+    pixels_per_point: f32,
+) -> (i32, i32) {
+    let pixels_per_point = pixels_per_point.max(f32::EPSILON);
+    (
+        ((position.x + viewport_inner_min.x) * pixels_per_point).round() as i32,
+        ((position.y + viewport_inner_min.y) * pixels_per_point).round() as i32,
+    )
+}
+
+pub(super) fn tab_drag_threshold_crossed(
+    start_screen_position: (i32, i32),
+    current_screen_position: (i32, i32),
+    start_pixels_per_point: f32,
+) -> bool {
+    // Порог переводится в points масштаба, зафиксированного при нажатии.
+    let pixels_per_point = start_pixels_per_point.max(f32::EPSILON) as f64;
+    let delta_x =
+        (current_screen_position.0 as f64 - start_screen_position.0 as f64) / pixels_per_point;
+    let delta_y =
+        (current_screen_position.1 as f64 - start_screen_position.1 as f64) / pixels_per_point;
+    let threshold = super::window_frame::TAB_DRAG_THRESHOLD as f64;
+    delta_x * delta_x + delta_y * delta_y > threshold * threshold
+}
+
+pub(super) fn tab_drag_press_hits_body(
+    tab_rect: egui::Rect,
+    close_rect: egui::Rect,
+    press_origin: egui::Pos2,
+) -> bool {
+    // Рамка вкладки начинает drag, кроме отдельной области закрытия.
+    tab_rect.contains(press_origin) && !close_rect.contains(press_origin)
+}
+
+pub(super) fn advance_tab_drag_state(
+    state: TabDragState,
+    current_screen_position: Option<(i32, i32)>,
+    primary_button_down: bool,
+    escape_pressed: bool,
+) -> TabDragState {
+    let TabDragState::Pressed {
+        tab_id,
+        start_screen_position,
+        start_pixels_per_point,
+    } = state
+    else {
+        return state;
+    };
+
+    if escape_pressed {
+        return TabDragState::Cancelled;
+    }
+    if current_screen_position.is_some_and(|current| {
+        tab_drag_threshold_crossed(start_screen_position, current, start_pixels_per_point)
+    }) {
+        return TabDragState::Dragging { tab_id };
+    }
+    if !primary_button_down {
+        return TabDragState::Idle;
+    }
+    state
 }
 
 pub(super) fn preview_window_position(
@@ -385,7 +476,6 @@ impl FileManagerApp {
             ctx.send_viewport_cmd_to(viewport_id, egui::ViewportCommand::Close);
         }
         self.tab_drag_preview = TabDragPreviewState::default();
-        self.tab_drag = None;
-        self.tab_press = None;
+        self.tab_drag_state = TabDragState::Idle;
     }
 }

@@ -1,8 +1,8 @@
 //! Тесты расположения вкладок, навигации и окон.
 use super::{
     PreviewState, breadcrumb_segments, configure_tab_scroll_style, dropped_paths,
-    floating_dialog_viewport, is_tab_dragging, parse_archive_address, persisted_tab_path,
-    tab_close_button_hovered, tab_scroll_source, tab_strip_content_margin,
+    floating_dialog_viewport, parse_archive_address, persisted_tab_path, tab_close_button_hovered,
+    tab_scroll_source, tab_strip_content_margin,
 };
 use std::path::{Path, PathBuf};
 
@@ -85,17 +85,80 @@ fn tab_strip_uses_mouse_wheel_without_showing_a_scrollbar() {
 }
 
 #[test]
-fn dragging_over_another_tabs_close_control_does_not_activate_it() {
-    let close_rect = egui::Rect::from_min_size(egui::pos2(20.0, 10.0), egui::vec2(18.0, 24.0));
-    let pointer = Some(close_rect.center());
-    assert!(tab_close_button_hovered(false, false, close_rect, pointer));
-    assert!(!tab_close_button_hovered(true, false, close_rect, pointer));
-    assert!(!tab_close_button_hovered(false, true, close_rect, pointer));
+fn tab_drag_fsm_distinguishes_click_drag_and_close_hitbox() {
+    use super::tab_drag_preview::{
+        TabDragState, advance_tab_drag_state, tab_drag_press_hits_body, tab_drag_threshold_crossed,
+        viewport_position_to_screen,
+    };
+    use super::window_frame::TAB_CLOSE_WIDTH;
 
-    let press = Some((0, egui::pos2(10.0, 10.0)));
-    assert!(!is_tab_dragging(None, press, Some(egui::pos2(15.0, 10.0))));
-    assert!(is_tab_dragging(None, press, Some(egui::pos2(16.0, 10.0))));
-    assert!(is_tab_dragging(Some(0), None, None));
+    let tab_rect = egui::Rect::from_min_size(egui::pos2(10.0, 10.0), egui::vec2(120.0, 24.0));
+    let close_rect = egui::Rect::from_min_size(
+        egui::pos2(tab_rect.right() - TAB_CLOSE_WIDTH, tab_rect.top()),
+        egui::vec2(TAB_CLOSE_WIDTH, tab_rect.height()),
+    );
+    assert!(tab_drag_press_hits_body(
+        tab_rect,
+        close_rect,
+        egui::pos2(40.0, 20.0)
+    ));
+    assert!(!tab_drag_press_hits_body(
+        tab_rect,
+        close_rect,
+        close_rect.center()
+    ));
+    assert!(tab_close_button_hovered(
+        false,
+        false,
+        close_rect,
+        Some(close_rect.center())
+    ));
+    assert!(!tab_close_button_hovered(
+        true,
+        false,
+        close_rect,
+        Some(close_rect.center())
+    ));
+
+    let start =
+        viewport_position_to_screen(egui::pos2(40.0, 20.0), egui::pos2(-1280.0, -200.0), 1.5);
+    assert_eq!(start, (-1860, -270));
+    let pressed = TabDragState::Pressed {
+        tab_id: 7,
+        start_screen_position: start,
+        start_pixels_per_point: 1.5,
+    };
+    assert_eq!(
+        advance_tab_drag_state(pressed, Some((start.0 + 5, start.1)), true, false),
+        pressed
+    );
+    assert_eq!(
+        advance_tab_drag_state(pressed, Some((start.0 + 5, start.1)), false, false),
+        TabDragState::Idle
+    );
+    assert_eq!(
+        advance_tab_drag_state(pressed, Some((start.0 + 7, start.1)), true, false),
+        TabDragState::Dragging { tab_id: 7 }
+    );
+    assert_eq!(
+        advance_tab_drag_state(pressed, Some((start.0 + 200, start.1 + 300)), true, false),
+        TabDragState::Dragging { tab_id: 7 }
+    );
+    assert!(!tab_drag_threshold_crossed(
+        start,
+        (start.0 + 7, start.1),
+        2.0
+    ));
+    assert!(tab_drag_threshold_crossed(
+        start,
+        (start.0 + 9, start.1),
+        2.0
+    ));
+    assert_eq!(
+        advance_tab_drag_state(pressed, Some(start), true, true),
+        TabDragState::Cancelled
+    );
+    assert!(TabDragState::Cancelled.is_active());
 }
 
 #[test]
