@@ -11,9 +11,53 @@ mod windows;
 #[cfg(windows)]
 pub use self::windows::{acquire_single_instance, decode_image, drives, extract_zip_all, extract_zip_file, extract_zip_folder, format_local_time, free_space, get_clipboard_files, get_clipboard_text, install_context_menu, launch_updater, notify_already_running, open_recycle_bin, open_terminal, pipe_listen, pipe_send, prepare_update_archive, read_zip_dir_cancellable, recycle_bin, replace_file, search_zip, set_attributes, set_clipboard_files, shell_open, signal_update_started, uninstall_context_menu, AcquireResult, SingleInstanceGuard};
 
+#[cfg(windows)]
+pub(crate) use self::windows::{
+    TabDragPreviewWindow, cursor_screen_position, escape_key_down, left_mouse_button_down,
+};
+
 /// Stubs for non-Windows hosts so the crate still compiles for docs/tests.
 #[cfg(not(windows))]
 mod stubs {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) struct TabDragPreviewWindow;
+
+    impl TabDragPreviewWindow {
+        pub(crate) fn find(_title: &str) -> Option<Self> {
+            None
+        }
+
+        pub(crate) fn is_valid(&self) -> bool {
+            false
+        }
+
+        pub(crate) fn set_position(&self, _x: i32, _y: i32) -> bool {
+            false
+        }
+
+        pub(crate) fn capture_mouse(&self) -> bool {
+            false
+        }
+
+        pub(crate) fn owns_mouse_capture(&self) -> bool {
+            false
+        }
+
+        pub(crate) fn release_mouse_capture(&self) {}
+    }
+
+    pub(crate) fn cursor_screen_position() -> Option<(i32, i32)> {
+        None
+    }
+
+    pub(crate) fn left_mouse_button_down() -> bool {
+        false
+    }
+
+    pub(crate) fn escape_key_down() -> bool {
+        false
+    }
+
     pub enum AcquireResult {
         Acquired(SingleInstanceGuard),
         AlreadyRunning,
@@ -138,6 +182,11 @@ mod stubs {
 
 #[cfg(not(windows))]
 pub use stubs::{acquire_single_instance, decode_image, drives, extract_zip_all, extract_zip_file, extract_zip_folder, format_local_time, free_space, get_clipboard_files, get_clipboard_text, install_context_menu, launch_updater, notify_already_running, open_recycle_bin, open_terminal, pipe_listen, pipe_send, prepare_update_archive, read_zip_dir_cancellable, recycle_bin, replace_file, search_zip, set_attributes, set_clipboard_files, shell_open, signal_update_started, uninstall_context_menu, AcquireResult, SingleInstanceGuard};
+
+#[cfg(not(windows))]
+pub(crate) use stubs::{
+    TabDragPreviewWindow, cursor_screen_position, escape_key_down, left_mouse_button_down,
+};
 
 pub(crate) fn ops_platform() -> crate::core::ops::OpsPlatform {
     crate::core::ops::OpsPlatform::new(free_space, recycle_bin, replace_file)

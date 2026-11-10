@@ -94,14 +94,13 @@ impl FileManagerApp {
             ),
         )
         .expand2(egui::vec2(style::FRAME_PADDING_X as f32, 0.0));
-        let mut detach_tab_id = None;
+        let pointer_pos = self.tab_drag_preview.pointer_pos(ctx);
+        let mut tab_rects = Vec::new();
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = style::SPACE_XS;
             let mut act: Option<(&str, usize)> = None;
-            let mut drop_dst = None;
             let mut drag_src = None;
-            let mut dragging_tab =
-                is_tab_dragging(self.tab_drag, self.tab_press, ui.ctx().pointer_latest_pos());
+            let mut dragging_tab = is_tab_dragging(self.tab_drag, self.tab_press, pointer_pos);
             let metas: Vec<(usize, bool, String)> = self
                 .tabs
                 .iter()
@@ -155,6 +154,7 @@ impl FileManagerApp {
                                 // Обычный клик сохраняет работу глобальных сочетаний клавиш.
                                 let (rect, resp) =
                                     ui.allocate_exact_size(size, egui::Sense::click());
+                                tab_rects.push((display_index, rect));
                                 let x_rect = egui::Rect::from_min_max(
                                     egui::pos2(rect.max.x - close_w, rect.min.y),
                                     rect.max,
@@ -163,7 +163,7 @@ impl FileManagerApp {
                                     dragging_tab,
                                     *pinned,
                                     x_rect,
-                                    ui.ctx().pointer_latest_pos(),
+                                    pointer_pos,
                                 );
                                 let visuals = ui.visuals();
                                 let painter = ui.painter();
@@ -289,7 +289,7 @@ impl FileManagerApp {
                                 }
                                 // Начинаем перестановку после выхода указателя за порог перетаскивания.
                                 if resp.is_pointer_button_down_on()
-                                    && let Some(p) = ui.ctx().pointer_latest_pos()
+                                    && let Some(p) = pointer_pos
                                 {
                                     if self.tab_press.is_none() {
                                         self.tab_press = Some((*i, p));
@@ -304,15 +304,10 @@ impl FileManagerApp {
                                     }
                                 }
                                 if (drag_src.is_some() || self.tab_drag.is_some())
-                                    && let Some(pos) = ui.ctx().pointer_latest_pos()
+                                    && let Some(pos) = pointer_pos
                                     && rect.contains(pos)
                                 {
                                     let before = pos.x < rect.center().x;
-                                    drop_dst = Some(if before {
-                                        display_index
-                                    } else {
-                                        display_index + 1
-                                    });
                                     // Показываем место вставки рядом с наведённой вкладкой.
                                     ui.painter().vline(
                                         if before { rect.left() } else { rect.right() },
@@ -344,55 +339,13 @@ impl FileManagerApp {
                 super::window_frame::toggle_maximized(ctx);
             }
             self.window_controls(ctx, ui);
-            if let Some(src) = drag_src.or(self.tab_drag)
-                && let Some(pos) = ui.ctx().pointer_latest_pos()
-                && let Some((_, _, title)) = metas.iter().find(|(index, _, _)| *index == src)
-            {
-                // Показываем перетаскиваемую вкладку под указателем.
-                egui::Area::new(ui.scope_id().with("tab_drag_chip"))
-                    .order(egui::Order::Foreground)
-                    .current_pos(
-                        pos + egui::vec2(
-                            super::window_frame::TAB_DRAG_CHIP_OFFSET_X,
-                            super::window_frame::TAB_DRAG_CHIP_OFFSET_Y,
-                        ),
-                    )
-                    .show(ui.ctx(), |ui| {
-                        egui::Frame::new()
-                            .fill(ui.visuals().extreme_bg_color)
-                            .corner_radius(style::RADIUS_ROW)
-                            .inner_margin(egui::Margin::symmetric(
-                                style::FRAME_PADDING_X,
-                                style::FRAME_PADDING_Y,
-                            ))
-                            .stroke(egui::Stroke::new(
-                                super::window_frame::TAB_DRAG_CHIP_STROKE,
-                                ui.visuals().selection.stroke.color,
-                            ))
-                            .show(ui, |ui| {
-                                ui.label(title.clone());
-                            });
-                    });
-            }
             if let Some(src) = drag_src {
                 self.tab_drag = Some(src);
-            }
-            if ui.ctx().input(|i| i.pointer.any_released()) {
-                if let Some(src) = self.tab_drag {
-                    let released_inside_frame = !super::window_frame::release_is_outside_frame(
-                        frame_rect,
-                        ui.ctx().pointer_latest_pos(),
-                    );
-                    if released_inside_frame {
-                        if let Some(dst) = drop_dst {
-                            self.move_visible_tab(src, dst);
-                        }
-                    } else if let Some(tab) = self.tabs.get(src) {
-                        detach_tab_id = Some(tab.id);
-                    }
-                    self.tab_drag = None;
+                if !self.tab_drag_preview.is_active()
+                    && let Some(tab) = self.tabs.get(src)
+                {
+                    self.tab_drag_preview.begin(tab.id);
                 }
-                self.tab_press = None;
             }
             if let Some((what, i)) = act {
                 match what {
@@ -405,8 +358,16 @@ impl FileManagerApp {
                 }
             }
         });
-        if let Some(tab_id) = detach_tab_id {
-            self.request_detach_tab(tab_id);
+        self.tab_drag_preview
+            .set_drop_geometry(frame_rect, tab_rects);
+        let pointer_released = ctx.input(|input| input.pointer.any_released());
+        let pointer_left_window =
+            ctx.pointer_latest_pos().is_none() && !crate::platform::left_mouse_button_down();
+        if !self.tab_drag_preview.is_active()
+            && self.tab_press.is_some()
+            && (pointer_released || pointer_left_window)
+        {
+            self.tab_press = None;
         }
     }
 
