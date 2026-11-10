@@ -114,11 +114,12 @@ impl FileManagerApp {
         let builder = floating_dialog_viewport(
             ctx,
             title,
-            egui::vec2(560.0, 315.0),
+            egui::vec2(560.0, 360.0),
             self.settings_viewport_placed,
         );
         let mut close_requested = false;
         let mut hidden_files_changed = false;
+        let mut wsl_visibility_changed = false;
         ctx.show_viewport_immediate(viewport_id, builder, |viewport_ui, _class| {
             let viewport_ctx = viewport_ui.ctx().clone();
             if viewport_ctx.input(|i| i.viewport().close_requested()) {
@@ -194,6 +195,21 @@ impl FileManagerApp {
                         ui.label(
                             egui::RichText::new(self.t("settings.show_hidden_files_hint")).weak(),
                         );
+                        ui.add_space(style::SPACE_MD);
+                        let show_wsl_label = self.t("settings.show_wsl_in_tree").to_owned();
+                        if ui
+                            .checkbox(
+                                &mut self.store.settings.show_wsl_in_tree,
+                                show_wsl_label,
+                            )
+                            .changed()
+                        {
+                            wsl_visibility_changed = true;
+                        }
+                        ui.add_space(style::SPACE_SM);
+                        ui.label(
+                            egui::RichText::new(self.t("settings.show_wsl_in_tree_hint")).weak(),
+                        );
                     });
                 });
             });
@@ -202,6 +218,12 @@ impl FileManagerApp {
             self.persist();
             for tab in 0..self.tabs.len() {
                 self.navigate_fresh(tab, ctx);
+            }
+        }
+        if wsl_visibility_changed {
+            self.persist();
+            if self.store.settings.show_wsl_in_tree {
+                self.refresh_wsl_distributions();
             }
         }
         self.settings_viewport_placed = !close_requested;

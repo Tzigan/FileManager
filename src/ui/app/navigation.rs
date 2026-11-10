@@ -152,6 +152,9 @@ impl FileManagerApp {
             tracing::info!(tab_id, generation, "folder listing started");
             let result = match archive_prefix {
                 Some(prefix) => crate::platform::read_zip_dir_cancellable(&path, &prefix, &cancel),
+                None if crate::platform::is_wsl_path(&path) => {
+                    crate::platform::read_wsl_dir(&path, &cancel)
+                }
                 None => fs::read_dir(&path, &cancel),
             };
             // Фильтруем в worker, чтобы список скрытых файлов не собирался в UI.
@@ -253,6 +256,7 @@ impl FileManagerApp {
     }
 
     pub(crate) fn refresh(&mut self, ctx: &egui::Context) {
+        self.refresh_wsl_distributions();
         self.navigate_fresh(self.active, ctx);
     }
 
