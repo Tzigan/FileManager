@@ -97,7 +97,8 @@ impl FileManagerApp {
         self.advance_tab_drag_state(ctx);
         let pointer_pos = self.tab_drag_preview.pointer_pos(ctx);
         let mut tab_rects = Vec::new();
-        ui.horizontal(|ui| {
+        // Вкладки и кнопку «+» центрируем по вертикали в пределах всей строки.
+        ui.horizontal_centered(|ui| {
             ui.spacing_mut().item_spacing.x = style::SPACE_XS;
             let mut act: Option<(&str, usize)> = None;
             let mut dragging_tab = self.tab_drag_state.is_dragging();
