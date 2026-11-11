@@ -3,7 +3,12 @@
 use super::*;
 
 impl FileManagerApp {
-    pub(super) fn grid_view(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+    pub(super) fn grid_view(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        visual_order: Option<&[usize]>,
+    ) {
         let cell = 112.0f32;
         let cols = (ui.available_width() / cell).floor().max(1.0) as usize;
         let count = self.tabs[self.active].entries.len();
@@ -17,7 +22,7 @@ impl FileManagerApp {
                         for col in 0..cols {
                             let index = row * cols + col;
                             if index < count {
-                                self.grid_tile(ui, index, ctx);
+                                self.grid_tile(ui, index, ctx, visual_order);
                             }
                         }
                     });
@@ -26,12 +31,18 @@ impl FileManagerApp {
             });
     }
 
-    fn grid_tile(&mut self, ui: &mut egui::Ui, index: usize, ctx: &egui::Context) {
+    fn grid_tile(
+        &mut self,
+        ui: &mut egui::Ui,
+        index: usize,
+        ctx: &egui::Context,
+        visual_order: Option<&[usize]>,
+    ) {
         let Some(entry) = entry_at(&self.tabs[self.active].entries, index) else {
             return;
         };
         let (rect, resp) = ui.allocate_exact_size(egui::vec2(104.0, 68.0), egui::Sense::click());
-        let selected = self.tabs[self.active].selection.contains(&index);
+        let selected = self.tabs[self.active].is_selected(&entry);
         let focused = self.tabs[self.active].cursor == index;
         if selected {
             ui.painter()
@@ -72,6 +83,6 @@ impl FileManagerApp {
             font,
             ui.visuals().text_color(),
         );
-        self.entry_actions(&resp, index, &entry, ui, ctx);
+        self.entry_actions(&resp, index, &entry, visual_order, ui, ctx);
     }
 }

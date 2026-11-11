@@ -332,17 +332,14 @@ impl FileManagerApp {
         if tab.archive_prefix.is_some() {
             return;
         }
-        let idx = tab
-            .selection
-            .iter()
-            .next()
-            .copied()
-            .or(if tab.entries.is_empty() {
-                None
-            } else {
-                Some(tab.cursor)
-            });
-        if let Some(e) = idx.and_then(|i| tab.entries.get(i)) {
+        let selected = if tab.selection.len() == 1 {
+            tab.selection.iter().next().and_then(|key| {
+                tab.entries.iter().find(|entry| key.matches(entry))
+            })
+        } else {
+            tab.entries.get(tab.cursor)
+        };
+        if let Some(e) = selected {
             self.props_target = Some(e.path.clone());
         }
     }

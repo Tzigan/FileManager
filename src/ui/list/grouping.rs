@@ -9,6 +9,15 @@ pub(super) enum ListRow {
     Item(usize),
 }
 
+pub(super) fn item_order(rows: &[ListRow]) -> Vec<usize> {
+    rows.iter()
+        .filter_map(|row| match row {
+            ListRow::Item(index) => Some(*index),
+            ListRow::Header { .. } => None,
+        })
+        .collect()
+}
+
 #[cfg(test)]
 pub(super) fn table_rows(
     entries: &[FileEntry],
@@ -207,6 +216,12 @@ impl FileManagerApp {
             tab.sort_key,
             tab.sort_desc,
         )
+    }
+
+    pub(crate) fn selection_order(&self) -> Option<Vec<usize>> {
+        (self.store.settings.view_mode == crate::core::settings::ViewMode::Table
+            && self.store.settings.group_by_type)
+            .then(|| item_order(&self.build_rows()))
     }
 
     pub(super) fn group_header(

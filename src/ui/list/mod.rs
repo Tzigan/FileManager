@@ -8,7 +8,7 @@ pub(super) use columns::next_sort_order;
 use columns::{COL_GAP, paint_column_separators, table_rows_content_margin};
 #[cfg(test)]
 use columns::{column_positions, column_separator_x};
-use grouping::{ListRow, move_group_order};
+use grouping::{ListRow, item_order, move_group_order};
 #[cfg(test)]
 use grouping::{group_drag_threshold_crossed, table_rows, table_rows_sorted};
 use rows::entry_at;
@@ -29,20 +29,85 @@ impl FileManagerApp {
         style::dense_vertical_spacing(ui.style_mut());
 
         let count = self.tabs[self.active].entries.len();
+        let table_view = self.store.settings.view_mode == ViewMode::Table;
+        if !table_view {
+            self.tabs[self.active].selection_marquee = None;
+        }
         // Background hit-test under the whole list: rows drawn later win their
         // rects, empty space falls through to this response.
         let bg = ui.available_rect_before_wrap();
+        let bg_sense = if table_view {
+            egui::Sense::click_and_drag()
+        } else {
+            egui::Sense::click()
+        };
         let bg_resp = ui.interact(
             bg,
             ui.scope_id().with("empty_list_area"),
-            egui::Sense::click(),
+            bg_sense,
         );
         let mut group_drop: Option<(Vec<String>, String, bool)> = None;
+        let mut marquee_rect = None;
         match self.store.settings.view_mode {
             ViewMode::Table => {
                 self.list_header(ui);
                 ui.separator();
+                let rows_area = ui.available_rect_before_wrap().intersect(ui.clip_rect());
+                let primary_down =
+                    ctx.input(|input| input.pointer.button_down(egui::PointerButton::Primary));
+                let primary_released =
+                    ctx.input(|input| input.pointer.button_released(egui::PointerButton::Primary));
+                if !primary_down && !primary_released {
+                    self.tabs[self.active].selection_marquee = None;
+                }
+                if bg_resp.drag_started_by(egui::PointerButton::Primary)
+                    && self.group_press.is_none()
+                    && let Some(start) = ctx
+                        .input(|input| input.pointer.press_origin())
+                        .or_else(|| bg_resp.interact_pointer_pos())
+                    && rows_area.contains(start)
+                {
+                    let tab = &mut self.tabs[self.active];
+                    if !ctx.input(|input| input.modifiers.command) {
+                        tab.selection.clear();
+                        tab.anchor = None;
+                    }
+                    tab.selection_marquee = Some(crate::ui::tabs::SelectionMarquee {
+                        start,
+                        current: start,
+                        added: std::collections::BTreeSet::new(),
+                    });
+                }
+                if let Some(tab) = self.tabs.get_mut(self.active)
+                    && let Some(marquee) = &mut tab.selection_marquee
+                {
+                    if let Some(pointer) = ctx.pointer_latest_pos() {
+                        marquee.current = pointer;
+                    }
+                    // На каждом кадре обновляем только элементы, затронутые рамкой.
+                    let previous_additions = std::mem::take(&mut marquee.added);
+                    for key in previous_additions {
+                        tab.selection.remove(&key);
+                    }
+                    if tab
+                        .anchor
+                        .as_ref()
+                        .is_some_and(|key| !tab.selection.contains(key))
+                    {
+                        tab.anchor = None;
+                    }
+                    marquee_rect = Some(
+                        egui::Rect::from_two_pos(marquee.start, marquee.current)
+                            .expand(1.0)
+                            .intersect(rows_area),
+                    );
+                }
                 let rows = self.build_rows();
+                let visual_order = self
+                    .store
+                    .settings
+                    .group_by_type
+                    .then(|| item_order(&rows));
                 let group_keys: Vec<String> = rows
                     .iter()
                     .filter_map(|row| match row {
@@ -57,7 +122,16 @@ impl FileManagerApp {
                     .show_rows(ui, ROW_HEIGHT, rows.len(), |ui, range| {
                         for index in range {
                             match &rows[index] {
-                                ListRow::Item(i) => self.file_row(ui, *i, ctx),
+                                ListRow::Item(i) => {
+                                    self.file_row(
+                                        ui,
+                                        *i,
+                                        ctx,
+                                        visual_order.as_deref(),
+                                        marquee_rect,
+                                    );
+                                }
+                                // Заголовок группы отображается, но не попадает в выбор.
                                 ListRow::Header { key, label } => {
                                     self.group_header(ui, key, label, &mut drop_target)
                                 }
@@ -73,15 +147,32 @@ impl FileManagerApp {
                     .auto_shrink([false, false])
                     .show_rows(ui, ROW_HEIGHT, count, |ui, range| {
                         for index in range {
-                            self.list_row(ui, index, ctx);
+                            self.list_row(ui, index, ctx, None);
                         }
                     });
             }
             ViewMode::Grid => {
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
-                    .show(ui, |ui| self.grid_view(ui, ctx));
+                    .show(ui, |ui| self.grid_view(ui, ctx, None));
             }
+        }
+        if let Some(rect) = marquee_rect {
+            let visuals = ui.visuals();
+            ui.painter().rect_filled(
+                rect,
+                style::RADIUS_ICON_FINE,
+                visuals.selection.bg_fill.gamma_multiply(0.28),
+            );
+            ui.painter().rect_stroke(
+                rect,
+                style::RADIUS_ICON_FINE,
+                egui::Stroke::new(1.0, visuals.selection.stroke.color),
+                egui::StrokeKind::Inside,
+            );
+        }
+        if ctx.input(|input| input.pointer.button_released(egui::PointerButton::Primary)) {
+            self.tabs[self.active].selection_marquee = None;
         }
         if ctx.input(|i| i.pointer.any_released()) {
             if let Some((source, _)) = self.group_drag.take() {
@@ -139,6 +230,13 @@ mod tests {
             extension: extension.map(str::to_owned),
             archive_member: None,
         }
+    }
+
+    fn keys_for(entries: &[FileEntry], indices: &[usize]) -> BTreeSet<crate::ui::tabs::SelectionKey> {
+        indices
+            .iter()
+            .map(|&index| crate::ui::tabs::SelectionKey::from_entry(&entries[index]))
+            .collect()
     }
 
     fn names_in_group(rows: &[ListRow], entries: &[FileEntry], group_key: &str) -> Vec<String> {
@@ -217,6 +315,97 @@ mod tests {
             .collect();
         seen.sort_unstable();
         assert_eq!(seen, (0..entries.len()).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn grouped_shift_range_and_marquee_use_only_visual_item_rows() {
+        let entries = vec![
+            entry("z.txt", false, Some("txt")),
+            entry("B folder", true, None),
+            entry("readme", false, None),
+            entry("A folder", true, None),
+            entry("a.md", false, Some("md")),
+            entry("a.txt", false, Some("txt")),
+        ];
+        let rows = table_rows(&entries, true, &[], "Folders", "Files");
+        let visual_order = item_order(&rows);
+        assert_eq!(visual_order, [3, 1, 2, 4, 5, 0]);
+
+        let mut selection = BTreeSet::new();
+        let mut anchor = None;
+        crate::ui::tabs::apply_click(
+            &mut selection,
+            &mut anchor,
+            &entries,
+            Some(&visual_order),
+            1,
+            false,
+            false,
+        );
+        assert_eq!(selection, keys_for(&entries, &[1]));
+        crate::ui::tabs::apply_click(
+            &mut selection,
+            &mut anchor,
+            &entries,
+            Some(&visual_order),
+            5,
+            false,
+            true,
+        );
+        let expected: BTreeSet<_> = [1, 2, 4, 5]
+            .into_iter()
+            .map(|index| crate::ui::tabs::SelectionKey::from_entry(&entries[index]))
+            .collect();
+        assert_eq!(selection, expected);
+
+        let mut marquee = crate::ui::tabs::SelectionMarquee {
+            start: egui::pos2(0.0, 0.0),
+            current: egui::pos2(10.0, 10.0),
+            added: BTreeSet::new(),
+        };
+        let mut marquee_selection = BTreeSet::new();
+        for &index in &visual_order[1..4] {
+            crate::ui::tabs::add_marquee_entry(
+                &mut marquee_selection,
+                &mut marquee,
+                &entries[index],
+            );
+        }
+        let marquee_expected: BTreeSet<_> = [1, 2, 4]
+            .into_iter()
+            .map(|index| crate::ui::tabs::SelectionKey::from_entry(&entries[index]))
+            .collect();
+        assert_eq!(marquee_selection, marquee_expected);
+        assert_eq!(marquee.added, marquee_expected);
+    }
+
+    #[test]
+    fn grouping_toggle_keeps_selection_on_the_same_entries() {
+        let entries = vec![
+            entry("z.txt", false, Some("txt")),
+            entry("folder", true, None),
+            entry("a.md", false, Some("md")),
+        ];
+        let selected: BTreeSet<_> = [0, 2]
+            .into_iter()
+            .map(|index| crate::ui::tabs::SelectionKey::from_entry(&entries[index]))
+            .collect();
+        let grouped = item_order(&table_rows(&entries, true, &[], "Folders", "Files"));
+        let flat = item_order(&table_rows(&entries, false, &[], "Folders", "Files"));
+        assert_ne!(grouped, flat);
+        let selected_names = |order: &[usize]| {
+            order
+                .iter()
+                .filter_map(|&index| {
+                    let entry = &entries[index];
+                    selected
+                        .contains(&crate::ui::tabs::SelectionKey::from_entry(entry))
+                        .then(|| entry.name.clone())
+                })
+                .collect::<BTreeSet<_>>()
+        };
+        assert_eq!(selected_names(&grouped), BTreeSet::from(["a.md".to_owned(), "z.txt".to_owned()]));
+        assert_eq!(selected_names(&flat), BTreeSet::from(["a.md".to_owned(), "z.txt".to_owned()]));
     }
 
     #[test]

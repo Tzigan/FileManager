@@ -491,11 +491,21 @@ impl FileManagerApp {
 
     pub(crate) fn sort_col(&mut self, key: SortKey) {
         let tab = &mut self.tabs[self.active];
+        let cursor_key = tab
+            .entries
+            .get(tab.cursor)
+            .map(crate::ui::tabs::SelectionKey::from_entry);
         (tab.sort_key, tab.sort_desc) =
             super::list::next_sort_order(tab.sort_key, tab.sort_desc, key);
         let (k, d) = (tab.sort_key, tab.sort_desc);
         fs::sort_entries_by(&mut tab.entries, k, d);
-        tab.clear_selection();
+        if let Some(cursor_key) = cursor_key {
+            tab.cursor = tab
+                .entries
+                .iter()
+                .position(|entry| cursor_key.matches(entry))
+                .unwrap_or(0);
+        }
     }
 
     pub(crate) fn set_view(&mut self, mode: ViewMode) {
@@ -539,9 +549,10 @@ impl FileManagerApp {
                             t.status = ListStatus::Ready;
                             if let Some(name) = pending_name {
                                 if let Some(i) = t.entries.iter().position(|e| e.name == name) {
-                                    t.selection.insert(i);
+                                    let key = crate::ui::tabs::SelectionKey::from_entry(&t.entries[i]);
+                                    t.selection.insert(key.clone());
                                     t.cursor = i;
-                                    t.anchor = Some(i);
+                                    t.anchor = Some(key);
                                     self.scroll_to_cursor = true;
                                 }
                             }
