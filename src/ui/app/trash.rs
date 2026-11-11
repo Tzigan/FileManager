@@ -172,6 +172,7 @@ impl FileManagerApp {
         let allow_fallback = self.store.settings.secure_trash_allow_fallback;
         let fallback = allow_fallback.then(|| self.dirs.config_dir.clone());
         let tx = self.msg_tx.clone();
+        let finished_paths = paths.clone();
         thread::spawn(move || {
             let mut errors = Vec::new();
             for path in paths {
@@ -187,7 +188,10 @@ impl FileManagerApp {
                     errors.push(format!("{}: {}", path.display(), error));
                 }
             }
-            let _ = tx.send(WorkerMsg::SecureTrashFinished(errors));
+            let _ = tx.send(WorkerMsg::SecureTrashFinished {
+                errors,
+                paths: finished_paths,
+            });
         });
     }
 
@@ -423,6 +427,8 @@ impl FileManagerApp {
             let roots = secure_trash::allowed_restore_roots(Path::new(&record.original_path));
             match secure_trash::restore(&record, current.as_deref(), &roots, conflict) {
                 Ok(path) => {
+                    // Восстановленный файл лежит в обычной папке. Корзина по-прежнему читается отдельно.
+                    self.dir_cache.invalidate_dir(&path);
                     let mut notice = format!("{}: {}", self.t("trash.restored"), path.display());
                     if let Some(key) = secure_trash::integrity_status_key(&record) {
                         notice = format!("{notice}. {}", self.t(key));
