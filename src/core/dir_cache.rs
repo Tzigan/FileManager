@@ -5,7 +5,7 @@
 //! Задел `invalidate_dir` нужен будущему наблюдению за папкой, само наблюдение здесь не делается.
 
 use std::collections::{HashMap, VecDeque};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use crate::core::fs::FileEntry;
 use crate::core::ops::OpKind;
@@ -59,11 +59,16 @@ fn raw_subtree_root(path: &Path) -> Option<PathBuf> {
     Some(parent.join(name))
 }
 
-/// `C:\dir` накрывает `C:\dir` и `C:\dir\sub`, но не `C:\directory`.
+/// `C:\Work` накрывает `C:\Work` и `C:\Work\sub`, но не `C:\Workplace`.
+/// `Path::starts_with` режет по компонентам, поэтому сырой префикс строки не нужен.
 fn path_is_inside(root: &Path, candidate: &Path) -> bool {
-    let root: Vec<Component<'_>> = root.components().collect();
-    let candidate: Vec<Component<'_>> = candidate.components().collect();
-    candidate.len() >= root.len() && candidate[..root.len()] == root[..]
+    candidate.starts_with(root)
+}
+
+fn compose_cache_key(path: Option<PathBuf>, volume: Option<String>) -> Option<CacheKey> {
+    let path = path?;
+    let volume = volume.filter(|id| !id.is_empty())?;
+    Some(CacheKey::new(path, volume))
 }
 
 fn parents(paths: &[PathBuf]) -> Vec<PathBuf> {
@@ -128,11 +133,10 @@ impl DirCache {
         std::fs::canonicalize(path).ok()
     }
 
-    /// Ключ для живой папки. Без серийного номера тома не кэшируем: буква диска могла смениться.
+    /// Ключ для живой папки. Ошибка канонизации или тома — `None`, без паники: папка просто не кэшируется.
     pub fn cache_key(path: &Path) -> Option<CacheKey> {
         let path = Self::canonical_key(path)?;
-        let volume = crate::platform::volume_id(&path)?;
-        Some(CacheKey::new(path, volume))
+        compose_cache_key(Some(path.clone()), crate::platform::volume_id(&path))
     }
 
     /// Заход в уже удалённую папку не канонизируется и поэтому не достаёт старую запись.
@@ -634,6 +638,114 @@ mod tests {
         let live = DirCache::cache_key(&dir).unwrap();
         assert_eq!(live.volume, crate::platform::volume_id(&dir).unwrap());
         assert_ne!(live, old_disk);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn prefix_invalidation_respects_component_boundary() {
+        let base = scratch("boundary");
+        let work = base.join("Work");
+        let sub = work.join("sub1");
+        let workplace = base.join("Workplace");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::create_dir(&workplace).unwrap();
+        let mut cache = DirCache::new(8);
+        let work_key = DirCache::cache_key(&work).unwrap();
+        let sub_key = DirCache::cache_key(&sub).unwrap();
+        let workplace_key = DirCache::cache_key(&workplace).unwrap();
+        for key in [&work_key, &sub_key, &workplace_key] {
+            let generation = cache.begin(key);
+            assert!(cache.store(key, generation, vec![entry("a.txt", false)]));
+        }
+        cache.invalidate_dir(&work);
+        assert!(cache.get(&work_key).is_none());
+        assert!(cache.get(&sub_key).is_none());
+        assert!(cache.get(&workplace_key).is_some());
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn recursive_delete_invalidates_subtree_and_parent() {
+        let parent = scratch("parent");
+        let dir = parent.join("dir");
+        let sub = dir.join("sub1");
+        std::fs::create_dir_all(&sub).unwrap();
+        let mut cache = DirCache::new(8);
+        let parent_key = DirCache::cache_key(&parent).unwrap();
+        let sub_key = DirCache::cache_key(&sub).unwrap();
+        for key in [&parent_key, &DirCache::cache_key(&dir).unwrap(), &sub_key] {
+            let generation = cache.begin(key);
+            assert!(cache.store(key, generation, vec![entry("old.txt", false)]));
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+        cache.invalidate_dir(&dir);
+        assert!(cache.get(&sub_key).is_none());
+        assert!(cache.get(&parent_key).is_none());
+        assert!(DirCache::cache_key(&sub).is_none());
+        let _ = std::fs::remove_dir_all(parent);
+    }
+
+    #[test]
+    fn move_dir_invalidates_source_subtree_and_dest_parent() {
+        let source_parent = scratch("src-parent");
+        let source = source_parent.join("dir");
+        let nested = source.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        let dest = scratch("dst-parent");
+        let mut cache = DirCache::new(8);
+        let parent_key = DirCache::cache_key(&source_parent).unwrap();
+        let nested_key = DirCache::cache_key(&nested).unwrap();
+        let dest_key = DirCache::cache_key(&dest).unwrap();
+        for key in [&parent_key, &nested_key, &dest_key] {
+            let generation = cache.begin(key);
+            assert!(cache.store(key, generation, vec![entry("old.txt", false)]));
+        }
+        let kind = OpKind::Move {
+            sources: vec![source.clone()],
+            dest: dest.clone(),
+        };
+        for path in affected_dirs(&kind) {
+            cache.invalidate_dir(&path);
+        }
+        assert!(cache.get(&nested_key).is_none());
+        assert!(cache.get(&parent_key).is_none());
+        assert!(cache.get(&dest_key).is_none());
+        let moved = dest.join("dir").join("nested");
+        assert!(DirCache::cache_key(&moved).is_none());
+        let _ = std::fs::remove_dir_all(source_parent);
+        let _ = std::fs::remove_dir_all(dest);
+    }
+
+    #[test]
+    fn dead_path_cache_key_empty_no_stale() {
+        let dir = scratch("dead");
+        let key = DirCache::cache_key(&dir).unwrap();
+        let mut cache = DirCache::new(4);
+        let generation = cache.begin(&key);
+        assert!(cache.store(&key, generation, vec![entry("ghost.txt", false)]));
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(DirCache::cache_key(&dir).is_none());
+        assert!(cache.lookup(&dir).is_none());
+    }
+
+    #[test]
+    fn canonicalize_error_non_enoent_does_not_panic() {
+        let dir = scratch("not-a-dir");
+        // Слишком длинное имя — не код 2 (файл не найден). Кэш всё равно молча отказывается.
+        let blocked = dir.join("a".repeat(300));
+        let error = std::fs::canonicalize(&blocked).unwrap_err();
+        assert_ne!(error.raw_os_error(), Some(2), "{error:?}");
+        let key = std::panic::catch_unwind(|| DirCache::cache_key(&blocked)).unwrap();
+        assert!(key.is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn volume_unreadable_not_cached() {
+        let dir = scratch("no-volume");
+        let path = DirCache::canonical_key(&dir).unwrap();
+        assert!(compose_cache_key(Some(path), None).is_none());
+        assert!(compose_cache_key(None, Some("AAAA1111".into())).is_none());
         let _ = std::fs::remove_dir_all(dir);
     }
 }
