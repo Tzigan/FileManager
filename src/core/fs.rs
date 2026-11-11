@@ -91,9 +91,18 @@ pub fn sort_entries_by(entries: &mut Vec<FileEntry>, key: SortKey, desc: bool) {
         b.is_dir.cmp(&a.is_dir).then_with(|| {
             let ord = match key {
                 SortKey::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
-                SortKey::Extension => a.extension.cmp(&b.extension).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())),
-                SortKey::Size => a.size.cmp(&b.size).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())),
-                SortKey::Modified => a.modified.cmp(&b.modified).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())),
+                SortKey::Extension => a
+                    .extension
+                    .cmp(&b.extension)
+                    .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())),
+                SortKey::Size => a
+                    .size
+                    .cmp(&b.size)
+                    .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())),
+                SortKey::Modified => a
+                    .modified
+                    .cmp(&b.modified)
+                    .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())),
             };
             if desc { ord.reverse() } else { ord }
         })
@@ -111,8 +120,15 @@ pub(crate) fn map_entry(item: &fs::DirEntry) -> Option<FileEntry> {
     // Скрытый и системный атрибуты извлекаем из уже полученной метаинформации.
     let (hidden, system) = visibility_attributes(item, meta.as_ref());
 
-    let is_dir = meta.as_ref().map(|m| m.is_dir()).unwrap_or(file_type.is_dir());
-    let size = if is_dir { None } else { meta.as_ref().map(|m| m.len()) };
+    let is_dir = meta
+        .as_ref()
+        .map(|m| m.is_dir())
+        .unwrap_or(file_type.is_dir());
+    let size = if is_dir {
+        None
+    } else {
+        meta.as_ref().map(|m| m.len())
+    };
     let modified = meta.as_ref().and_then(|m| m.modified().ok());
     let created = meta.as_ref().and_then(|m| m.created().ok());
     let readonly = meta
@@ -120,12 +136,7 @@ pub(crate) fn map_entry(item: &fs::DirEntry) -> Option<FileEntry> {
         .map(|m| m.permissions().readonly())
         .unwrap_or(false);
 
-    let extension = if is_dir {
-        None
-    } else {
-        path.extension()
-            .map(|e| e.to_string_lossy().to_lowercase())
-    };
+    let extension = listing_extension(is_dir, &path);
 
     Some(FileEntry {
         name,
@@ -141,6 +152,18 @@ pub(crate) fn map_entry(item: &fs::DirEntry) -> Option<FileEntry> {
         extension,
         archive_member: None,
     })
+}
+
+/// Расширение для списка и группировки. Папка — без расширения.
+/// У файла берётся последний суффикс после точки, в нижнем регистре:
+/// `NOTES.TXT` и `archive.tar.gz` дают `txt` и `gz`.
+pub fn listing_extension(is_dir: bool, path: &Path) -> Option<String> {
+    if is_dir {
+        None
+    } else {
+        path.extension()
+            .map(|extension| extension.to_string_lossy().to_lowercase())
+    }
 }
 
 /// Lists immediate subdirectories of `path`, sorted case-insensitively.
@@ -162,10 +185,7 @@ pub fn read_subdirs(path: &Path) -> io::Result<Vec<PathBuf>> {
 }
 
 #[cfg(windows)]
-fn visibility_attributes(
-    _item: &fs::DirEntry,
-    metadata: Option<&fs::Metadata>,
-) -> (bool, bool) {
+fn visibility_attributes(_item: &fs::DirEntry, metadata: Option<&fs::Metadata>) -> (bool, bool) {
     use std::os::windows::fs::MetadataExt;
     let Some(metadata) = metadata else {
         // Неизвестные атрибуты скрываем, чтобы не показывать защищённую запись.
@@ -199,10 +219,7 @@ fn windows_attributes_are_system(attributes: u32) -> bool {
 }
 
 #[cfg(not(windows))]
-fn visibility_attributes(
-    item: &fs::DirEntry,
-    _metadata: Option<&fs::Metadata>,
-) -> (bool, bool) {
+fn visibility_attributes(item: &fs::DirEntry, _metadata: Option<&fs::Metadata>) -> (bool, bool) {
     item.file_name()
         .to_str()
         .map(|n| n.starts_with('.'))
@@ -272,7 +289,11 @@ mod tests {
         let shown_hidden = filter_hidden(entries, true);
         assert_eq!(shown_hidden.len(), 2);
         assert!(shown_hidden.iter().any(|entry| entry.name == "desktop.ini"));
-        assert!(!shown_hidden.iter().any(|entry| entry.name == "system-only.dat"));
+        assert!(
+            !shown_hidden
+                .iter()
+                .any(|entry| entry.name == "system-only.dat")
+        );
     }
 
     #[test]
@@ -337,18 +358,33 @@ mod tests_extra {
         let entries = read_dir(&d, &AtomicBool::new(false)).unwrap();
 
         assert_eq!(
-            entries.iter().find(|e| e.name == "ARCHIVE.TAR.GZ").unwrap().extension.as_deref(),
+            entries
+                .iter()
+                .find(|e| e.name == "ARCHIVE.TAR.GZ")
+                .unwrap()
+                .extension
+                .as_deref(),
             Some("gz")
         );
-        assert_eq!(entries.iter().find(|e| e.name == "README").unwrap().extension, None);
         assert_eq!(
-            entries.iter().find(|e| e.name == ".profile").unwrap().extension,
+            entries
+                .iter()
+                .find(|e| e.name == "README")
+                .unwrap()
+                .extension,
+            None
+        );
+        assert_eq!(
+            entries
+                .iter()
+                .find(|e| e.name == ".profile")
+                .unwrap()
+                .extension,
             None
         );
         stdfs::remove_dir_all(&d).ok();
     }
 }
-
 
 #[cfg(test)]
 mod tests_v02 {
@@ -379,17 +415,14 @@ mod tests_v02 {
         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         assert!(read_dir(std::path::Path::new("Z:\\no\\such\\dir_fm"), &cancel).is_err());
     }
-
-
 }
-
 
 #[cfg(test)]
 mod tests_acc {
     use super::*;
     use std::fs as stdfs;
-    use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
     use std::time::Instant;
 
     fn cancel() -> Arc<AtomicBool> {
@@ -475,8 +508,17 @@ mod tests_v06 {
 
     fn entry(name: &str, is_dir: bool) -> FileEntry {
         FileEntry {
-            name: name.to_string(), path: PathBuf::from(name), is_dir, is_symlink: false,
-            hidden: false, system: false, readonly: false, size: None, modified: None, created: None, extension: None,
+            name: name.to_string(),
+            path: PathBuf::from(name),
+            is_dir,
+            is_symlink: false,
+            hidden: false,
+            system: false,
+            readonly: false,
+            size: None,
+            modified: None,
+            created: None,
+            extension: None,
             archive_member: None,
         }
     }
@@ -484,8 +526,18 @@ mod tests_v06 {
     #[test]
     fn sort_by_size_dirs_stay_first() {
         let mut v = vec![
-            entry("z.txt", false), { let mut e = entry("a.txt", false); e.size = Some(10); e },
-            { let mut e = entry("m.txt", false); e.size = Some(1); e }, entry("dir", true),
+            entry("z.txt", false),
+            {
+                let mut e = entry("a.txt", false);
+                e.size = Some(10);
+                e
+            },
+            {
+                let mut e = entry("m.txt", false);
+                e.size = Some(1);
+                e
+            },
+            entry("dir", true),
         ];
         v[0].size = Some(99);
         sort_entries_by(&mut v, SortKey::Size, false);
@@ -496,20 +548,31 @@ mod tests_v06 {
 
     #[test]
     fn sort_desc_reverses_group() {
-        let mut v = vec![entry("a.txt", false), entry("b.txt", false), entry("d", true)];
+        let mut v = vec![
+            entry("a.txt", false),
+            entry("b.txt", false),
+            entry("d", true),
+        ];
         sort_entries_by(&mut v, SortKey::Name, true);
         assert_eq!(v[0].name, "d");
         assert_eq!(v[1].name, "b.txt");
         assert_eq!(v[2].name, "a.txt");
     }
 
-
     #[test]
     fn sort_by_extension_then_name() {
         let mut v = vec![
             entry("b.txt", false),
-            { let mut e = entry("a.txt", false); e.extension = Some("txt".into()); e },
-            { let mut e = entry("c.md", false); e.extension = Some("md".into()); e },
+            {
+                let mut e = entry("a.txt", false);
+                e.extension = Some("txt".into());
+                e
+            },
+            {
+                let mut e = entry("c.md", false);
+                e.extension = Some("md".into());
+                e
+            },
         ];
         v[0].extension = Some("txt".into());
         sort_entries_by(&mut v, SortKey::Extension, false);
@@ -523,8 +586,16 @@ mod tests_v06 {
         let t1 = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(100);
         let t2 = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(200);
         let mut v = vec![
-            { let mut e = entry("new.txt", false); e.modified = Some(t2); e },
-            { let mut e = entry("old.txt", false); e.modified = Some(t1); e },
+            {
+                let mut e = entry("new.txt", false);
+                e.modified = Some(t2);
+                e
+            },
+            {
+                let mut e = entry("old.txt", false);
+                e.modified = Some(t1);
+                e
+            },
         ];
         sort_entries_by(&mut v, SortKey::Modified, false);
         assert_eq!(v[0].name, "old.txt");
@@ -534,8 +605,16 @@ mod tests_v06 {
     #[test]
     fn equal_keys_fall_back_to_name() {
         let mut v = vec![
-            { let mut e = entry("b.bin", false); e.size = Some(5); e },
-            { let mut e = entry("a.bin", false); e.size = Some(5); e },
+            {
+                let mut e = entry("b.bin", false);
+                e.size = Some(5);
+                e
+            },
+            {
+                let mut e = entry("a.bin", false);
+                e.size = Some(5);
+                e
+            },
         ];
         sort_entries_by(&mut v, SortKey::Size, false);
         assert_eq!(v[0].name, "a.bin");

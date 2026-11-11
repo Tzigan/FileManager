@@ -781,4 +781,10 @@ mod tests {
             ListRow::Header { key, .. } if key == "ext:txt"
         )));
     }
+
+    #[test]
+    fn trash_folder_does_not_show_a_size_in_the_list_column() {
+        assert!(!super::rows::shows_entry_size(true));
+        assert!(super::rows::shows_entry_size(false));
+    }
 }

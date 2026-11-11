@@ -86,7 +86,8 @@ pub fn list_row(record: &TrashRecord) -> TrashListRow {
     };
     TrashListRow {
         id: record.id.clone(),
-        extension: extension_of_original_name(&name),
+        // Тот же расчёт, что у обычной папки: исходное имя карточки, не подпись строки.
+        extension: crate::core::fs::listing_extension(record.is_dir, Path::new(&name)),
         name,
         origin: record.original_path.clone(),
         is_dir: record.is_dir,
@@ -94,15 +95,6 @@ pub fn list_row(record: &TrashRecord) -> TrashListRow {
         deleted_at: record.deleted_at,
         stored_path: record.stored_path.clone(),
     }
-}
-
-/// Только исходное имя. Украшение «откуда · статус» сюда не передаётся.
-fn extension_of_original_name(name: &str) -> Option<String> {
-    let (stem, extension) = name.rsplit_once('.')?;
-    if stem.is_empty() || extension.is_empty() || extension.contains(' ') {
-        return None;
-    }
-    Some(extension.to_lowercase())
 }
 
 pub fn integrity_status_key(record: &TrashRecord) -> Option<&'static str> {
@@ -1173,6 +1165,73 @@ mod tests {
         let decorated = format!("{} · {}: {} • повреждена", row.name, "Откуда", row.origin);
         assert_ne!(row.name, decorated);
         assert!(!row.name.contains('·'));
+    }
+
+    #[test]
+    fn trash_extension_matches_a_normal_folder_listing() {
+        let cases = [
+            ("notes.txt", false, Some("txt")),
+            ("NOTES.TXT", false, Some("txt")),
+            ("archive.tar.gz", false, Some("gz")),
+            ("README", false, None),
+            (".profile", false, None),
+            ("My.Folder", true, None),
+        ];
+        for (name, is_dir, expected) in cases {
+            let from_folder = crate::core::fs::listing_extension(is_dir, Path::new(name));
+            let mut record = sample_record(name);
+            record.is_dir = is_dir;
+            let from_trash = list_row(&record).extension;
+            assert_eq!(from_folder.as_deref(), expected, "{name}");
+            assert_eq!(from_trash, from_folder, "{name}");
+        }
+    }
+
+    #[test]
+    fn trash_suffix_words_come_from_both_language_files() {
+        let ru = include_str!("../../i18n/ru.json");
+        let en = include_str!("../../i18n/en.json");
+        for key in [
+            "\"trash.col.origin\"",
+            "\"trash.col.deleted\"",
+            "\"trash.status.ok\"",
+            "\"trash.status.damaged\"",
+            "\"trash.status.volume\"",
+            "\"trash.integrity.not_checked\"",
+            "\"trash.integrity.size\"",
+        ] {
+            assert!(ru.contains(key), "{key}");
+            assert!(en.contains(key), "{key}");
+        }
+    }
+
+    #[test]
+    fn trash_folder_size_stays_in_the_card_for_the_empty_confirmation() {
+        let mut record = sample_record("Папка");
+        record.is_dir = true;
+        record.size = 48;
+        let row = list_row(&record);
+        assert!(row.is_dir);
+        assert_eq!(row.size, 48);
+        assert_eq!(removal_totals(&[record]).1, 48);
+        assert!(row.extension.is_none());
+    }
+
+    fn sample_record(name: &str) -> TrashRecord {
+        TrashRecord {
+            id: "1".into(),
+            original_path: format!(r"D:\docs\{name}"),
+            original_name: name.to_owned(),
+            is_dir: false,
+            deleted_at: 10,
+            size: 4,
+            stored_path: r"D:\.FileManagerSecureTrash\items\1".into(),
+            volume_id: None,
+            status: TrashStatus::InTrash,
+            integrity: None,
+            integrity_note: IntegrityNote::NotChecked,
+            attributes: 0,
+        }
     }
 
     #[test]
