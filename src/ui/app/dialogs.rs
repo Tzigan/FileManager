@@ -119,7 +119,8 @@ impl FileManagerApp {
         let builder = floating_dialog_viewport(
             ctx,
             title,
-            egui::vec2(560.0, 520.0),
+            // Высота включает нижний отступ, такой же как сверху у списка настроек.
+            egui::vec2(560.0, 520.0 + style::SPACE_MD),
             self.settings_viewport_placed,
         );
         let mut close_requested = false;
@@ -247,6 +248,8 @@ impl FileManagerApp {
                             egui::RichText::new(self.t("settings.update_restart_delay_hint"))
                                 .weak(),
                         );
+                        // Снизу тот же отступ, что и в начале колонки, чтобы поле не липло к рамке.
+                        ui.add_space(style::SPACE_MD);
                     });
                 });
             });
