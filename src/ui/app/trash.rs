@@ -88,6 +88,7 @@ impl FileManagerApp {
                     volume_id: crate::platform::volume_id(&path),
                     fallback_root: fallback.clone(),
                     allow_fallback,
+                    // None: корень на диске программы. Запасная папка настроек — только если её включили.
                     storage_root: None,
                 };
                 if let Err(error) = secure_trash::move_to_trash(&path, &options) {

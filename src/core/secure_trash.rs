@@ -16,6 +16,12 @@ use serde::{Deserialize, Serialize};
 /// Имя служебной папки. Меняется в одном месте, а не в интерфейсе.
 pub const TRASH_DIR_NAME: &str = ".FileManagerSecureTrash";
 
+/// Раньше корзина по умолчанию вставала на том удалённого файла. Файлы часто
+/// лежат на C, поэтому папка появлялась как `C:\.FileManagerSecureTrash`, даже
+/// когда программа запущена с другого диска. Теперь default — диск программы.
+/// Папка создаётся только в момент удаления, не при старте. Объекты, которые
+/// уже лежат на других томах, не переносятся.
+
 /// По умолчанию содержимое хешируется только до этого размера.
 /// Большой файл не должен подвешивать удаление. Это не безопасное стирание.
 pub const DEFAULT_HASH_MAX_BYTES: u64 = 16 * 1024 * 1024;
@@ -140,12 +146,29 @@ pub struct TrashOptions {
     /// Запасной корень, если на своём томе нет места. Не используется молча.
     pub fallback_root: Option<PathBuf>,
     pub allow_fallback: bool,
-    /// None — служебная папка на корне тома. Тесты подставляют временный корень.
+    /// Явный корень корзины. Если задан, он важнее диска программы.
+    /// None — корень на диске исполняемого файла, не на томе удаляемого объекта.
     pub storage_root: Option<PathBuf>,
 }
 
 pub fn trash_root_for(source: &Path) -> Option<PathBuf> {
     volume_root(source).map(|root| root.join(TRASH_DIR_NAME))
+}
+
+/// Диск программы: сначала каталог `current_exe`, если его нет — `current_dir`.
+/// Системный диск C здесь не подставляется. Папку эта функция не создаёт.
+pub fn program_trash_root() -> Result<PathBuf, TrashError> {
+    let anchor = std::env::current_exe()
+        .ok()
+        .filter(|path| volume_root(path).is_some())
+        .or_else(|| std::env::current_dir().ok());
+    let Some(anchor) = anchor else {
+        return Err(TrashError::Io(io::Error::other(
+            "не удалось определить диск программы",
+        )));
+    };
+    trash_root_for(&anchor)
+        .ok_or_else(|| TrashError::Io(io::Error::other("не удалось определить диск программы")))
 }
 
 /// Помещает объект в корзину. При сбое копирования источник остаётся на месте.
@@ -155,11 +178,12 @@ pub fn move_to_trash(source: &Path, options: &TrashOptions) -> Result<TrashRecor
     if is_reparse(&meta) || !(meta.is_file() || meta.is_dir()) {
         return Err(TrashError::SpecialFile);
     }
-    let primary = options
-        .storage_root
-        .clone()
-        .or_else(|| trash_root_for(&source))
-        .ok_or(TrashError::PathEscape)?;
+    // Явный путь из настроек/теста важнее. Иначе диск программы, не диск файла и не C.
+    let primary = if let Some(root) = options.storage_root.clone() {
+        root
+    } else {
+        program_trash_root()?
+    };
     let root = match ensure_trash_root(&primary) {
         Ok(root) => root,
         Err(error) if options.allow_fallback => options
@@ -593,7 +617,12 @@ pub fn allowed_restore_roots(original: &Path) -> Vec<PathBuf> {
 }
 
 fn volume_root(path: &Path) -> Option<PathBuf> {
-    let text = path.to_string_lossy();
+    let raw = path.to_string_lossy();
+    let text = raw
+        .strip_prefix(r"\\?\UNC\")
+        .map(|rest| format!(r"\\{rest}"))
+        .or_else(|| raw.strip_prefix(r"\\?\").map(|rest| rest.to_string()))
+        .unwrap_or_else(|| raw.to_string());
     let bytes = text.as_bytes();
     if bytes.len() >= 3 && bytes[1] == b':' && (bytes[2] == b'\\' || bytes[2] == b'/') {
         return Some(PathBuf::from(format!(
@@ -1051,6 +1080,30 @@ mod tests {
             }
         }
         found
+    }
+
+    #[test]
+    fn default_root_follows_the_program_drive_not_the_deleted_file() {
+        let program = trash_root_for(Path::new(r"D:\apps\filemanager.exe")).unwrap();
+        let deleted_on_c = trash_root_for(Path::new(r"C:\Users\note.txt")).unwrap();
+        assert_eq!(program, PathBuf::from(r"D:\.FileManagerSecureTrash"));
+        assert_ne!(program, deleted_on_c);
+        let cwd_only = trash_root_for(Path::new(r"E:\work")).unwrap();
+        assert_eq!(cwd_only, PathBuf::from(r"E:\.FileManagerSecureTrash"));
+        let extended = trash_root_for(Path::new(r"\\?\D:\apps\filemanager.exe")).unwrap();
+        assert_eq!(extended, PathBuf::from(r"D:\.FileManagerSecureTrash"));
+    }
+
+    #[test]
+    fn program_trash_root_matches_the_running_executable_and_does_not_create_it() {
+        let exe = std::env::current_exe().unwrap();
+        let before = program_trash_root().unwrap();
+        assert_eq!(before, trash_root_for(&exe).unwrap());
+        let existed = before.exists();
+        let after = program_trash_root().unwrap();
+        assert_eq!(after.exists(), existed);
+        let message = TrashError::Io(io::Error::other("не удалось определить диск программы"));
+        assert!(message.to_string().contains("диск программы"));
     }
 
     #[test]
