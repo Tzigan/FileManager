@@ -16,7 +16,20 @@ impl FileManagerApp {
             tab.clear_selection();
         }
         let in_archive = self.tabs[self.active].archive_prefix.is_some();
+        let in_trash = self.tabs[self.active].secure_trash;
         resp.context_menu(|ui| {
+            if in_trash {
+                style::compact_context_menu(ui);
+                if ui.button(self.t("trash.empty").to_owned()).clicked() {
+                    self.trash_empty_confirm = true;
+                    ui.close();
+                }
+                if ui.button(self.t("toolbar.refresh").to_owned()).clicked() {
+                    self.refresh(ctx);
+                    ui.close();
+                }
+                return;
+            }
             style::compact_context_menu(ui);
             if in_archive {
                 if ui.button(self.t("zip.extract_all").to_owned()).clicked() {
@@ -108,6 +121,33 @@ impl FileManagerApp {
             tab.selection.insert(entry_key.clone());
             tab.anchor = Some(entry_key);
             tab.cursor = index;
+        }
+        let in_trash = self.tabs[self.active].secure_trash;
+        if in_trash {
+            resp.context_menu(|ui| {
+                style::compact_context_menu(ui);
+                if ui.button(self.t("trash.restore").to_owned()).clicked() {
+                    let ids = self.selected_trash_ids();
+                    self.restore_trash_ids(ids, None, ctx);
+                    ui.close();
+                }
+                if ui.button(self.t("trash.purge").to_owned()).clicked() {
+                    let ids = self.selected_trash_ids();
+                    if !ids.is_empty() {
+                        self.trash_purge_ids = Some(ids);
+                    }
+                    ui.close();
+                }
+                if ui.button(self.t("trash.empty").to_owned()).clicked() {
+                    self.trash_empty_confirm = true;
+                    ui.close();
+                }
+                if ui.button(self.t("toolbar.refresh").to_owned()).clicked() {
+                    self.refresh(ctx);
+                    ui.close();
+                }
+            });
+            return;
         }
         if resp.double_clicked() {
             if let Some(member) = &archive_member {

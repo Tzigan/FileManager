@@ -75,6 +75,96 @@ impl FileManagerApp {
         }
     }
 
+    pub(crate) fn open_secure_trash_tab(&mut self, ctx: &egui::Context) {
+        let path = secure_trash::program_trash_root()
+            .unwrap_or_else(|_| std::path::PathBuf::from(secure_trash::TRASH_DIR_NAME));
+        let index = crate::ui::tabs::append_tab(&mut self.tabs, path);
+        self.tabs[index].secure_trash = true;
+        self.tabs[index].address_input = self.t("bookmark.secure_trash").to_owned();
+        self.active = index;
+        self.load_secure_trash_tab(index);
+        self.request_tab_strip_scroll_to_active(ctx);
+        self.persist_tabs();
+    }
+
+    pub(crate) fn load_secure_trash_tab(&mut self, tab: usize) {
+        let records = secure_trash::list_trash(&self.trash_volumes());
+        let mut notes = std::collections::HashMap::new();
+        let entries = records
+            .iter()
+            .map(|record| {
+                let row = secure_trash::list_row(record);
+                let status = self.trash_status_label(record);
+                let origin = if row.origin.is_empty() {
+                    self.t("trash.unknown_origin").to_owned()
+                } else {
+                    row.origin.clone()
+                };
+                notes.insert(row.id.clone(), format!("{origin} · {status}"));
+                let modified = (row.deleted_at > 0).then(|| {
+                    std::time::UNIX_EPOCH + std::time::Duration::from_secs(row.deleted_at)
+                });
+                crate::core::fs::FileEntry {
+                    name: row.name,
+                    path: if row.stored_path.is_empty() {
+                        std::path::PathBuf::from(format!("secure-trash:{}", row.id))
+                    } else {
+                        std::path::PathBuf::from(&row.stored_path)
+                    },
+                    is_dir: row.is_dir,
+                    is_symlink: false,
+                    hidden: false,
+                    system: false,
+                    readonly: false,
+                    size: Some(row.size),
+                    modified,
+                    created: None,
+                    extension: None,
+                    archive_member: Some(row.id),
+                }
+            })
+            .collect::<Vec<_>>();
+        {
+            let tab_state = &mut self.tabs[tab];
+            crate::ui::tabs::retain_existing_selection(&mut tab_state.selection, &entries);
+            if tab_state
+                .anchor
+                .as_ref()
+                .is_some_and(|key| !tab_state.selection.contains(key))
+            {
+                tab_state.anchor = None;
+            }
+            tab_state.entries = entries;
+            tab_state.trash_notes = notes;
+            tab_state.status = crate::ui::tabs::ListStatus::Ready;
+            tab_state.error = None;
+        }
+        let title = self.t("bookmark.secure_trash").to_owned();
+        self.tabs[tab].address_input = title;
+    }
+
+    pub(crate) fn selected_trash_ids(&self) -> Vec<String> {
+        let tab = &self.tabs[self.active];
+        tab.entries
+            .iter()
+            .filter(|entry| tab.is_selected(entry))
+            .filter_map(|entry| entry.archive_member.clone())
+            .collect()
+    }
+
+    fn reload_open_trash_tabs(&mut self) {
+        let indexes: Vec<usize> = self
+            .tabs
+            .iter()
+            .enumerate()
+            .filter(|(_, tab)| tab.secure_trash)
+            .map(|(index, _)| index)
+            .collect();
+        for index in indexes {
+            self.load_secure_trash_tab(index);
+        }
+    }
+
     fn start_secure_trash(&mut self, paths: Vec<PathBuf>) {
         let hash_max = self.store.settings.secure_trash_hash_max_bytes;
         let allow_fallback = self.store.settings.secure_trash_allow_fallback;
@@ -192,10 +282,9 @@ impl FileManagerApp {
         if empty {
             self.trash_empty_confirm = true;
         }
-        self.trash_confirm_windows(ctx);
     }
 
-    fn trash_confirm_windows(&mut self, ctx: &egui::Context) {
+    pub(super) fn trash_confirm_windows(&mut self, ctx: &egui::Context) {
         let items = secure_trash::list_trash(&self.trash_volumes());
         if let Some(ids) = self.trash_purge_ids.clone() {
             let chosen: Vec<_> = items
@@ -245,6 +334,7 @@ impl FileManagerApp {
                 } else {
                     errors.join("\n")
                 });
+                self.reload_open_trash_tabs();
             }
         }
         if self.trash_empty_confirm {
@@ -278,6 +368,7 @@ impl FileManagerApp {
                 } else {
                     errors.join("\n")
                 });
+                self.reload_open_trash_tabs();
             }
         }
         if let Some(id) = self.trash_conflict.clone() {
@@ -311,7 +402,7 @@ impl FileManagerApp {
         }
     }
 
-    fn restore_trash_ids(
+    pub(crate) fn restore_trash_ids(
         &mut self,
         ids: Vec<String>,
         conflict: Option<RestoreConflict>,
@@ -335,8 +426,11 @@ impl FileManagerApp {
                         notice = format!("{notice}. {}", self.t(key));
                     }
                     self.trash_notice = Some(notice);
+                    self.reload_open_trash_tabs();
                     let active = self.active;
-                    self.navigate_fresh(active, ctx);
+                    if !self.tabs[active].secure_trash {
+                        self.navigate_fresh(active, ctx);
+                    }
                 }
                 Err(secure_trash::TrashError::Conflict) => {
                     self.trash_conflict = Some(id);

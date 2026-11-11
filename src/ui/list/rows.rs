@@ -25,11 +25,7 @@ impl FileManagerApp {
         if marquee_rect.is_some_and(|marquee| marquee.intersects(rect)) {
             let tab = &mut self.tabs[self.active];
             if let Some(marquee) = &mut tab.selection_marquee {
-                let key = crate::ui::tabs::add_marquee_entry(
-                    &mut tab.selection,
-                    marquee,
-                    &entry,
-                );
+                let key = crate::ui::tabs::add_marquee_entry(&mut tab.selection, marquee, &entry);
                 if tab.anchor.is_none() {
                     tab.anchor = Some(key);
                 }
@@ -91,16 +87,26 @@ impl FileManagerApp {
             egui::pos2(rect.min.x + name_x, rect.min.y),
             egui::pos2(rect.min.x + name_right - COL_GAP, rect.max.y),
         );
+        let name_text = if self.tabs[self.active].secure_trash {
+            entry
+                .archive_member
+                .as_ref()
+                .and_then(|id| self.tabs[self.active].trash_notes.get(id))
+                .map(|note| format!("{}  {}", entry.name, note))
+                .unwrap_or_else(|| entry.name.clone())
+        } else {
+            entry.name.clone()
+        };
         painter.with_clip_rect(name_rect).text(
             egui::pos2(rect.min.x + name_x, y),
             egui::Align2::LEFT_CENTER,
-            &entry.name,
+            name_text,
             font.clone(),
             name_color,
         );
 
         if let Some(sx) = size_x {
-            let size_text = if entry.is_dir {
+            let size_text = if entry.is_dir && !self.tabs[self.active].secure_trash {
                 String::new()
             } else {
                 entry.size.map(format_size).unwrap_or_default()

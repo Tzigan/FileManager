@@ -281,6 +281,14 @@ impl crate::ui::FileManagerApp {
                 self.system_bookmarks
                     .retain(|entry| entry.kind != bookmark.kind);
             }
+            SystemBookmarkTarget::SecureTrash
+                if crate::core::known_folders::bookmark_forces_new_tab(&bookmark.target) =>
+            {
+                // Клик просил бы текущую вкладку, но эта закладка всегда создаёт новую.
+                let _ = open_new_tab;
+                self.open_secure_trash_tab(ctx);
+            }
+            SystemBookmarkTarget::SecureTrash => {}
             SystemBookmarkTarget::RecycleBin => {
                 // Secure и Ask ведут в корзину приложения. Windows-режим — в системную корзину.
                 if crate::core::settings::bookmark_opens_secure_trash(

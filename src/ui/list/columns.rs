@@ -115,7 +115,12 @@ impl FileManagerApp {
             cols.push((tx, mod_x.unwrap_or(width), SortKey::Extension, "col.type"));
         }
         if let Some(mx) = mod_x {
-            cols.push((mx, width, SortKey::Modified, "col.modified"));
+            let modified_key = if self.tabs[self.active].secure_trash {
+                "trash.col.deleted"
+            } else {
+                "col.modified"
+            };
+            cols.push((mx, width, SortKey::Modified, modified_key));
         }
         for (x0, x1, k, i18n_key) in cols {
             let arrow = if k == key {

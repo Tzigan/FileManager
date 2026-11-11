@@ -63,6 +63,36 @@ pub fn integrity_note_for(copied_across_volumes: bool, hashed: bool) -> Integrit
 
 /// Ключ подписи, если целостность содержимого не подтверждена хешем.
 /// None — хеш есть, отдельная оговорка не нужна.
+/// Строка списка корзины. Имя — исходное, не внутреннее имя файла хранения.
+/// Список нельзя строить через read_dir: в папке хранения лежат изолированные id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrashListRow {
+    pub id: String,
+    pub name: String,
+    pub origin: String,
+    pub is_dir: bool,
+    pub size: u64,
+    pub deleted_at: u64,
+    pub stored_path: String,
+}
+
+pub fn list_row(record: &TrashRecord) -> TrashListRow {
+    let name = if record.original_name.is_empty() {
+        record.id.clone()
+    } else {
+        record.original_name.clone()
+    };
+    TrashListRow {
+        id: record.id.clone(),
+        name,
+        origin: record.original_path.clone(),
+        is_dir: record.is_dir,
+        size: record.size,
+        deleted_at: record.deleted_at,
+        stored_path: record.stored_path.clone(),
+    }
+}
+
 pub fn integrity_status_key(record: &TrashRecord) -> Option<&'static str> {
     if record.integrity.is_some() || record.integrity_note == IntegrityNote::Hashed {
         return None;
@@ -1104,6 +1134,29 @@ mod tests {
         assert_eq!(after.exists(), existed);
         let message = TrashError::Io(io::Error::other("не удалось определить диск программы"));
         assert!(message.to_string().contains("диск программы"));
+    }
+
+    #[test]
+    fn list_row_shows_the_original_name_not_the_storage_name() {
+        let record = TrashRecord {
+            id: "99".into(),
+            original_path: r"D:\docs\отчёт.txt".into(),
+            original_name: "отчёт.txt".into(),
+            is_dir: false,
+            deleted_at: 10,
+            size: 4,
+            stored_path: r"D:\.FileManagerSecureTrash\items\99".into(),
+            volume_id: None,
+            status: TrashStatus::InTrash,
+            integrity: None,
+            integrity_note: IntegrityNote::NotChecked,
+            attributes: 0,
+        };
+        let row = list_row(&record);
+        assert_eq!(row.name, "отчёт.txt");
+        assert!(!row.name.contains("99"));
+        assert_eq!(row.id, "99");
+        assert_eq!(row.origin, r"D:\docs\отчёт.txt");
     }
 
     #[test]

@@ -29,11 +29,16 @@ impl FileManagerApp {
     }
 
     pub(super) fn persist_tabs(&mut self) {
-        self.store.settings.tabs = self.tabs.iter().map(persisted_tab_path).collect();
+        self.store.settings.tabs = self
+            .tabs
+            .iter()
+            .filter(|tab| !tab.secure_trash)
+            .map(persisted_tab_path)
+            .collect();
         self.store.settings.pinned_tabs = self
             .tabs
             .iter()
-            .filter(|tab| tab.pinned)
+            .filter(|tab| tab.pinned && !tab.secure_trash)
             .map(persisted_tab_path)
             .collect();
         self.store.settings.active_tab = self.active;
@@ -55,6 +60,8 @@ impl FileManagerApp {
             self.tabs[tab].history.push(current);
             self.tabs[tab].path = path;
         }
+        self.tabs[tab].secure_trash = false;
+        self.tabs[tab].trash_notes.clear();
         self.tabs[tab].archive_prefix = None;
         self.tabs[tab].archive_back.clear();
         self.tabs[tab].archive_forward.clear();
@@ -99,6 +106,11 @@ impl FileManagerApp {
 
     /// Reload `tab`'s current path in the background without touching history.
     pub(crate) fn navigate_fresh(&mut self, tab: usize, ctx: &egui::Context) {
+        if self.tabs[tab].secure_trash {
+            // Карточки, не readdir папки хранения.
+            self.load_secure_trash_tab(tab);
+            return;
+        }
         self.cancel_all_thumbnails();
         if self.tabs[tab].archive_prefix.is_none() && is_zip_file(&self.tabs[tab].path) {
             self.tabs[tab].archive_prefix = Some(String::new());
