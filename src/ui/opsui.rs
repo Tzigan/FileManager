@@ -163,6 +163,8 @@ pub struct JobUi {
     pub total_f: usize,
     pub cancel: Arc<AtomicBool>,
     pub failed: usize,
+    /// Папки, чей кэш списка надо сбросить, когда операция закончится.
+    pub touched_dirs: Vec<PathBuf>,
 }
 
 #[derive(Clone)]
@@ -191,6 +193,7 @@ impl FileManagerApp {
     pub(crate) fn enqueue(&mut self, verb: &'static str, kind: OpKind) {
         self.ops_ui.next_id += 1;
         let id = self.ops_ui.next_id;
+        let touched_dirs = crate::core::dir_cache::affected_dirs(&kind);
         let job = OpJob {
             id,
             kind,
@@ -213,6 +216,7 @@ impl FileManagerApp {
             total_f: 0,
             cancel: job.cancel,
             failed: 0,
+            touched_dirs,
         });
     }
 
@@ -352,8 +356,18 @@ impl FileManagerApp {
                     self.ops_ui.error_q = Some((id, path, message, retryable));
                 }
                 OpEvent::Done { id, failed } => {
+                    let touched = self
+                        .ops_ui
+                        .jobs
+                        .iter()
+                        .find(|job| job.id == id)
+                        .map(|job| job.touched_dirs.clone())
+                        .unwrap_or_default();
                     if let Some(pos) = self.ops_ui.jobs.iter().position(|j| j.id == id) {
                         self.ops_ui.jobs.remove(pos);
+                    }
+                    for path in touched {
+                        self.dir_cache.invalidate_dir(&path);
                     }
                     if failed > 0 {
                         self.ops_ui.show_journal = true;
