@@ -167,10 +167,7 @@ pub struct FileManagerApp {
     /// Path shown in the properties dialog.
     pub(crate) props_target: Option<PathBuf>,
     /// Запрос тяжёлых свойств. Список папки его не заполняет.
-    pub(crate) entry_details_generation: u64,
-    pub(crate) entry_details_path: Option<PathBuf>,
-    pub(crate) entry_details: Option<crate::core::entry_details::EntryDetails>,
-    pub(crate) entry_details_pending: bool,
+    pub(crate) details_watch: crate::core::entry_details::DetailsWatch,
     props_viewport_placed: bool,
     preview: PreviewState,
     /// Tabs requested by widgets while the current frame is rendering.
@@ -405,10 +402,7 @@ impl FileManagerApp {
             tab_drag_preview: tab_drag_preview::TabDragPreviewState::default(),
             tab_strip_scroll_target: None,
             props_target: None,
-            entry_details_generation: 0,
-            entry_details_path: None,
-            entry_details: None,
-            entry_details_pending: false,
+            details_watch: crate::core::entry_details::DetailsWatch::default(),
             props_viewport_placed: false,
             preview: PreviewState::default(),
             pending_open_tabs: Vec::new(),
@@ -729,12 +723,8 @@ impl FileManagerApp {
                     path,
                     details,
                 } => {
-                    if self.entry_details_generation == generation
-                        && self.entry_details_path.as_ref() == Some(&path)
-                    {
-                        self.entry_details = Some(details);
-                        self.entry_details_pending = false;
-                    }
+                    // Чужое поколение или путь молча отбрасываются.
+                    let _ = self.details_watch.receive(generation, &path, details);
                 }
                 WorkerMsg::SecureTrashFinished(errors) => {
                     self.trash_notice = if errors.is_empty() {
