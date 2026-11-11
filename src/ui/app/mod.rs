@@ -52,7 +52,7 @@ pub(crate) enum WorkerMsg {
         generation: u64,
         result: Result<Vec<FileEntry>, ReadDirError>,
         /// Ключ кэша и номер чтения. `None` — ZIP, WSL или путь без канонизации.
-        cache_key: Option<PathBuf>,
+        cache_key: Option<crate::core::dir_cache::CacheKey>,
         cache_generation: u64,
     },
     /// Завершился отложенный поиск по имени для вкладки.

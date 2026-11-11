@@ -420,6 +420,9 @@ mod stubs {
     pub fn read_entry_details(_path: &std::path::Path) -> crate::core::entry_details::EntryDetails {
         crate::core::entry_details::EntryDetails::unavailable()
     }
+    pub fn volume_id(_path: &std::path::Path) -> Option<String> {
+        None
+    }
 }
 
 #[cfg(not(windows))]
@@ -430,7 +433,7 @@ pub use stubs::{
     notify_already_running, open_recycle_bin, open_terminal, pick_folder, pipe_listen, pipe_send,
     prepare_update_archive, read_entry_details, read_zip_dir_cancellable, recycle_bin,
     replace_file, search_zip, set_attributes, set_clipboard_files, shell_open,
-    signal_update_started, uninstall_context_menu,
+    signal_update_started, uninstall_context_menu, volume_id,
 };
 
 #[cfg(not(windows))]

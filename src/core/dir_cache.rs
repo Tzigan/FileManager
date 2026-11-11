@@ -5,7 +5,7 @@
 //! Задел `invalidate_dir` нужен будущему наблюдению за папкой, само наблюдение здесь не делается.
 
 use std::collections::{HashMap, VecDeque};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use crate::core::fs::FileEntry;
 use crate::core::ops::OpKind;
@@ -27,9 +27,12 @@ pub fn affected_dirs(kind: &OpKind) -> Vec<PathBuf> {
         OpKind::Copy { dest, .. } => dirs.push(dest.clone()),
         OpKind::Move { sources, dest } => {
             dirs.push(dest.clone());
+            // Сам каталог тоже: иначе его подпапки остаются в кэше по старому пути.
+            dirs.extend(sources.iter().cloned());
             dirs.extend(parents(sources));
         }
         OpKind::Delete { sources } | OpKind::Recycle { sources } => {
+            dirs.extend(sources.iter().cloned());
             dirs.extend(parents(sources));
         }
         OpKind::Rename { from, to } => {
@@ -49,11 +52,41 @@ pub fn affected_dirs(kind: &OpKind) -> Vec<PathBuf> {
     dirs
 }
 
+/// Удалённый каталог собираем из живого родителя и последнего имени.
+fn raw_subtree_root(path: &Path) -> Option<PathBuf> {
+    let parent = DirCache::canonical_key(path.parent()?)?;
+    let name = path.file_name()?;
+    Some(parent.join(name))
+}
+
+/// `C:\dir` накрывает `C:\dir` и `C:\dir\sub`, но не `C:\directory`.
+fn path_is_inside(root: &Path, candidate: &Path) -> bool {
+    let root: Vec<Component<'_>> = root.components().collect();
+    let candidate: Vec<Component<'_>> = candidate.components().collect();
+    candidate.len() >= root.len() && candidate[..root.len()] == root[..]
+}
+
 fn parents(paths: &[PathBuf]) -> Vec<PathBuf> {
     paths
         .iter()
         .filter_map(|path| path.parent().map(Path::to_path_buf))
         .collect()
+}
+
+/// Ключ списка: путь и серийный номер тома. Одна буква диска на другой флешке — другой ключ.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct CacheKey {
+    pub path: PathBuf,
+    pub volume: String,
+}
+
+impl CacheKey {
+    pub fn new(path: impl Into<PathBuf>, volume: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            volume: volume.into(),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -64,11 +97,11 @@ struct Slot {
 /// Словарь «канонический путь → лёгкий список» с вытеснением старых папок.
 #[derive(Clone)]
 pub struct DirCache {
-    slots: HashMap<PathBuf, Slot>,
+    slots: HashMap<CacheKey, Slot>,
     /// Хвост — недавно использованный путь.
-    recent: VecDeque<PathBuf>,
+    recent: VecDeque<CacheKey>,
     /// Номер, выданный последнему чтению пути. Общий счётчик, чтобы номер папки A не совпал с папкой B.
-    generation: HashMap<PathBuf, u64>,
+    generation: HashMap<CacheKey, u64>,
     next_generation: u64,
     limit: usize,
 }
@@ -89,95 +122,106 @@ impl DirCache {
         self.evict();
     }
 
-    /// Один и тот же каталог под разным написанием даёт один ключ.
+    /// Один и тот же каталог под разным написанием даёт один путь.
     /// `None` — путь не канонизировался: такой список не кэшируем и не падаем.
     pub fn canonical_key(path: &Path) -> Option<PathBuf> {
         std::fs::canonicalize(path).ok()
     }
 
-    pub fn get(&mut self, key: &Path) -> Option<Vec<FileEntry>> {
+    /// Ключ для живой папки. Без серийного номера тома не кэшируем: буква диска могла смениться.
+    pub fn cache_key(path: &Path) -> Option<CacheKey> {
+        let path = Self::canonical_key(path)?;
+        let volume = crate::platform::volume_id(&path)?;
+        Some(CacheKey::new(path, volume))
+    }
+
+    /// Заход в уже удалённую папку не канонизируется и поэтому не достаёт старую запись.
+    pub fn lookup(&mut self, path: &Path) -> Option<Vec<FileEntry>> {
+        let key = Self::cache_key(path)?;
+        self.get(&key)
+    }
+
+    pub fn get(&mut self, key: &CacheKey) -> Option<Vec<FileEntry>> {
         let entries = self.slots.get(key)?.entries.clone();
         self.touch(key);
         Some(entries)
     }
 
     /// Начинает чтение. Предыдущий ответ с другим номером будет отвергнут.
-    pub fn begin(&mut self, key: &Path) -> u64 {
+    pub fn begin(&mut self, key: &CacheKey) -> u64 {
         self.bump(key)
     }
 
-    /// Пишет список только если это всё ещё актуальное чтение этого пути.
-    pub fn store(&mut self, key: &Path, generation: u64, entries: Vec<FileEntry>) -> bool {
+    /// Пишет список только если это всё ещё актуальное чтение этого пути и тома.
+    pub fn store(&mut self, key: &CacheKey, generation: u64, entries: Vec<FileEntry>) -> bool {
         if self.limit == 0 || self.generation.get(key).copied() != Some(generation) {
             return false;
         }
-        self.slots.insert(
-            key.to_path_buf(),
-            Slot {
-                entries,
-            },
-        );
+        self.slots.insert(key.clone(), Slot { entries });
         self.touch(key);
         self.evict();
         true
     }
 
-    /// Точка сброса для обновления, файловой операции и будущего notify.
+    /// Сбрасывает путь, все закэшированные подпапки и список непосредственного родителя.
+    /// Корень тома целиком не вычищается: иначе удаление одной папки сотрёт кэш всего диска.
     pub fn invalidate_dir(&mut self, path: &Path) {
-        // Сырой ключ тоже снимаем: так сбрасывается запись, если путь уже канонический.
-        self.invalidate(path);
-        if let Some(key) = Self::canonical_key(path) {
-            self.invalidate(&key);
-            if let Some(parent) = key.parent() {
-                self.invalidate(&parent.to_path_buf());
-            }
+        // Совпадает и с тестовым ключом, и с уже канонической записью.
+        self.drop_subtree(path);
+        let root = Self::canonical_key(path).or_else(|| raw_subtree_root(path));
+        let Some(root) = root else {
             return;
+        };
+        self.drop_subtree(&root);
+        // Родитель — только его собственный список, без чужих папок на том же диске.
+        if let Some(parent) = root.parent().filter(|parent| *parent != root) {
+            self.drop_exact(parent);
         }
-        // Каталог уже удалён: канонизировать его нельзя, но родитель ещё жив.
-        let Some(parent) = path.parent() else {
-            return;
-        };
-        let Some(parent_key) = Self::canonical_key(parent) else {
-            return;
-        };
-        self.invalidate(&parent_key);
-        let name = path.file_name().map(|name| name.to_string_lossy().to_lowercase());
-        let doomed: Vec<PathBuf> = self
-            .slots
+    }
+
+    fn drop_subtree(&mut self, root: &Path) {
+        let doomed: Vec<CacheKey> = self
+            .generation
             .keys()
-            .filter(|key| {
-                key.parent() == Some(parent_key.as_path())
-                    && key
-                        .file_name()
-                        .map(|item| item.to_string_lossy().to_lowercase())
-                        == name
-            })
+            .chain(self.slots.keys())
+            .filter(|key| path_is_inside(root, &key.path))
             .cloned()
             .collect();
         for key in doomed {
-            self.invalidate(&key);
+            self.invalidate_key(&key);
         }
     }
 
-    fn invalidate(&mut self, key: &Path) {
+    fn drop_exact(&mut self, path: &Path) {
+        let doomed: Vec<CacheKey> = self
+            .generation
+            .keys()
+            .chain(self.slots.keys())
+            .filter(|key| key.path == path)
+            .cloned()
+            .collect();
+        for key in doomed {
+            self.invalidate_key(&key);
+        }
+    }
+
+    fn invalidate_key(&mut self, key: &CacheKey) {
         self.slots.remove(key);
         self.recent.retain(|path| path != key);
-        // Новый номер никто из уже запущенных чтений не знает.
         self.bump(key);
     }
 
-    fn bump(&mut self, key: &Path) -> u64 {
+    fn bump(&mut self, key: &CacheKey) -> u64 {
         // saturating_add не возвращает номер к нулю, пока жив этот кэш.
         // Переполнение u64 в одной сессии недостижимо.
         self.next_generation = self.next_generation.saturating_add(1);
-        self.generation
-            .insert(key.to_path_buf(), self.next_generation);
+        self.generation.insert(key.clone(), self.next_generation);
         self.next_generation
     }
 
-    fn touch(&mut self, key: &Path) {
+    fn touch(&mut self, key: &CacheKey) {
         self.recent.retain(|path| path != key);
-        self.recent.push_back(key.to_path_buf());
+        self.recent.push_back(key.clone());
     }
 
     fn evict(&mut self) {
@@ -215,6 +259,10 @@ mod tests {
         }
     }
 
+    fn k(path: impl Into<PathBuf>) -> CacheKey {
+        CacheKey::new(path, "TEST")
+    }
+
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "fm-dir-cache-{name}-{}",
@@ -228,7 +276,7 @@ mod tests {
     #[test]
     fn repeat_open_same_dir_does_not_reread_from_disk() {
         let dir = scratch("repeat");
-        let key = DirCache::canonical_key(&dir).unwrap();
+        let key = DirCache::cache_key(&dir).unwrap();
         let mut cache = DirCache::new(8);
         let mut reads = 0;
         let load = |cache: &mut DirCache, reads: &mut usize| {
@@ -250,7 +298,7 @@ mod tests {
     #[test]
     fn sort_filter_group_recompute_over_cache_without_disk_reread() {
         let mut cache = DirCache::new(4);
-        let key = PathBuf::from(r"C:\cache-sort");
+        let key = k(r"C:\cache-sort");
         let stored = vec![entry("b.txt", false), entry("a.txt", true)];
         let generation = cache.begin(&key);
         assert!(cache.store(&key, generation, stored.clone()));
@@ -267,10 +315,10 @@ mod tests {
     #[test]
     fn manual_refresh_bypasses_cache_and_updates_entry() {
         let mut cache = DirCache::new(4);
-        let key = PathBuf::from(r"C:\cache-refresh");
+        let key = k(r"C:\cache-refresh");
         let first = cache.begin(&key);
         assert!(cache.store(&key, first, vec![entry("old.txt", false)]));
-        cache.invalidate_dir(&key);
+        cache.invalidate_dir(Path::new(r"C:\cache-refresh"));
         assert!(cache.get(&key).is_none());
         let second = cache.begin(&key);
         assert!(!cache.store(&key, first, vec![entry("stale.txt", false)]));
@@ -281,7 +329,7 @@ mod tests {
     #[test]
     fn fs_operation_invalidates_cache_for_affected_dir() {
         let dir = scratch("ops");
-        let key = DirCache::canonical_key(&dir).unwrap();
+        let key = DirCache::cache_key(&dir).unwrap();
         let mut cache = DirCache::new(4);
         let generation = cache.begin(&key);
         assert!(cache.store(&key, generation, vec![entry("keep.txt", false)]));
@@ -298,8 +346,8 @@ mod tests {
     #[test]
     fn stale_async_read_does_not_write_wrong_path_to_cache() {
         let mut cache = DirCache::new(4);
-        let folder_a = PathBuf::from(r"C:\folder-a");
-        let folder_b = PathBuf::from(r"C:\folder-b");
+        let folder_a = k(r"C:\folder-a");
+        let folder_b = k(r"C:\folder-b");
         let first = cache.begin(&folder_a);
         let second = cache.begin(&folder_b);
         assert!(!cache.store(&folder_b, first, vec![entry("from-a.txt", false)]));
@@ -312,13 +360,13 @@ mod tests {
     fn cache_memory_limit_evicts_old_dirs() {
         let mut cache = DirCache::new(2);
         for name in ["one", "two", "three"] {
-            let key = PathBuf::from(name);
+            let key = k(name);
             let generation = cache.begin(&key);
             assert!(cache.store(&key, generation, vec![entry(name, false)]));
         }
-        assert!(cache.get(Path::new("one")).is_none());
-        assert!(cache.get(Path::new("two")).is_some());
-        assert!(cache.get(Path::new("three")).is_some());
+        assert!(cache.get(&k("one")).is_none());
+        assert!(cache.get(&k("two")).is_some());
+        assert!(cache.get(&k("three")).is_some());
     }
 
     #[test]
@@ -332,10 +380,10 @@ mod tests {
     #[test]
     fn invalidate_dir_hook_exists_for_notify() {
         let mut cache = DirCache::new(2);
-        let key = PathBuf::from(r"C:\watched");
+        let key = k(r"C:\watched");
         let generation = cache.begin(&key);
         assert!(cache.store(&key, generation, vec![entry("a.txt", false)]));
-        cache.invalidate_dir(&key);
+        cache.invalidate_dir(Path::new(r"C:\watched"));
         assert!(cache.get(&key).is_none());
         assert!(!cache.store(&key, generation, vec![entry("late.txt", false)]));
     }
@@ -358,7 +406,7 @@ mod tests {
     }
 
     fn seed(cache: &mut DirCache, dir: &std::path::Path) {
-        let key = DirCache::canonical_key(dir).unwrap();
+        let key = DirCache::cache_key(dir).unwrap();
         let generation = cache.begin(&key);
         assert!(cache.store(&key, generation, vec![entry("kept.txt", false)]));
     }
@@ -377,8 +425,8 @@ mod tests {
         for path in affected_dirs(&kind) {
             cache.invalidate_dir(&path);
         }
-        assert!(cache.get(&DirCache::canonical_key(&source).unwrap()).is_none());
-        assert!(cache.get(&DirCache::canonical_key(&dest).unwrap()).is_none());
+        assert!(cache.get(&DirCache::cache_key(&source).unwrap()).is_none());
+        assert!(cache.get(&DirCache::cache_key(&dest).unwrap()).is_none());
         let _ = std::fs::remove_dir_all(source);
         let _ = std::fs::remove_dir_all(dest);
     }
@@ -399,8 +447,8 @@ mod tests {
         for path in touched {
             cache.invalidate_dir(&path);
         }
-        assert!(cache.get(&DirCache::canonical_key(&source).unwrap()).is_some());
-        assert!(cache.get(&DirCache::canonical_key(&dest).unwrap()).is_none());
+        assert!(cache.get(&DirCache::cache_key(&source).unwrap()).is_some());
+        assert!(cache.get(&DirCache::cache_key(&dest).unwrap()).is_none());
         let _ = std::fs::remove_dir_all(source);
         let _ = std::fs::remove_dir_all(dest);
     }
@@ -419,8 +467,8 @@ mod tests {
         for path in affected_dirs(&kind) {
             cache.invalidate_dir(&path);
         }
-        assert!(cache.get(&DirCache::canonical_key(&parent).unwrap()).is_none());
-        assert!(cache.get(&DirCache::canonical_key(&other).unwrap()).is_none());
+        assert!(cache.get(&DirCache::cache_key(&parent).unwrap()).is_none());
+        assert!(cache.get(&DirCache::cache_key(&other).unwrap()).is_none());
         let _ = std::fs::remove_dir_all(parent);
         let _ = std::fs::remove_dir_all(other);
     }
@@ -436,7 +484,7 @@ mod tests {
         for path in affected_dirs(&kind) {
             cache.invalidate_dir(&path);
         }
-        assert!(cache.get(&DirCache::canonical_key(&parent).unwrap()).is_none());
+        assert!(cache.get(&DirCache::cache_key(&parent).unwrap()).is_none());
         let _ = std::fs::remove_dir_all(parent);
     }
 
@@ -451,7 +499,7 @@ mod tests {
         for path in affected_dirs(&kind) {
             cache.invalidate_dir(&path);
         }
-        assert!(cache.get(&DirCache::canonical_key(&parent).unwrap()).is_none());
+        assert!(cache.get(&DirCache::cache_key(&parent).unwrap()).is_none());
         let _ = std::fs::remove_dir_all(parent);
     }
 
@@ -462,7 +510,7 @@ mod tests {
         seed(&mut cache, &parent);
         // И извлечение, и восстановление пишут файл в папку. Сбрасывается она, не корзина.
         cache.invalidate_dir(&parent.join("restored.txt"));
-        assert!(cache.get(&DirCache::canonical_key(&parent).unwrap()).is_none());
+        assert!(cache.get(&DirCache::cache_key(&parent).unwrap()).is_none());
         assert!(uses_dir_cache(true, false, false) == false);
         let _ = std::fs::remove_dir_all(parent);
     }
@@ -470,7 +518,7 @@ mod tests {
     #[test]
     fn readonly_ops_do_not_invalidate_cache() {
         let mut cache = DirCache::new(4);
-        let key = PathBuf::from(r"C:\readonly-cache");
+        let key = k(r"C:\readonly-cache");
         let generation = cache.begin(&key);
         assert!(cache.store(&key, generation, vec![entry("b.txt", false), entry("a.txt", true)]));
         let mut view = cache.get(&key).unwrap();
@@ -483,12 +531,109 @@ mod tests {
     #[test]
     fn request_generation_is_monotonic_and_does_not_wrap_in_session() {
         let mut cache = DirCache::new(4);
-        let key = PathBuf::from(r"C:\generation");
+        let key = k(r"C:\generation");
         let first = cache.begin(&key);
         let second = cache.begin(&key);
         let third = cache.begin(&key);
         assert!(first < second && second < third);
         assert_eq!(std::mem::size_of_val(&first), 8);
         assert_ne!(first, 0);
+    }
+
+    #[test]
+    fn recursive_delete_dir_invalidates_whole_subtree_cache() {
+        let dir = scratch("tree");
+        let sub1 = dir.join("sub1");
+        let sub2 = dir.join("sub2");
+        std::fs::create_dir(&sub1).unwrap();
+        std::fs::create_dir(&sub2).unwrap();
+        let mut cache = DirCache::new(8);
+        let keys = [
+            DirCache::cache_key(&dir).unwrap(),
+            DirCache::cache_key(&sub1).unwrap(),
+            DirCache::cache_key(&sub2).unwrap(),
+        ];
+        for key in &keys {
+            let generation = cache.begin(key);
+            assert!(cache.store(key, generation, vec![entry("old.txt", false)]));
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+        cache.invalidate_dir(&dir);
+        for key in &keys {
+            assert!(cache.get(key).is_none());
+        }
+        assert!(DirCache::cache_key(&sub1).is_none());
+    }
+
+    #[test]
+    fn move_dir_invalidates_source_subtree_paths() {
+        let source = scratch("move-tree");
+        let nested = source.join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        let dest = scratch("move-dest");
+        let mut cache = DirCache::new(8);
+        let source_key = DirCache::cache_key(&source).unwrap();
+        let nested_key = DirCache::cache_key(&nested).unwrap();
+        let dest_key = DirCache::cache_key(&dest).unwrap();
+        for key in [&source_key, &nested_key, &dest_key] {
+            let generation = cache.begin(key);
+            assert!(cache.store(key, generation, vec![entry("old.txt", false)]));
+        }
+        let kind = OpKind::Move {
+            sources: vec![source.clone()],
+            dest: dest.clone(),
+        };
+        for path in affected_dirs(&kind) {
+            cache.invalidate_dir(&path);
+        }
+        assert!(cache.get(&source_key).is_none());
+        assert!(cache.get(&nested_key).is_none());
+        assert!(cache.get(&dest_key).is_none());
+        let _ = std::fs::remove_dir_all(source);
+        let _ = std::fs::remove_dir_all(dest);
+    }
+
+    #[test]
+    fn extract_zip_nested_invalidates_created_dirs() {
+        let root = scratch("zip-out");
+        let nested = root.join("docs");
+        std::fs::create_dir(&nested).unwrap();
+        let mut cache = DirCache::new(4);
+        let nested_key = DirCache::cache_key(&nested).unwrap();
+        let generation = cache.begin(&nested_key);
+        assert!(cache.store(&nested_key, generation, vec![entry("stale.txt", false)]));
+        cache.invalidate_dir(&root);
+        assert!(cache.get(&nested_key).is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn missing_path_in_cache_gives_miss_not_stale() {
+        let dir = scratch("missing");
+        let key = DirCache::cache_key(&dir).unwrap();
+        let mut cache = DirCache::new(4);
+        let generation = cache.begin(&key);
+        assert!(cache.store(&key, generation, vec![entry("ghost.txt", false)]));
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(DirCache::cache_key(&dir).is_none());
+        cache.invalidate_dir(&dir);
+        assert!(cache.get(&key).is_none());
+    }
+
+    #[test]
+    fn volume_swap_same_letter_different_cache_key() {
+        let dir = scratch("volume");
+        let path = DirCache::canonical_key(&dir).unwrap();
+        let old_disk = CacheKey::new(path.clone(), "AAAA1111");
+        let new_disk = CacheKey::new(path, "BBBB2222");
+        assert_ne!(old_disk, new_disk);
+        let mut cache = DirCache::new(4);
+        let generation = cache.begin(&old_disk);
+        assert!(cache.store(&old_disk, generation, vec![entry("flash1.txt", false)]));
+        assert!(cache.get(&new_disk).is_none());
+        let live = DirCache::cache_key(&dir).unwrap();
+        assert_eq!(live.volume, crate::platform::volume_id(&dir).unwrap());
+        assert_ne!(live, old_disk);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
