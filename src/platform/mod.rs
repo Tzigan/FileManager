@@ -143,6 +143,12 @@ pub(crate) use self::windows::{
     monitor_work_area_at_screen_position,
 };
 
+/// Таргет приложения — только Windows.
+/// Новые ветки `cfg(unix)` и `cfg(not(windows))` в модулях не добавлять:
+/// мёртвые заглушки «для другой ОС» уже убраны из корзины и не должны вернуться.
+/// Блок ниже не описывает вторую поддерживаемую систему, он лишь не даёт
+/// типам разъехаться, если файл открыли не на Windows. WSL в дереве — функция Windows.
+///
 /// Stubs for non-Windows hosts so the crate still compiles for docs/tests.
 #[cfg(not(windows))]
 mod stubs {

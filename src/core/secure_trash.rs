@@ -484,6 +484,8 @@ fn copy_tree(source: &Path, dest: &Path) -> io::Result<()> {
     }
 }
 
+/// Безвозвратное удаление: `remove_file` / `remove_dir_all` — это DeleteFileW и
+/// RemoveDirectoryW, не Корзина Windows.
 fn remove_tree(path: &Path) -> Result<(), TrashError> {
     let meta = match fs::symlink_metadata(path) {
         Ok(meta) => meta,
@@ -959,6 +961,96 @@ mod tests {
         assert_ne!(attributes & 0x2, 0, "hidden");
         crate::platform::set_attributes(&restored, false, false).unwrap();
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn phantom_card_without_a_payload_is_damaged_and_not_restored() {
+        let root = scratch();
+        let trash = root.join(TRASH_DIR_NAME);
+        fs::create_dir_all(trash.join("meta")).unwrap();
+        let record = TrashRecord {
+            id: "gone".into(),
+            original_path: root.join("note.txt").to_string_lossy().to_string(),
+            original_name: "note.txt".into(),
+            is_dir: false,
+            deleted_at: 5,
+            size: 4,
+            stored_path: trash
+                .join("items")
+                .join("gone")
+                .to_string_lossy()
+                .to_string(),
+            volume_id: Some("VOL-1".into()),
+            status: TrashStatus::InTrash,
+            integrity: None,
+            integrity_note: IntegrityNote::NotChecked,
+            attributes: 0,
+        };
+        fs::write(
+            trash.join("meta").join("gone.json"),
+            serde_json::to_string(&record).unwrap(),
+        )
+        .unwrap();
+        let listed = list_trash(&[root.clone()]);
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].status, TrashStatus::Damaged);
+        assert!(matches!(
+            restore(&listed[0], Some("VOL-1"), &[root.clone()], None),
+            Err(TrashError::DamagedMetadata)
+        ));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn purge_deletes_permanently_and_does_not_use_the_windows_bin() {
+        let root = scratch();
+        let name = format!("fm-purge-norecycle-{}.txt", unique_id());
+        let file = root.join(&name);
+        fs::write(&file, "bye").unwrap();
+        let record = move_to_trash(&file, &options(&root)).unwrap();
+        purge(&record).unwrap();
+        assert!(!Path::new(&record.stored_path).exists());
+        assert!(!windows_bin_mentions(&name));
+        let source = include_str!("secure_trash.rs");
+        assert!(!source.contains(&format!("{}{}", "recycle", "_bin")));
+        assert!(!source.contains(&format!("{}{}", "IFile", "Operation")));
+        assert!(!source.contains(&format!("{}{}", "SHFile", "Operation")));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    fn windows_bin_mentions(name: &str) -> bool {
+        let mut found = false;
+        let utf16: Vec<u8> = name
+            .encode_utf16()
+            .flat_map(|unit| unit.to_le_bytes())
+            .collect();
+        let mut pending = vec![PathBuf::from(r"C:\$Recycle.Bin")];
+        while let Some(dir) = pending.pop() {
+            let Ok(entries) = fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    pending.push(path);
+                    continue;
+                }
+                let file_name = path
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or("");
+                if !file_name.starts_with("$I") {
+                    continue;
+                }
+                let Ok(bytes) = fs::read(&path) else {
+                    continue;
+                };
+                if bytes.windows(utf16.len()).any(|window| window == utf16) {
+                    found = true;
+                }
+            }
+        }
+        found
     }
 
     #[test]
