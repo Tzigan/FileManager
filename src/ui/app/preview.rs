@@ -56,18 +56,14 @@ impl FileManagerApp {
 
     pub(super) fn act_preview(&mut self, ctx: &egui::Context) {
         let tab = &self.tabs[self.active];
-        let index = tab
-            .selection
-            .iter()
-            .next()
-            .copied()
-            .or(if tab.entries.is_empty() {
-                None
-            } else {
-                Some(tab.cursor)
-            });
-        let path = index
-            .and_then(|index| tab.entries.get(index))
+        let entry = if tab.selection.len() == 1 {
+            tab.selection.iter().next().and_then(|key| {
+                tab.entries.iter().find(|entry| key.matches(entry))
+            })
+        } else {
+            tab.entries.get(tab.cursor)
+        };
+        let path = entry
             .filter(|entry| !entry.is_dir)
             .map(|entry| entry.path.clone());
         if let Some(path) = path {

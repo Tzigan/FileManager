@@ -1,9 +1,11 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use crate::core::format::format_size;
 use crate::core::ops::{ConflictAction, ErrorAction, OpEvent, OpJob, OpKind, OpReply, OpStage};
+use crate::ui::tabs::SelectionKey;
 use crate::ui::FileManagerApp;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,12 +43,15 @@ pub(super) fn clipboard_target(
 
 fn paths_for_selection(
     entries: &[crate::core::fs::FileEntry],
-    selection: &std::collections::BTreeSet<usize>,
+    selection: &std::collections::BTreeSet<SelectionKey>,
 ) -> Vec<PathBuf> {
-    selection
+    let selected_keys: HashSet<_> = selection.iter().map(SelectionKey::borrowed).collect();
+    entries
         .iter()
-        .filter_map(|&i| entries.get(i))
-        .map(|e| e.path.clone())
+        .filter(|entry| {
+            selected_keys.contains(&(entry.path.as_path(), entry.archive_member.as_deref()))
+        })
+        .map(|entry| entry.path.clone())
         .collect()
 }
 
@@ -267,7 +272,8 @@ impl FileManagerApp {
             return;
         }
         if tab.selection.len() == 1 {
-            if let Some(entry) = tab.entries.get(*tab.selection.iter().next().unwrap()) {
+            let selected_key = tab.selection.iter().next().unwrap();
+            if let Some(entry) = tab.entries.iter().find(|entry| selected_key.matches(entry)) {
                 self.ops_ui.rename = Some((entry.path.clone(), entry.name.clone()));
             }
         }
@@ -624,9 +630,14 @@ mod tests {
     }
 
     #[test]
-    fn file_selection_resolves_to_paths_and_ignores_stale_indices() {
+    fn file_selection_resolves_stable_keys_and_ignores_removed_entries() {
         let entries = vec![entry("a.txt"), entry("b.txt"), entry("c.txt")];
-        let selection = [0, 2, 99].into_iter().collect();
+        let stale = entry("removed.txt");
+        let selection = std::collections::BTreeSet::from([
+            SelectionKey::from_entry(&entries[0]),
+            SelectionKey::from_entry(&entries[2]),
+            SelectionKey::from_entry(&stale),
+        ]);
         assert_eq!(
             paths_for_selection(&entries, &selection),
             vec![PathBuf::from("C:\\data\\a.txt"), PathBuf::from("C:\\data\\c.txt")]

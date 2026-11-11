@@ -13,8 +13,7 @@ impl FileManagerApp {
                 }
             });
             let tab = &mut self.tabs[self.active];
-            tab.selection.clear();
-            tab.anchor = None;
+            tab.clear_selection();
         }
         let in_archive = self.tabs[self.active].archive_prefix.is_some();
         resp.context_menu(|ui| {
@@ -71,27 +70,33 @@ impl FileManagerApp {
         resp: &egui::Response,
         index: usize,
         entry: &FileEntry,
+        visual_order: Option<&[usize]>,
         ui: &mut egui::Ui,
         ctx: &egui::Context,
     ) {
         let archive_member = entry.archive_member.clone();
+        let selection_marquee_active = self.tabs[self.active].selection_marquee.is_some();
         let zip_file =
             archive_member.is_none() && !entry.is_dir && entry.extension.as_deref() == Some("zip");
-        if resp.clicked() {
+        if !selection_marquee_active && resp.clicked() {
             // Clicking the list drops text-field focus (address bar) so shortcuts work.
             ctx.memory_mut(|m| {
                 if let Some(id) = m.focused() {
                     m.surrender_focus(id);
                 }
             });
-            self.select_click(index, ui.input(|i| i.modifiers));
+            self.select_click(index, visual_order, ui.input(|i| i.modifiers));
         }
         // Explorer semantics: right-click on an unselected row selects just it.
-        if resp.secondary_clicked() && !self.tabs[self.active].selection.contains(&index) {
+        let entry_key = crate::ui::tabs::SelectionKey::from_entry(entry);
+        if !selection_marquee_active
+            && resp.secondary_clicked()
+            && !self.tabs[self.active].selection.contains(&entry_key)
+        {
             let tab = &mut self.tabs[self.active];
             tab.selection.clear();
-            tab.selection.insert(index);
-            tab.anchor = Some(index);
+            tab.selection.insert(entry_key.clone());
+            tab.anchor = Some(entry_key);
             tab.cursor = index;
         }
         if resp.double_clicked() {
@@ -203,13 +208,20 @@ impl FileManagerApp {
     }
 
     /// Click selection honoring Ctrl/Shift modifiers (Explorer semantics).
-    fn select_click(&mut self, index: usize, mods: egui::Modifiers) {
+    fn select_click(
+        &mut self,
+        index: usize,
+        visual_order: Option<&[usize]>,
+        mods: egui::Modifiers,
+    ) {
         let tab = &mut self.tabs[self.active];
         tab.cursor = crate::ui::tabs::apply_click(
             &mut tab.selection,
             &mut tab.anchor,
+            &tab.entries,
+            visual_order,
             index,
-            mods.ctrl,
+            mods.command,
             mods.shift,
         );
     }

@@ -147,9 +147,9 @@ impl FileManagerApp {
         }
 
         // Selection and navigation.
-        if mods.ctrl && ctx.input(|i| i.key_pressed(egui::Key::A)) {
-            let len = self.tabs[self.active].entries.len();
-            self.tabs[self.active].selection.extend(0..len);
+        if mods.command && ctx.input(|i| i.key_pressed(egui::Key::A)) {
+            let tab = &mut self.tabs[self.active];
+            crate::ui::tabs::select_all_entries(&mut tab.selection, &tab.entries);
             return;
         }
         if ctx.input(|i| i.key_pressed(egui::Key::Backspace)) {
@@ -163,7 +163,9 @@ impl FileManagerApp {
                     tab.selection
                         .iter()
                         .next()
-                        .and_then(|&i| tab.entries.get(i))
+                        .and_then(|selected_key| {
+                            tab.entries.iter().find(|entry| selected_key.matches(entry))
+                        })
                         .filter(|entry| {
                             entry.is_dir
                                 || (entry.archive_member.is_none()
@@ -203,22 +205,48 @@ impl FileManagerApp {
         if len == 0 {
             return;
         }
-        let cur = self.tabs[self.active].cursor.min(len - 1);
-        let extend = mods.shift;
         let i = input(&ctx.input(|i| i.clone()));
-        if i.key_pressed(egui::Key::ArrowDown) {
-            self.move_cursor(cur.saturating_add(1), extend);
+        let relative_move = if i.key_pressed(egui::Key::ArrowDown) {
+            Some(1isize)
         } else if i.key_pressed(egui::Key::ArrowUp) {
-            self.move_cursor(cur.saturating_sub(1), extend);
+            Some(-1)
         } else if i.key_pressed(egui::Key::PageDown) {
-            self.move_cursor(cur.saturating_add(20), extend);
+            Some(20)
         } else if i.key_pressed(egui::Key::PageUp) {
-            self.move_cursor(cur.saturating_sub(20), extend);
-        } else if i.key_pressed(egui::Key::Home) {
-            self.move_cursor(0, extend);
-        } else if i.key_pressed(egui::Key::End) {
-            self.move_cursor(len - 1, extend);
+            Some(-20)
+        } else {
+            None
+        };
+        let move_to_start = i.key_pressed(egui::Key::Home);
+        let move_to_end = i.key_pressed(egui::Key::End);
+        if relative_move.is_none() && !move_to_start && !move_to_end {
+            return;
         }
+        let visual_order = self.selection_order();
+        let order_len = visual_order.as_ref().map_or(len, Vec::len);
+        if order_len == 0 {
+            return;
+        }
+        let cursor = self.tabs[self.active].cursor;
+        let current_position = visual_order.as_ref().map_or_else(
+            || cursor.min(len - 1),
+            |order| {
+                order
+                    .iter()
+                    .position(|&index| index == cursor)
+                    .unwrap_or(0)
+            },
+        );
+        let extend = mods.shift;
+        let target_position = if move_to_start {
+            0
+        } else if move_to_end {
+            order_len - 1
+        } else {
+            (current_position as isize + relative_move.unwrap())
+                .clamp(0, order_len as isize - 1) as usize
+        };
+        self.move_cursor(visual_order.as_deref(), target_position, extend);
     }
 
     fn handle_side_mouse_navigation(&mut self, ctx: &egui::Context) {
@@ -259,14 +287,25 @@ impl FileManagerApp {
         );
     }
 
-    fn move_cursor(&mut self, target: usize, extend: bool) {
+    fn move_cursor(
+        &mut self,
+        visual_order: Option<&[usize]>,
+        target_position: usize,
+        extend: bool,
+    ) {
         let tab = &mut self.tabs[self.active];
-        let len = tab.entries.len();
+        let target = visual_order
+            .and_then(|order| order.get(target_position).copied())
+            .unwrap_or(target_position);
+        if target >= tab.entries.len() {
+            return;
+        }
         let Some(target) = crate::ui::tabs::apply_cursor_move(
             &mut tab.selection,
             &mut tab.anchor,
+            &tab.entries,
+            visual_order,
             tab.cursor,
-            len,
             target,
             extend,
         ) else {

@@ -1,5 +1,8 @@
+use std::collections::HashSet;
+
 use crate::core::format::format_size;
 use crate::platform::format_local_time;
+use crate::ui::tabs::SelectionKey;
 use crate::ui::FileManagerApp;
 
 impl FileManagerApp {
@@ -7,16 +10,23 @@ impl FileManagerApp {
     /// entry, a multi-selection summary, or the current folder.
     pub(crate) fn props_panel(&self, ui: &mut egui::Ui) {
         let tab = &self.tabs[self.active];
-        let sel: Vec<usize> = tab.selection.iter().copied().collect();
+        let selected_keys: HashSet<_> = tab
+            .selection
+            .iter()
+            .map(SelectionKey::borrowed)
+            .collect();
+        let selected: Vec<_> = tab
+            .entries
+            .iter()
+            .filter(|entry| {
+                selected_keys.contains(&(entry.path.as_path(), entry.archive_member.as_deref()))
+            })
+            .collect();
 
-        match sel.len() {
+        match selected.len() {
             0 => self.props_folder_info(ui),
-            1 => {
-                if let Some(entry) = tab.entries.get(sel[0]) {
-                    self.props_single(ui, entry);
-                }
-            }
-            n => self.props_multi(ui, n, &sel),
+            1 => self.props_single(ui, selected[0]),
+            n => self.props_multi(ui, n, &selected),
         }
     }
 
@@ -81,13 +91,10 @@ impl FileManagerApp {
         });
     }
 
-    fn props_multi(&self, ui: &mut egui::Ui, count: usize, sel: &[usize]) {
-        let total: u64 = self.tabs[self.active]
-            .entries
+    fn props_multi(&self, ui: &mut egui::Ui, count: usize, selected: &[&crate::core::fs::FileEntry]) {
+        let total: u64 = selected
             .iter()
-            .enumerate()
-            .filter(|(i, _)| sel.contains(i))
-            .filter_map(|(_, e)| e.size)
+            .filter_map(|entry| entry.size)
             .sum();
         egui::Grid::new("props_multi").num_columns(2).show(ui, |ui| {
             self.prop_row(ui, "props.selected_count", &count.to_string());

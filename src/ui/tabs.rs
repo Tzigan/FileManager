@@ -1,5 +1,5 @@
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -8,6 +8,50 @@ use crate::core::fs::{FileEntry, SortKey};
 use crate::core::history::History;
 
 static NEXT_TAB_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Стабильный ключ файла; archive_member различает элементы одного ZIP.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct SelectionKey {
+    path: PathBuf,
+    archive_member: Option<String>,
+}
+
+impl SelectionKey {
+    pub(crate) fn from_entry(entry: &FileEntry) -> Self {
+        Self {
+            path: entry.path.clone(),
+            archive_member: entry.archive_member.clone(),
+        }
+    }
+
+    pub(crate) fn matches(&self, entry: &FileEntry) -> bool {
+        self.path == entry.path && self.archive_member.as_deref() == entry.archive_member.as_deref()
+    }
+
+    pub(crate) fn borrowed(&self) -> (&Path, Option<&str>) {
+        (&self.path, self.archive_member.as_deref())
+    }
+}
+
+/// Рамка выделения хранит только временно добавленные ключи, чтобы обновлять её инкрементально.
+#[derive(Debug)]
+pub(crate) struct SelectionMarquee {
+    pub start: egui::Pos2,
+    pub current: egui::Pos2,
+    pub added: BTreeSet<SelectionKey>,
+}
+
+pub(crate) fn add_marquee_entry(
+    selection: &mut BTreeSet<SelectionKey>,
+    marquee: &mut SelectionMarquee,
+    entry: &FileEntry,
+) -> SelectionKey {
+    let key = SelectionKey::from_entry(entry);
+    if selection.insert(key.clone()) {
+        marquee.added.insert(key.clone());
+    }
+    key
+}
 
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum ListStatus {
@@ -106,12 +150,13 @@ pub struct Tab {
     pub archive_forward: Vec<String>,
     pub address_input: String,
     pub entries: Vec<FileEntry>,
-    /// Selected row indices into `entries`.
-    pub selection: BTreeSet<usize>,
-    /// Anchor index for Shift-range selection.
-    pub anchor: Option<usize>,
+    /// Выбор привязан к пути, а не к меняющейся позиции строки.
+    pub selection: BTreeSet<SelectionKey>,
+    /// Стабильный якорь для диапазона Shift.
+    pub anchor: Option<SelectionKey>,
     /// Keyboard-focused row index.
     pub cursor: usize,
+    pub selection_marquee: Option<SelectionMarquee>,
     pub history: History,
     pub status: ListStatus,
     pub pinned: bool,
@@ -136,6 +181,7 @@ impl Tab {
             selection: BTreeSet::new(),
             anchor: None,
             cursor: 0,
+            selection_marquee: None,
             history: History::default(),
             status: ListStatus::Loading,
             pinned: false,
@@ -160,6 +206,11 @@ impl Tab {
     pub fn clear_selection(&mut self) {
         self.selection.clear();
         self.anchor = None;
+        self.selection_marquee = None;
+    }
+
+    pub fn is_selected(&self, entry: &FileEntry) -> bool {
+        self.selection.contains(&SelectionKey::from_entry(entry))
     }
 }
 
@@ -266,58 +317,135 @@ pub(crate) fn move_to_visible_drop_slot<T>(
     Some(target.min(items.len() - 1))
 }
 
-/// Click selection honoring Ctrl/Shift modifiers (Explorer semantics).
-/// Returns the new cursor position.
+/// Обновляет выбор по стабильному ключу, а диапазон считает в порядке отрисованных элементов.
 pub(crate) fn apply_click(
-    sel: &mut std::collections::BTreeSet<usize>,
-    anchor: &mut Option<usize>,
+    selection: &mut BTreeSet<SelectionKey>,
+    anchor: &mut Option<SelectionKey>,
+    entries: &[FileEntry],
+    visual_order: Option<&[usize]>,
     index: usize,
-    ctrl: bool,
+    command: bool,
     shift: bool,
 ) -> usize {
-    if shift && anchor.is_some() {
-        let (lo, hi) = range_from(anchor.unwrap(), index);
-        if !ctrl {
-            sel.clear();
+    let Some(entry) = entries.get(index) else {
+        return index;
+    };
+    let key = SelectionKey::from_entry(entry);
+    if shift && let Some(anchor_key) = anchor.as_ref() {
+        let anchor_position = visual_position_for_key(entries, visual_order, anchor_key);
+        let target_position = visual_position_for_index(entries, visual_order, index);
+        if let (Some(anchor_position), Some(target_position)) = (anchor_position, target_position) {
+            let (lo, hi) = range_from(anchor_position, target_position);
+            if !command {
+                selection.clear();
+            }
+            insert_visual_range(selection, entries, visual_order, lo, hi);
+        } else {
+            if !command {
+                selection.clear();
+            }
+            selection.insert(key.clone());
+            *anchor = Some(key);
         }
-        sel.extend(lo..=hi);
-    } else if ctrl {
-        if !sel.remove(&index) {
-            sel.insert(index);
-            *anchor = Some(index);
+    } else if command {
+        if !selection.remove(&key) {
+            selection.insert(key.clone());
+            *anchor = Some(key);
         }
     } else {
-        sel.clear();
-        sel.insert(index);
-        *anchor = Some(index);
+        selection.clear();
+        selection.insert(key.clone());
+        *anchor = Some(key);
     }
     index
 }
 
-/// Applies keyboard cursor movement and its selection semantics.
-/// Shift-selection always represents the current anchor-to-cursor range, not a
-/// union with the previously selected range.
+pub(crate) fn select_all_entries(
+    selection: &mut BTreeSet<SelectionKey>,
+    entries: &[FileEntry],
+) {
+    selection.extend(entries.iter().map(SelectionKey::from_entry));
+}
+
+fn insert_visual_range(
+    selection: &mut BTreeSet<SelectionKey>,
+    entries: &[FileEntry],
+    visual_order: Option<&[usize]>,
+    lo: usize,
+    hi: usize,
+) {
+    for position in lo..=hi {
+        let entry_index = match visual_order {
+            Some(order) => order.get(position).copied(),
+            None => Some(position),
+        };
+        if let Some(entry) = entry_index.and_then(|index| entries.get(index)) {
+            selection.insert(SelectionKey::from_entry(entry));
+        }
+    }
+}
+
+fn visual_position_for_index(
+    entries: &[FileEntry],
+    visual_order: Option<&[usize]>,
+    target: usize,
+) -> Option<usize> {
+    if let Some(order) = visual_order {
+        order.iter().position(|&index| index == target)
+    } else {
+        (target < entries.len()).then_some(target)
+    }
+}
+
+fn visual_position_for_key(
+    entries: &[FileEntry],
+    visual_order: Option<&[usize]>,
+    key: &SelectionKey,
+) -> Option<usize> {
+    if let Some(order) = visual_order {
+        order.iter().position(|&index| {
+            entries
+                .get(index)
+                .is_some_and(|entry| key.matches(entry))
+        })
+    } else {
+        entries.iter().position(|entry| key.matches(entry))
+    }
+}
+
+/// Двигает курсор и расширяет Shift-выбор в порядке отрисованных элементов.
 pub(crate) fn apply_cursor_move(
-    selection: &mut BTreeSet<usize>,
-    anchor: &mut Option<usize>,
+    selection: &mut BTreeSet<SelectionKey>,
+    anchor: &mut Option<SelectionKey>,
+    entries: &[FileEntry],
+    visual_order: Option<&[usize]>,
     current: usize,
-    len: usize,
     target: usize,
     extend: bool,
 ) -> Option<usize> {
-    if len == 0 {
-        return None;
-    }
-    let target = target.min(len - 1);
+    let target_entry = entries.get(target)?;
+    let target_position = visual_position_for_index(entries, visual_order, target)?;
+    let target_key = SelectionKey::from_entry(target_entry);
+
     if extend {
-        let anchor = *anchor.get_or_insert(current.min(len - 1));
-        let (lo, hi) = range_from(anchor, target);
-        selection.clear();
-        selection.extend(lo..=hi);
+        if anchor.is_none() {
+            *anchor = entries.get(current).map(SelectionKey::from_entry);
+        }
+        let anchor_position =
+            anchor.as_ref().and_then(|key| visual_position_for_key(entries, visual_order, key));
+        if let Some(anchor_position) = anchor_position {
+            let (lo, hi) = range_from(anchor_position, target_position);
+            selection.clear();
+            insert_visual_range(selection, entries, visual_order, lo, hi);
+        } else {
+            selection.clear();
+            selection.insert(target_key.clone());
+            *anchor = Some(target_key);
+        }
     } else {
         selection.clear();
-        selection.insert(target);
-        *anchor = Some(target);
+        selection.insert(target_key.clone());
+        *anchor = Some(target_key);
     }
     Some(target)
 }
@@ -349,59 +477,198 @@ mod tests {
         assert_eq!(tabs[1].path, opened);
     }
 
-    fn sel() -> (std::collections::BTreeSet<usize>, Option<usize>) {
-        (std::collections::BTreeSet::new(), None)
+    fn entry(index: usize) -> FileEntry {
+        let name = format!("item-{index}.txt");
+        FileEntry {
+            name: name.clone(),
+            path: PathBuf::from(format!("C:\\items\\{name}")),
+            is_dir: false,
+            is_symlink: false,
+            hidden: false,
+            system: false,
+            readonly: false,
+            size: Some(index as u64),
+            modified: None,
+            created: None,
+            extension: Some("txt".to_owned()),
+            archive_member: None,
+        }
+    }
+
+    fn keys_for(entries: &[FileEntry], indices: &[usize]) -> BTreeSet<SelectionKey> {
+        indices
+            .iter()
+            .map(|&index| SelectionKey::from_entry(&entries[index]))
+            .collect()
     }
 
     #[test]
     fn plain_click_selects_single() {
-        let (mut s, mut a) = sel();
-        assert_eq!(apply_click(&mut s, &mut a, 3, false, false), 3);
-        assert_eq!(s.len(), 1);
-        assert!(s.contains(&3) && a == Some(3));
+        let entries: Vec<_> = (0..8).map(entry).collect();
+        let (mut selection, mut anchor) = (BTreeSet::new(), None);
+        assert_eq!(
+            apply_click(
+                &mut selection,
+                &mut anchor,
+                &entries,
+                None,
+                3,
+                false,
+                false,
+            ),
+            3
+        );
+        assert_eq!(selection, keys_for(&entries, &[3]));
+        assert_eq!(anchor, Some(SelectionKey::from_entry(&entries[3])));
     }
 
     #[test]
     fn ctrl_click_toggles() {
-        let (mut s, mut a) = sel();
-        apply_click(&mut s, &mut a, 1, false, false);
-        apply_click(&mut s, &mut a, 5, true, false);
-        assert!(s.contains(&1) && s.contains(&5));
-        apply_click(&mut s, &mut a, 5, true, false);
-        assert!(!s.contains(&5) && s.contains(&1));
+        let entries: Vec<_> = (0..8).map(entry).collect();
+        let (mut selection, mut anchor) = (BTreeSet::new(), None);
+        apply_click(
+            &mut selection,
+            &mut anchor,
+            &entries,
+            None,
+            1,
+            false,
+            false,
+        );
+        apply_click(
+            &mut selection,
+            &mut anchor,
+            &entries,
+            None,
+            5,
+            true,
+            false,
+        );
+        assert_eq!(selection, keys_for(&entries, &[1, 5]));
+        apply_click(
+            &mut selection,
+            &mut anchor,
+            &entries,
+            None,
+            5,
+            true,
+            false,
+        );
+        assert_eq!(selection, keys_for(&entries, &[1]));
     }
 
     #[test]
-    fn shift_click_fills_range() {
-        let (mut s, mut a) = sel();
-        apply_click(&mut s, &mut a, 2, false, false);
-        apply_click(&mut s, &mut a, 6, false, true);
-        assert_eq!(s.iter().copied().collect::<Vec<_>>(), vec![2, 3, 4, 5, 6]);
+    fn shift_click_follows_visual_order_and_skips_group_headers() {
+        let entries: Vec<_> = (0..6).map(entry).collect();
+        // Здесь только ListRow::Item; заголовки групп намеренно пропущены.
+        let visual_order = [3, 1, 2, 4, 5, 0];
+        let (mut selection, mut anchor) = (BTreeSet::new(), None);
+        apply_click(
+            &mut selection,
+            &mut anchor,
+            &entries,
+            Some(&visual_order),
+            1,
+            false,
+            false,
+        );
+        apply_click(
+            &mut selection,
+            &mut anchor,
+            &entries,
+            Some(&visual_order),
+            5,
+            false,
+            true,
+        );
+        assert_eq!(selection, keys_for(&entries, &[1, 2, 4, 5]));
     }
 
     #[test]
-    fn shift_click_reverse_range() {
-        let (mut s, mut a) = sel();
-        apply_click(&mut s, &mut a, 7, false, false);
-        apply_click(&mut s, &mut a, 3, false, true);
-        assert_eq!(s.iter().copied().collect::<Vec<_>>(), vec![3, 4, 5, 6, 7]);
+    fn reverse_shift_click_follows_visual_order() {
+        let entries: Vec<_> = (0..6).map(entry).collect();
+        let visual_order = [3, 1, 2, 4, 5, 0];
+        let (mut selection, mut anchor) = (BTreeSet::new(), None);
+        apply_click(
+            &mut selection,
+            &mut anchor,
+            &entries,
+            Some(&visual_order),
+            5,
+            false,
+            false,
+        );
+        apply_click(
+            &mut selection,
+            &mut anchor,
+            &entries,
+            Some(&visual_order),
+            1,
+            false,
+            true,
+        );
+        assert_eq!(selection, keys_for(&entries, &[1, 2, 4, 5]));
     }
 
     #[test]
     fn ctrl_shift_extends_range() {
-        let (mut s, mut a) = sel();
-        apply_click(&mut s, &mut a, 9, true, false);
-        apply_click(&mut s, &mut a, 4, true, false);
-        apply_click(&mut s, &mut a, 6, true, true);
-        assert!(s.contains(&9));
-        assert!(s.iter().copied().collect::<Vec<_>>().contains(&5));
+        let entries: Vec<_> = (0..6).map(entry).collect();
+        let visual_order = [3, 1, 2, 4, 5, 0];
+        let (mut selection, mut anchor) = (BTreeSet::new(), None);
+        apply_click(
+            &mut selection,
+            &mut anchor,
+            &entries,
+            Some(&visual_order),
+            0,
+            true,
+            false,
+        );
+        apply_click(
+            &mut selection,
+            &mut anchor,
+            &entries,
+            Some(&visual_order),
+            3,
+            true,
+            false,
+        );
+        apply_click(
+            &mut selection,
+            &mut anchor,
+            &entries,
+            Some(&visual_order),
+            2,
+            true,
+            true,
+        );
+        assert_eq!(selection, keys_for(&entries, &[0, 1, 2, 3]));
     }
 
     #[test]
     fn select_all_ctrl_a() {
-        let mut s = std::collections::BTreeSet::new();
-        for i in 0..50 { s.insert(i); }
-        assert_eq!(s.len(), 50);
+        let entries: Vec<_> = (0..50).map(entry).collect();
+        let mut selection = BTreeSet::new();
+        select_all_entries(&mut selection, &entries);
+        assert_eq!(selection, keys_for(&entries, &(0..50).collect::<Vec<_>>()));
+    }
+
+    #[test]
+    fn selection_key_keeps_the_same_entry_after_reordering() {
+        let mut entries = vec![entry(0), entry(1), entry(2)];
+        entries[0].name = "z.txt".to_owned();
+        entries[1].name = "a.md".to_owned();
+        entries[2].name = "m.log".to_owned();
+        let selected = SelectionKey::from_entry(&entries[1]);
+        let selection = BTreeSet::from([selected.clone()]);
+        crate::core::fs::sort_entries_by(&mut entries, SortKey::Name, false);
+        let selected_entry = entries
+            .iter()
+            .find(|entry| selection.contains(&SelectionKey::from_entry(entry)))
+            .unwrap();
+        assert!(selected.matches(selected_entry));
+        assert_eq!(selected_entry.name, "a.md");
+        assert_eq!(selection, BTreeSet::from([selected]));
     }
 
     #[test]
@@ -536,24 +803,72 @@ mod tests {
 
     #[test]
     fn keyboard_shift_selection_tracks_current_range_in_both_directions() {
-        let mut selection = BTreeSet::from([2]);
-        let mut anchor = Some(2);
-        assert_eq!(apply_cursor_move(&mut selection, &mut anchor, 2, 8, 5, true), Some(5));
-        assert_eq!(selection, BTreeSet::from([2, 3, 4, 5]));
+        let entries: Vec<_> = (0..6).map(entry).collect();
+        let visual_order = [3, 1, 2, 4, 5, 0];
+        let mut selection = keys_for(&entries, &[1]);
+        let mut anchor = Some(SelectionKey::from_entry(&entries[1]));
+        assert_eq!(
+            apply_cursor_move(
+                &mut selection,
+                &mut anchor,
+                &entries,
+                Some(&visual_order),
+                1,
+                4,
+                true,
+            ),
+            Some(4)
+        );
+        assert_eq!(selection, keys_for(&entries, &[1, 2, 4]));
 
-        assert_eq!(apply_cursor_move(&mut selection, &mut anchor, 5, 8, 3, true), Some(3));
-        assert_eq!(selection, BTreeSet::from([2, 3]));
+        assert_eq!(
+            apply_cursor_move(
+                &mut selection,
+                &mut anchor,
+                &entries,
+                Some(&visual_order),
+                4,
+                3,
+                true,
+            ),
+            Some(3)
+        );
+        assert_eq!(selection, keys_for(&entries, &[1, 3]));
     }
 
     #[test]
-    fn keyboard_selection_clamps_cursor_and_empty_lists_are_unchanged() {
-        let mut selection = BTreeSet::from([1]);
-        let mut anchor = Some(1);
-        assert_eq!(apply_cursor_move(&mut selection, &mut anchor, 1, 3, 99, false), Some(2));
-        assert_eq!(selection, BTreeSet::from([2]));
-        assert_eq!(anchor, Some(2));
+    fn keyboard_selection_uses_stable_keys_and_ignores_invalid_targets() {
+        let entries: Vec<_> = (0..3).map(entry).collect();
+        let order = [2, 0, 1];
+        let mut selection = keys_for(&entries, &[1]);
+        let mut anchor = Some(SelectionKey::from_entry(&entries[1]));
+        assert_eq!(
+            apply_cursor_move(
+                &mut selection,
+                &mut anchor,
+                &entries,
+                Some(&order),
+                1,
+                2,
+                false,
+            ),
+            Some(2)
+        );
+        assert_eq!(selection, keys_for(&entries, &[2]));
+        assert_eq!(anchor, Some(SelectionKey::from_entry(&entries[2])));
 
-        assert_eq!(apply_cursor_move(&mut selection, &mut anchor, 2, 0, 0, true), None);
-        assert_eq!(selection, BTreeSet::from([2]));
+        assert_eq!(
+            apply_cursor_move(
+                &mut selection,
+                &mut anchor,
+                &entries,
+                Some(&order),
+                2,
+                99,
+                true,
+            ),
+            None
+        );
+        assert_eq!(selection, keys_for(&entries, &[2]));
     }
 }
