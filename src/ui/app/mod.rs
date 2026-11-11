@@ -131,6 +131,8 @@ pub struct FileManagerApp {
     about_viewport_placed: bool,
     show_settings: bool,
     settings_viewport_placed: bool,
+    /// Активная категория окна настроек. На сохранение значений не влияет.
+    settings_category: dialogs::SettingsCategory,
     pub(crate) show_secure_trash: bool,
     trash_selected: HashSet<String>,
     trash_conflict: Option<String>,
@@ -370,6 +372,7 @@ impl FileManagerApp {
             about_viewport_placed: false,
             show_settings: false,
             settings_viewport_placed: false,
+            settings_category: dialogs::SettingsCategory::default(),
             show_secure_trash: false,
             trash_selected: HashSet::new(),
             trash_conflict: None,
