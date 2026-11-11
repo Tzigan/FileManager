@@ -23,6 +23,16 @@ impl FileManagerApp {
                     self.extract_zip_all(ctx);
                     ui.close();
                 }
+                if ui
+                    .add_enabled(
+                        self.can_start_zip_operation(),
+                        egui::Button::new(self.t("zip.extract_to").to_owned()),
+                    )
+                    .clicked()
+                {
+                    self.prompt_zip_extract_to(ctx);
+                    ui.close();
+                }
                 if ui.button(self.t("toolbar.refresh").to_owned()).clicked() {
                     self.refresh(ctx);
                     ui.close();
@@ -126,11 +136,19 @@ impl FileManagerApp {
                         self.extract_zip_folder(member.clone(), ctx);
                         ui.close();
                     }
-                } else {
-                    if ui.button(self.t("zip.extract_file").to_owned()).clicked() {
-                        self.extract_zip_file(member.clone(), ctx);
-                        ui.close();
-                    }
+                } else if ui.button(self.t("zip.extract_file").to_owned()).clicked() {
+                    self.extract_zip_file(member.clone(), ctx);
+                    ui.close();
+                }
+                if ui
+                    .add_enabled(
+                        self.can_start_zip_operation(),
+                        egui::Button::new(self.t("zip.extract_to").to_owned()),
+                    )
+                    .clicked()
+                {
+                    self.prompt_zip_extract_to(ctx);
+                    ui.close();
                 }
             } else {
                 if ui.button(self.t("ctx.open").to_owned()).clicked() {
@@ -156,6 +174,17 @@ impl FileManagerApp {
                 }
                 if zip_file && ui.button(self.t("zip.extract_all").to_owned()).clicked() {
                     self.extract_zip_all_from(entry.path.clone(), ctx);
+                    ui.close();
+                }
+                if zip_file
+                    && ui
+                        .add_enabled(
+                            self.can_start_zip_operation(),
+                            egui::Button::new(self.t("zip.extract_to").to_owned()),
+                        )
+                        .clicked()
+                {
+                    self.prompt_zip_file_extract_to(entry.path.clone(), ctx);
                     ui.close();
                 }
                 let zip_sources = self.selected_paths();
