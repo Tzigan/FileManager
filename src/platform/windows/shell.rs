@@ -155,6 +155,34 @@ pub fn set_attributes(path: &std::path::Path, readonly: bool, hidden: bool) -> s
     }
 }
 
+/// Возвращает сохранённые readonly/hidden/system, не затирая остальные флаги файла.
+/// Ноль означает, что карточка атрибутов не содержала — вызывающий код тогда не зовёт эту функцию.
+pub fn apply_stored_attributes(path: &std::path::Path, stored: u32) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_READONLY, FILE_ATTRIBUTE_SYSTEM,
+        FILE_FLAGS_AND_ATTRIBUTES, GetFileAttributesW, SetFileAttributesW,
+    };
+    let mask = FILE_ATTRIBUTE_READONLY.0 | FILE_ATTRIBUTE_HIDDEN.0 | FILE_ATTRIBUTE_SYSTEM.0;
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    unsafe {
+        let current = GetFileAttributesW(windows::core::PCWSTR(wide.as_ptr()));
+        if current == u32::MAX {
+            return Err(std::io::Error::last_os_error());
+        }
+        let attrs = (current & !mask) | (stored & mask);
+        SetFileAttributesW(
+            windows::core::PCWSTR(wide.as_ptr()),
+            FILE_FLAGS_AND_ATTRIBUTES(attrs),
+        )
+        .map_err(|_| std::io::Error::last_os_error())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

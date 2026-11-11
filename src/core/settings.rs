@@ -14,6 +14,116 @@ pub enum Theme {
     Dark,
 }
 
+/// Куда попадает обычное удаление. Shift+Delete по-прежнему удаляет сразу.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeleteMode {
+    /// Системная Корзина Windows. Значение по умолчанию, чтобы старое поведение не менялось.
+    #[default]
+    WindowsRecycle,
+    /// Защищённая корзина приложения.
+    SecureTrash,
+    /// Спросить при каждом удалении.
+    Ask,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeleteRoute {
+    pub windows: Vec<PathBuf>,
+    pub secure: Vec<PathBuf>,
+    pub ask: Vec<PathBuf>,
+    pub permanent: bool,
+}
+
+/// Папка из списка захватывает путь только целиком по компонентам.
+/// `C:\Work` включает `C:\Work\sub` и не включает `C:\Workplace`.
+/// TODO(0.8): маски имён (`*.tmp`, `Work*`) не поддерживаются и здесь не добавляются.
+pub fn path_is_within_folder(path: &Path, folder: &Path) -> bool {
+    let folder_parts: Vec<_> = folder.components().collect();
+    if folder_parts.is_empty() {
+        return false;
+    }
+    let path_parts: Vec<_> = path.components().collect();
+    if path_parts.len() < folder_parts.len() {
+        return false;
+    }
+    path_parts
+        .iter()
+        .zip(folder_parts.iter())
+        .all(|(path_part, folder_part)| {
+            // Unicode-понижение, не ASCII-fold: иначе «Работа» и «РАБОТА» не совпадут.
+            // Windows-API сравнения не используем — для имён достаточно to_lowercase.
+            component_folded(*path_part) == component_folded(*folder_part)
+        })
+}
+
+fn component_folded(component: std::path::Component<'_>) -> String {
+    component.as_os_str().to_string_lossy().to_lowercase()
+}
+
+/// Та же `fs::canonicalize`, что и при восстановлении: на Windows раскрывает `..`,
+/// symlink и junction. Отдельной проверки побега здесь нет.
+/// Если путь не существует, не угадываем и не относим его к защищённой папке.
+fn canonical_existing(path: &Path) -> Option<PathBuf> {
+    fs::canonicalize(path).ok()
+}
+
+/// Закладка «Корзина» открывает корзину приложения, когда удаление может в неё попасть.
+/// В режиме «спрашивать» это она, а не системная корзина: иначе список приложения неоткуда открыть.
+/// Системная корзина остаётся отдельным пунктом меню.
+pub fn bookmark_opens_secure_trash(mode: DeleteMode) -> bool {
+    matches!(mode, DeleteMode::SecureTrash | DeleteMode::Ask)
+}
+
+/// Папки из списка сравниваются по компонентам пути, не по сырой строке и не по маске.
+pub fn route_delete(
+    mode: DeleteMode,
+    permanent: bool,
+    paths: &[PathBuf],
+    folders: &[PathBuf],
+) -> DeleteRoute {
+    if permanent {
+        return DeleteRoute {
+            windows: paths.to_vec(),
+            secure: Vec::new(),
+            ask: Vec::new(),
+            permanent: true,
+        };
+    }
+    let (forced, rest): (Vec<_>, Vec<_>) = paths.iter().cloned().partition(|path| {
+        let Some(path) = canonical_existing(path) else {
+            return false;
+        };
+        folders.iter().any(|folder| {
+            canonical_existing(folder).is_some_and(|folder| path_is_within_folder(&path, &folder))
+        })
+    });
+    match mode {
+        DeleteMode::SecureTrash => DeleteRoute {
+            windows: Vec::new(),
+            secure: paths.to_vec(),
+            ask: Vec::new(),
+            permanent: false,
+        },
+        DeleteMode::Ask => DeleteRoute {
+            windows: Vec::new(),
+            secure: forced,
+            ask: rest,
+            permanent: false,
+        },
+        DeleteMode::WindowsRecycle => DeleteRoute {
+            windows: rest,
+            secure: forced,
+            ask: Vec::new(),
+            permanent: false,
+        },
+    }
+}
+
+fn default_hash_max_bytes() -> u64 {
+    crate::core::secure_trash::DEFAULT_HASH_MAX_BYTES
+}
+
 /// File list view: table with columns, compact list or icon grid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum ViewMode {
@@ -61,6 +171,15 @@ pub struct Settings {
     /// Пользователь успевает увидеть сообщение. Не задержка внутри updater.
     #[serde(default = "default_restart_delay_secs")]
     pub update_restart_delay_secs: u32,
+    /// Режим обычного удаления. Не подменяет системную корзину, пока пользователь сам не выбрал.
+    pub delete_mode: DeleteMode,
+    /// Файлы больше порога не хешируются: удаление не должно вешать окно.
+    #[serde(default = "default_hash_max_bytes")]
+    pub secure_trash_hash_max_bytes: u64,
+    /// Запасная корзина на системном диске, только если на своём томе нет места.
+    pub secure_trash_allow_fallback: bool,
+    /// Папки, для которых обычное удаление идёт в защищённую корзину даже в режиме Windows.
+    pub secure_trash_folders: Vec<PathBuf>,
 }
 
 fn default_true() -> bool {
@@ -92,6 +211,10 @@ impl Default for Settings {
             enable_mouse_side_navigation: true,
             auto_restart_after_update: true,
             update_restart_delay_secs: default_restart_delay_secs(),
+            delete_mode: DeleteMode::WindowsRecycle,
+            secure_trash_hash_max_bytes: default_hash_max_bytes(),
+            secure_trash_allow_fallback: false,
+            secure_trash_folders: Vec::new(),
         }
     }
 }
@@ -288,5 +411,146 @@ mod tests_v06 {
         assert!(s.pinned_tabs.is_empty());
         assert!(s.auto_restart_after_update);
         assert_eq!(s.update_restart_delay_secs, 3);
+        assert_eq!(s.delete_mode, DeleteMode::WindowsRecycle);
+        assert!(s.secure_trash_folders.is_empty());
+    }
+
+    #[test]
+    fn delete_mode_routes_without_replacing_windows_recycle() {
+        let file = PathBuf::from(r"C:\work\a.txt");
+        let dir = std::env::temp_dir().join(format!("fm-route-{}", std::process::id()));
+        let private_dir = dir.join("private");
+        fs::create_dir_all(&private_dir).unwrap();
+        let forced = private_dir.join("a.txt");
+        fs::write(&forced, "a").unwrap();
+        let folders = vec![private_dir];
+        let windows = route_delete(DeleteMode::WindowsRecycle, false, &[file.clone()], &[]);
+        assert_eq!(windows.windows, vec![file.clone()]);
+        assert!(windows.secure.is_empty());
+        let secure = route_delete(DeleteMode::SecureTrash, false, &[file.clone()], &[]);
+        assert_eq!(secure.secure, vec![file.clone()]);
+        let asked = route_delete(
+            DeleteMode::Ask,
+            false,
+            &[file.clone(), forced.clone()],
+            &folders,
+        );
+        assert_eq!(asked.ask, vec![file.clone()]);
+        assert_eq!(asked.secure, vec![forced]);
+        let _ = fs::remove_dir_all(dir);
+        let permanent = route_delete(DeleteMode::SecureTrash, true, &[file.clone()], &folders);
+        assert!(permanent.permanent);
+        assert!(permanent.secure.is_empty());
+    }
+
+    #[test]
+    fn folder_rule_matches_components_not_a_string_prefix() {
+        let folder = PathBuf::from(r"C:\Work");
+        assert!(path_is_within_folder(
+            &PathBuf::from(r"C:\Work\sub"),
+            &folder
+        ));
+        assert!(path_is_within_folder(
+            &PathBuf::from(r"c:\work\sub\a.txt"),
+            &folder
+        ));
+        assert!(!path_is_within_folder(
+            &PathBuf::from(r"C:\Workplace"),
+            &folder
+        ));
+        assert!(!path_is_within_folder(&PathBuf::from(r"C:\Work2"), &folder));
+        assert!(path_is_within_folder(
+            &PathBuf::from(r"C:\Работа\файл.txt"),
+            &PathBuf::from(r"C:\РАБОТА")
+        ));
+        assert!(path_is_within_folder(
+            &PathBuf::from(r"C:\Straße\a"),
+            &PathBuf::from(r"C:\STRAßE")
+        ));
+        assert!(!path_is_within_folder(
+            &PathBuf::from(r"C:\Работник\a"),
+            &PathBuf::from(r"C:\Работа")
+        ));
+    }
+
+    #[test]
+    fn parent_segment_and_missing_path_do_not_match_a_protected_folder() {
+        let root = std::env::temp_dir().join(format!(
+            "fm-canon-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let work = root.join("Work");
+        let other = root.join("Other");
+        fs::create_dir_all(&work).unwrap();
+        fs::create_dir_all(&other).unwrap();
+        let outside = other.join("x.txt");
+        fs::write(&outside, "x").unwrap();
+        let via_parent = work.join("..").join("Other").join("x.txt");
+        let routed = route_delete(
+            DeleteMode::WindowsRecycle,
+            false,
+            &[via_parent.clone()],
+            &[work.clone()],
+        );
+        assert!(routed.secure.is_empty());
+        assert_eq!(routed.windows, vec![via_parent]);
+
+        let missing = work.join("gone.txt");
+        let missing_route = route_delete(
+            DeleteMode::WindowsRecycle,
+            false,
+            &[missing.clone()],
+            &[work.clone()],
+        );
+        assert!(missing_route.secure.is_empty());
+
+        let inside = work.join("a.txt");
+        fs::write(&inside, "a").unwrap();
+        let link = root.join("Alias");
+        let linked = std::os::windows::fs::symlink_dir(&work, &link).is_ok()
+            || std::process::Command::new("cmd")
+                .args([
+                    "/C",
+                    "mklink",
+                    "/J",
+                    &link.to_string_lossy(),
+                    &work.to_string_lossy(),
+                ])
+                .status()
+                .is_ok_and(|status| status.success());
+        assert!(linked, "нужна точка соединения или ссылка на Work");
+        let through_link = link.join("a.txt");
+        let link_route = route_delete(
+            DeleteMode::WindowsRecycle,
+            false,
+            &[through_link.clone()],
+            &[work],
+        );
+        assert_eq!(link_route.secure, vec![through_link]);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn ask_mode_bookmark_opens_the_app_trash() {
+        assert!(bookmark_opens_secure_trash(DeleteMode::Ask));
+        assert!(bookmark_opens_secure_trash(DeleteMode::SecureTrash));
+        assert!(!bookmark_opens_secure_trash(DeleteMode::WindowsRecycle));
+    }
+
+    #[test]
+    fn ask_dialog_names_the_app_trash_and_the_windows_bin_separately() {
+        let ru = include_str!("../../i18n/ru.json");
+        let en = include_str!("../../i18n/en.json");
+        assert!(ru.contains("Защищённая корзина приложения"));
+        assert!(ru.contains("Стандартная Корзина Windows"));
+        assert!(en.contains("Application secure trash"));
+        assert!(en.contains("Windows Recycle Bin"));
+        assert_ne!(
+            "settings.delete_mode.secure",
+            "settings.delete_mode.windows"
+        );
     }
 }

@@ -4,6 +4,59 @@ use anyhow::Context;
 
 use super::*;
 
+/// Категории окна настроек. Подписи берутся из локализации, не из текста виджета.
+/// Новая категория добавляется сюда и в `settings_window`, без новой панели.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub(super) enum SettingsCategory {
+    #[default]
+    General,
+    Files,
+    Tree,
+    Navigation,
+    Trash,
+    Updates,
+}
+
+impl SettingsCategory {
+    pub(super) const ALL: [Self; 6] = [
+        Self::General,
+        Self::Files,
+        Self::Tree,
+        Self::Navigation,
+        Self::Trash,
+        Self::Updates,
+    ];
+
+    fn label_key(self) -> &'static str {
+        match self {
+            Self::General => "settings.category.general",
+            Self::Files => "settings.category.files",
+            Self::Tree => "settings.category.tree",
+            Self::Navigation => "settings.category.navigation",
+            Self::Trash => "settings.category.trash",
+            Self::Updates => "settings.category.updates",
+        }
+    }
+}
+
+/// Ширина левой колонки по самим подписям. Фиксированные пиксели обрезали бы
+/// текст при другом масштабе и при длинном переводе.
+fn settings_category_column_width(ui: &egui::Ui, labels: &[String]) -> f32 {
+    let font = egui::TextStyle::Button.resolve(ui.style());
+    let text_width = labels.iter().fold(0.0_f32, |widest, label| {
+        let width = ui.ctx().fonts_mut(|fonts| {
+            fonts
+                .layout_no_wrap(label.clone(), font.clone(), egui::Color32::PLACEHOLDER)
+                .size()
+                .x
+        });
+        widest.max(width)
+    });
+    // У selectable_label есть внутренние поля, без них длинная подпись
+    // переносится на вторую строку.
+    text_width + ui.spacing().button_padding.x * 2.0 + style::SPACE_MD
+}
+
 impl FileManagerApp {
     pub(super) fn about_window(&mut self, ctx: &egui::Context) {
         if !self.show_about {
@@ -119,13 +172,21 @@ impl FileManagerApp {
         let builder = floating_dialog_viewport(
             ctx,
             title,
-            // Высота включает нижний отступ, такой же как сверху у списка настроек.
-            egui::vec2(560.0, 520.0 + style::SPACE_MD),
+            egui::vec2(640.0, 420.0),
             self.settings_viewport_placed,
         );
         let mut close_requested = false;
         let mut hidden_files_changed = false;
         let mut wsl_visibility_changed = false;
+        // Раньше слева была одна подпись «Общие», а справа лежали все параметры сразу.
+        // Список категорий один: новая секция добавляется в SettingsCategory::ALL,
+        // а не отдельной вёрсткой. Значения живут в Settings и пишутся сразу,
+        // поэтому смена категории ничего не сбрасывает.
+        let category_labels: Vec<String> = SettingsCategory::ALL
+            .iter()
+            .map(|category| self.t(category.label_key()).to_owned())
+            .collect();
+        let mut selected = self.settings_category;
         ctx.show_viewport_immediate(viewport_id, builder, |viewport_ui, _class| {
             let viewport_ctx = viewport_ui.ctx().clone();
             if viewport_ctx.input(|i| i.viewport().close_requested()) {
@@ -135,13 +196,32 @@ impl FileManagerApp {
             }
             egui::CentralPanel::default().show(viewport_ui, |ui| {
                 let content_height = ui.available_height();
-                ui.horizontal(|ui| {
+                // horizontal() выравнивает колонки по центру, поэтому короткая
+                // страница оказывалась посередине высокой панели. Здесь обе
+                // колонки начинаются сверху.
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
+                    let sidebar_width = settings_category_column_width(ui, &category_labels);
                     ui.allocate_ui_with_layout(
-                        egui::vec2(150.0, content_height),
+                        egui::vec2(sidebar_width, content_height),
                         egui::Layout::top_down(egui::Align::Min),
                         |ui| {
-                            ui.add_space(style::SPACE_SM);
-                            let _ = ui.selectable_label(true, self.t("settings.category.general"));
+                            egui::ScrollArea::vertical()
+                                .id_salt("settings-categories")
+                                .auto_shrink([false, false])
+                                .show(ui, |ui| {
+                                    ui.add_space(style::SPACE_SM);
+                                    for (category, label) in
+                                        SettingsCategory::ALL.iter().zip(category_labels.iter())
+                                    {
+                                        if ui
+                                            .selectable_label(selected == *category, label)
+                                            .clicked()
+                                        {
+                                            selected = *category;
+                                        }
+                                    }
+                                    ui.add_space(style::SPACE_MD);
+                                });
                         },
                     );
                     let (divider, _) = ui
@@ -152,108 +232,41 @@ impl FileManagerApp {
                         egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
                     );
                     ui.add_space(style::SPACE_SM);
-                    ui.vertical(|ui| {
-                        ui.add_space(style::SPACE_MD);
-                        let single_instance_label = self.t("settings.single_instance").to_owned();
-                        if ui
-                            .checkbox(
-                                &mut self.store.settings.single_instance,
-                                single_instance_label,
-                            )
-                            .changed()
-                        {
-                            self.persist();
-                        }
-                        ui.add_space(style::SPACE_SM);
-                        ui.label(
-                            egui::RichText::new(self.t("settings.single_instance_hint")).weak(),
-                        );
-                        ui.add_space(style::SPACE_MD);
-                        let side_navigation_label =
-                            self.t("settings.mouse_side_navigation").to_owned();
-                        if ui
-                            .checkbox(
-                                &mut self.store.settings.enable_mouse_side_navigation,
-                                side_navigation_label,
-                            )
-                            .changed()
-                        {
-                            self.persist();
-                        }
-                        ui.add_space(style::SPACE_SM);
-                        ui.label(
-                            egui::RichText::new(self.t("settings.mouse_side_navigation_hint"))
-                                .weak(),
-                        );
-                        ui.add_space(style::SPACE_MD);
-                        let show_hidden_label = self.t("settings.show_hidden_files").to_owned();
-                        if ui
-                            .checkbox(
-                                &mut self.store.settings.show_hidden_files,
-                                show_hidden_label,
-                            )
-                            .changed()
-                        {
-                            hidden_files_changed = true;
-                        }
-                        ui.add_space(style::SPACE_SM);
-                        ui.label(
-                            egui::RichText::new(self.t("settings.show_hidden_files_hint")).weak(),
-                        );
-                        ui.add_space(style::SPACE_MD);
-                        let show_wsl_label = self.t("settings.show_wsl_in_tree").to_owned();
-                        if ui
-                            .checkbox(&mut self.store.settings.show_wsl_in_tree, show_wsl_label)
-                            .changed()
-                        {
-                            wsl_visibility_changed = true;
-                        }
-                        ui.add_space(style::SPACE_SM);
-                        ui.label(
-                            egui::RichText::new(self.t("settings.show_wsl_in_tree_hint")).weak(),
-                        );
-                        ui.add_space(style::SPACE_MD);
-                        let auto_restart_label =
-                            self.t("settings.auto_restart_after_update").to_owned();
-                        if ui
-                            .checkbox(
-                                &mut self.store.settings.auto_restart_after_update,
-                                auto_restart_label,
-                            )
-                            .changed()
-                        {
-                            self.persist();
-                        }
-                        ui.add_space(style::SPACE_SM);
-                        ui.label(
-                            egui::RichText::new(self.t("settings.auto_restart_after_update_hint"))
-                                .weak(),
-                        );
-                        ui.add_space(style::SPACE_MD);
-                        ui.label(self.t("settings.update_restart_delay"));
-                        let mut delay = self.store.settings.update_restart_delay_secs;
-                        if ui
-                            .add(
-                                egui::DragValue::new(&mut delay)
-                                    .range(0u32..=60)
-                                    .suffix(" s"),
-                            )
-                            .changed()
-                        {
-                            self.store.settings.update_restart_delay_secs = delay;
-                            self.persist();
-                        }
-                        ui.add_space(style::SPACE_SM);
-                        ui.label(
-                            egui::RichText::new(self.t("settings.update_restart_delay_hint"))
-                                .weak(),
-                        );
-                        // Снизу тот же отступ, что и в начале колонки, чтобы поле не липло к рамке.
-                        ui.add_space(style::SPACE_MD);
-                    });
+                    let page_width = ui.available_width();
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(page_width, content_height),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            egui::ScrollArea::vertical()
+                                .id_salt("settings-page")
+                                .auto_shrink([false, false])
+                                .show(ui, |ui| {
+                                    ui.set_width(page_width);
+                                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+                                    ui.add_space(style::SPACE_SM);
+                                    match selected {
+                                        SettingsCategory::General => self.settings_general(ui),
+                                        SettingsCategory::Files => {
+                                            self.settings_files(ui, &mut hidden_files_changed);
+                                        }
+                                        SettingsCategory::Tree => {
+                                            self.settings_tree(ui, &mut wsl_visibility_changed);
+                                        }
+                                        SettingsCategory::Navigation => {
+                                            self.settings_navigation(ui)
+                                        }
+                                        SettingsCategory::Trash => self.delete_mode_settings(ui),
+                                        SettingsCategory::Updates => self.settings_updates(ui),
+                                    }
+                                    // Снизу тот же отступ, что и в начале страницы, чтобы поле не липло к рамке.
+                                    ui.add_space(style::SPACE_MD);
+                                });
+                        },
+                    );
                 });
             });
         });
+        self.settings_category = selected;
         if hidden_files_changed {
             self.persist();
             for tab in 0..self.tabs.len() {
@@ -269,6 +282,183 @@ impl FileManagerApp {
         self.settings_viewport_placed = !close_requested;
         if close_requested {
             self.show_settings = false;
+        }
+    }
+
+    fn settings_general(&mut self, ui: &mut egui::Ui) {
+        let single_instance_label = self.t("settings.single_instance").to_owned();
+        if ui
+            .checkbox(
+                &mut self.store.settings.single_instance,
+                single_instance_label,
+            )
+            .changed()
+        {
+            self.persist();
+        }
+        ui.add_space(style::SPACE_SM);
+        ui.label(egui::RichText::new(self.t("settings.single_instance_hint")).weak());
+    }
+
+    fn settings_files(&mut self, ui: &mut egui::Ui, hidden_files_changed: &mut bool) {
+        let show_hidden_label = self.t("settings.show_hidden_files").to_owned();
+        if ui
+            .checkbox(
+                &mut self.store.settings.show_hidden_files,
+                show_hidden_label,
+            )
+            .changed()
+        {
+            *hidden_files_changed = true;
+        }
+        ui.add_space(style::SPACE_SM);
+        ui.label(egui::RichText::new(self.t("settings.show_hidden_files_hint")).weak());
+    }
+
+    fn settings_tree(&mut self, ui: &mut egui::Ui, wsl_visibility_changed: &mut bool) {
+        let show_wsl_label = self.t("settings.show_wsl_in_tree").to_owned();
+        if ui
+            .checkbox(&mut self.store.settings.show_wsl_in_tree, show_wsl_label)
+            .changed()
+        {
+            *wsl_visibility_changed = true;
+        }
+        ui.add_space(style::SPACE_SM);
+        ui.label(egui::RichText::new(self.t("settings.show_wsl_in_tree_hint")).weak());
+    }
+
+    fn settings_navigation(&mut self, ui: &mut egui::Ui) {
+        let side_navigation_label = self.t("settings.mouse_side_navigation").to_owned();
+        if ui
+            .checkbox(
+                &mut self.store.settings.enable_mouse_side_navigation,
+                side_navigation_label,
+            )
+            .changed()
+        {
+            self.persist();
+        }
+        ui.add_space(style::SPACE_SM);
+        ui.label(egui::RichText::new(self.t("settings.mouse_side_navigation_hint")).weak());
+    }
+
+    fn settings_updates(&mut self, ui: &mut egui::Ui) {
+        let auto_restart_label = self.t("settings.auto_restart_after_update").to_owned();
+        if ui
+            .checkbox(
+                &mut self.store.settings.auto_restart_after_update,
+                auto_restart_label,
+            )
+            .changed()
+        {
+            self.persist();
+        }
+        ui.add_space(style::SPACE_SM);
+        ui.label(egui::RichText::new(self.t("settings.auto_restart_after_update_hint")).weak());
+        ui.add_space(style::SPACE_MD);
+        ui.label(self.t("settings.update_restart_delay"));
+        let mut delay = self.store.settings.update_restart_delay_secs;
+        if ui
+            .add(
+                egui::DragValue::new(&mut delay)
+                    .range(0u32..=60)
+                    .suffix(" s"),
+            )
+            .changed()
+        {
+            self.store.settings.update_restart_delay_secs = delay;
+            self.persist();
+        }
+        ui.add_space(style::SPACE_SM);
+        ui.label(egui::RichText::new(self.t("settings.update_restart_delay_hint")).weak());
+    }
+
+    fn delete_mode_settings(&mut self, ui: &mut egui::Ui) {
+        use crate::core::settings::DeleteMode;
+
+        ui.label(self.t("settings.delete_mode"));
+        let mut mode = self.store.settings.delete_mode;
+        let mut changed = false;
+        changed |= ui
+            .radio_value(
+                &mut mode,
+                DeleteMode::WindowsRecycle,
+                self.t("settings.delete_mode.windows"),
+            )
+            .changed();
+        changed |= ui
+            .radio_value(
+                &mut mode,
+                DeleteMode::SecureTrash,
+                self.t("settings.delete_mode.secure"),
+            )
+            .changed();
+        changed |= ui
+            .radio_value(
+                &mut mode,
+                DeleteMode::Ask,
+                self.t("settings.delete_mode.ask"),
+            )
+            .changed();
+        if changed {
+            self.store.settings.delete_mode = mode;
+            self.persist();
+        }
+        ui.add_space(style::SPACE_SM);
+        ui.label(egui::RichText::new(self.t("settings.delete_mode.hint")).weak());
+        ui.add_space(style::SPACE_SM);
+        let mut hash_mb = (self.store.settings.secure_trash_hash_max_bytes / (1024 * 1024)) as u32;
+        ui.label(self.t("settings.secure_trash_hash"));
+        if ui
+            .add(
+                egui::DragValue::new(&mut hash_mb)
+                    .range(0u32..=4096)
+                    .suffix(" MB"),
+            )
+            .changed()
+        {
+            self.store.settings.secure_trash_hash_max_bytes = u64::from(hash_mb) * 1024 * 1024;
+            self.persist();
+        }
+        ui.label(egui::RichText::new(self.t("settings.secure_trash_hash_hint")).weak());
+        ui.add_space(style::SPACE_SM);
+        let mut fallback = self.store.settings.secure_trash_allow_fallback;
+        if ui
+            .checkbox(&mut fallback, self.t("settings.secure_trash_fallback"))
+            .changed()
+        {
+            self.store.settings.secure_trash_allow_fallback = fallback;
+            self.persist();
+        }
+        ui.label(egui::RichText::new(self.t("settings.secure_trash_fallback_hint")).weak());
+        ui.add_space(style::SPACE_SM);
+        ui.label(self.t("settings.secure_trash_folders"));
+        ui.label(egui::RichText::new(self.t("settings.secure_trash_folders_hint")).weak());
+        let mut remove_at = None;
+        for (index, folder) in self.store.settings.secure_trash_folders.iter().enumerate() {
+            ui.horizontal(|ui| {
+                ui.label(folder.display().to_string());
+                if ui.button(self.t("settings.secure_trash_remove")).clicked() {
+                    remove_at = Some(index);
+                }
+            });
+        }
+        if let Some(index) = remove_at {
+            self.store.settings.secure_trash_folders.remove(index);
+            self.persist();
+        }
+        if ui
+            .button(self.t("settings.secure_trash_add_folder"))
+            .clicked()
+            && let Ok(Some(path)) =
+                crate::platform::pick_folder(&self.t("settings.secure_trash_add_folder"), None)
+            && !self.store.settings.secure_trash_folders.contains(&path)
+        {
+            self.store.settings.secure_trash_folders.push(path);
+            self.persist();
+        }
+        if ui.button(self.t("trash.open")).clicked() {
+            self.show_secure_trash = true;
         }
     }
 
@@ -632,4 +822,42 @@ fn update_progress_row(ui: &mut egui::Ui, downloaded: u64, total: u64) {
             egui::Label::new(format!("{percent}%")),
         );
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SettingsCategory, settings_category_column_width};
+
+    #[test]
+    fn settings_categories_have_distinct_labels_and_start_with_general() {
+        assert_eq!(SettingsCategory::ALL[0], SettingsCategory::General);
+        assert_eq!(SettingsCategory::default(), SettingsCategory::General);
+        let mut keys: Vec<_> = SettingsCategory::ALL
+            .iter()
+            .map(|category| category.label_key())
+            .collect();
+        let count = keys.len();
+        keys.sort_unstable();
+        keys.dedup();
+        assert_eq!(keys.len(), count);
+    }
+
+    #[test]
+    fn category_column_follows_the_longest_label() {
+        let ctx = egui::Context::default();
+        let mut short = 0.0;
+        let mut long = 0.0;
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                short = settings_category_column_width(ui, &["Общие".to_owned()]);
+                long = settings_category_column_width(
+                    ui,
+                    &["Общие".to_owned(), "Дерево папок".to_owned()],
+                );
+            });
+        });
+        output.textures_delta.clear();
+        assert!(long > short);
+        assert!(short > crate::ui::style::SPACE_MD);
+    }
 }

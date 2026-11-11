@@ -1,7 +1,9 @@
 use std::path::{Path, PathBuf};
 
+use ::windows::Win32::Storage::FileSystem::{
+    GetDiskFreeSpaceExW, GetDriveTypeW, GetVolumeInformationW,
+};
 use ::windows::core::HSTRING;
-use ::windows::Win32::Storage::FileSystem::{GetDiskFreeSpaceExW, GetDriveTypeW};
 
 use crate::platform::DiskUsage;
 
@@ -17,7 +19,13 @@ pub fn free_space(path: &Path) -> Option<u64> {
     let root = existing_volume_path(path)?;
     let mut free: u64 = 0;
     unsafe {
-        GetDiskFreeSpaceExW(&HSTRING::from(root.as_os_str()), None, Some(&mut free), None).ok()?;
+        GetDiskFreeSpaceExW(
+            &HSTRING::from(root.as_os_str()),
+            None,
+            Some(&mut free),
+            None,
+        )
+        .ok()?;
     }
     Some(free)
 }
@@ -48,6 +56,35 @@ pub fn disk_usage(path: &Path) -> Option<DiskUsage> {
         total_bytes: total,
         free_bytes: total_free,
     })
+}
+
+/// Серийный номер тома. None — том не удалось опознать, восстановление тогда строже.
+pub fn volume_id(path: &Path) -> Option<String> {
+    let existing = existing_volume_path(path)?;
+    let text = existing.to_string_lossy();
+    let root = if text.len() >= 2 && text.as_bytes().get(1) == Some(&b':') {
+        format!("{}:\\", text.chars().next()?.to_ascii_uppercase())
+    } else if let Some(rest) = text.strip_prefix(r"\\") {
+        let mut parts = rest.split('\\').filter(|part| !part.is_empty());
+        let server = parts.next()?;
+        let share = parts.next()?;
+        format!(r"\\{server}\{share}\")
+    } else {
+        return None;
+    };
+    let mut serial = 0u32;
+    unsafe {
+        GetVolumeInformationW(
+            &HSTRING::from(&root),
+            None,
+            Some(&mut serial),
+            None,
+            None,
+            None,
+        )
+        .ok()?;
+    }
+    Some(format!("{serial:08X}"))
 }
 
 fn drive_type_has_usage(drive_type: u32) -> bool {

@@ -2,7 +2,7 @@
 
 **English** | [Русский](#-русский)
 
-Portable file manager for **Windows 11 x64**, written in Rust with a native
+Portable file manager for **Windows 11 x64** only, written in Rust with a native
 `egui` interface. Designed to work alongside Windows Explorer — fast, safe on
 your files, and free of a console window.
 
@@ -26,6 +26,7 @@ Working today:
 - File logging to `%LOCALAPPDATA%\FileManager\logs\`
 - Single-instance detection (named mutex)
 - Embedded manifest: PerMonitorV2 DPI awareness, long-path awareness
+- Windows is the only target: do not add `cfg(unix)` / `cfg(not(windows))` branches in new modules
 - Portable mode: place a `filemanager.portable` file next to the `.exe`
   and all data stays beside the executable
 
@@ -71,7 +72,7 @@ TBD — will be chosen before the public 1.0 release.
 
 # 🇷🇺 Русский
 
-Portable-файловый менеджер для **Windows 11 x64**, написанный на Rust
+Portable-файловый менеджер только для **Windows 11 x64** (другие ОС не поддерживаются), написанный на Rust
 с интерфейсом на `egui`. Работает рядом с обычным Проводником Windows —
 быстрый, безопасный для файлов и без консольного окна.
 

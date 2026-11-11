@@ -199,10 +199,8 @@ impl crate::ui::FileManagerApp {
                     if icon_response.clicked() {
                         action = Some(false);
                     }
-                    let response = ui.selectable_label(
-                        current,
-                        self.t(bookmark.kind.label_key()).to_owned(),
-                    );
+                    let response =
+                        ui.selectable_label(current, self.t(bookmark.kind.label_key()).to_owned());
                     if response.clicked() {
                         action = Some(false);
                     }
@@ -253,7 +251,10 @@ impl crate::ui::FileManagerApp {
                     ui.close();
                 }
                 ui.separator();
-                if ui.button(self.t("ctx.remove_bookmark").to_owned()).clicked() {
+                if ui
+                    .button(self.t("ctx.remove_bookmark").to_owned())
+                    .clicked()
+                {
                     self.store.settings.bookmarks.retain(|b| b != &bm);
                     self.persist();
                     ui.close();
@@ -281,7 +282,12 @@ impl crate::ui::FileManagerApp {
                     .retain(|entry| entry.kind != bookmark.kind);
             }
             SystemBookmarkTarget::RecycleBin => {
-                if crate::platform::open_recycle_bin().is_err() {
+                // Secure и Ask ведут в корзину приложения. Windows-режим — в системную корзину.
+                if crate::core::settings::bookmark_opens_secure_trash(
+                    self.store.settings.delete_mode,
+                ) {
+                    self.show_secure_trash = true;
+                } else if crate::platform::open_recycle_bin().is_err() {
                     self.system_bookmarks
                         .retain(|entry| entry.kind != bookmark.kind);
                 }
@@ -346,7 +352,12 @@ impl crate::ui::FileManagerApp {
             if resp.clicked() {
                 self.navigate(self.active, path.to_path_buf(), ctx);
             }
-            let is_bookmarked = self.store.settings.bookmarks.iter().any(|bookmark| bookmark == path);
+            let is_bookmarked = self
+                .store
+                .settings
+                .bookmarks
+                .iter()
+                .any(|bookmark| bookmark == path);
             resp.context_menu(|ui| {
                 style::compact_context_menu(ui);
                 if ui.button(self.t("ctx.open").to_owned()).clicked() {
@@ -368,7 +379,11 @@ impl crate::ui::FileManagerApp {
                     ui.close();
                 }
                 ui.separator();
-                let expand_action = if expanded { "tree.collapse" } else { "tree.expand" };
+                let expand_action = if expanded {
+                    "tree.collapse"
+                } else {
+                    "tree.expand"
+                };
                 if ui.button(self.t(expand_action).to_owned()).clicked() {
                     self.tree.toggle_expanded(path);
                     ui.close();
@@ -405,9 +420,7 @@ impl crate::ui::FileManagerApp {
                     {
                         ui.horizontal(|ui| {
                             ui.add_space((depth + 1) as f32 * style::TREE_INDENT);
-                            ui.label(
-                                egui::RichText::new(self.t("tree.wsl.not_running")).weak(),
-                            );
+                            ui.label(egui::RichText::new(self.t("tree.wsl.not_running")).weak());
                             if ui.button(self.t("tree.wsl.retry").to_owned()).clicked() {
                                 retry_wsl = true;
                             }
@@ -488,7 +501,6 @@ fn disk_usage_indicator(ui: &mut egui::Ui, usage: DiskUsage, right_reserved: f32
     );
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -532,10 +544,7 @@ mod tests {
         assert!(tree.pending.contains(&root));
         assert!(!tree.begin_children_load(&root));
 
-        tree.complete_children_load(
-            root.clone(),
-            Ok(vec![root.join("a"), root.join("b")]),
-        );
+        tree.complete_children_load(root.clone(), Ok(vec![root.join("a"), root.join("b")]));
         assert!(!tree.pending.contains(&root));
         assert_eq!(tree.children.get(&root).unwrap().len(), 2);
         assert!(!tree.failed_children.contains(&root));
@@ -550,7 +559,10 @@ mod tests {
         assert!(tree.begin_children_load(&root));
         tree.complete_children_load(
             root.clone(),
-            Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied")),
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "denied",
+            )),
         );
         assert!(!tree.pending.contains(&root));
         assert_eq!(tree.children.get(&root), Some(&Vec::new()));
@@ -562,11 +574,10 @@ mod tests {
 /// Paints a compact disclosure chevron so the tree does not depend on font
 /// support for Unicode arrow glyphs.
 fn tree_disclosure_button(ui: &mut egui::Ui, expanded: bool) -> bool {
-    let (rect, response) =
-        ui.allocate_exact_size(
-            egui::vec2(style::TREE_DISCLOSURE_SIZE, style::TREE_DISCLOSURE_SIZE),
-            egui::Sense::click(),
-        );
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(style::TREE_DISCLOSURE_SIZE, style::TREE_DISCLOSURE_SIZE),
+        egui::Sense::click(),
+    );
     let color = if response.hovered() {
         ui.visuals().strong_text_color()
     } else {
@@ -586,10 +597,8 @@ fn tree_disclosure_button(ui: &mut egui::Ui, expanded: bool) -> bool {
             egui::pos2(c.x - 2.0, c.y + 4.0),
         ]
     };
-    ui.painter().add(egui::Shape::line(
-        points,
-        egui::Stroke::new(1.6, color),
-    ));
+    ui.painter()
+        .add(egui::Shape::line(points, egui::Stroke::new(1.6, color)));
     response.clicked()
 }
 
