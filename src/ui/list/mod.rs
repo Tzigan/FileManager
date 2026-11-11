@@ -783,6 +783,23 @@ mod tests {
     }
 
     #[test]
+    fn grouped_visual_order_is_rebuilt_from_cached_entries() {
+        let mut cache = crate::core::dir_cache::DirCache::new(4);
+        let key = PathBuf::from(r"C:\grouped-cache");
+        let entries = vec![
+            entry("notes.txt", false, Some("txt")),
+            entry("Folder", true, None),
+        ];
+        let generation = cache.begin(&key);
+        assert!(cache.store(&key, generation, entries.clone()));
+        let cached = cache.get(&key).unwrap();
+        let rows = table_rows_sorted(&cached, true, &[], "Папки", "Файлы", SortKey::Name, false);
+        let visual = item_order(&rows);
+        assert_eq!(cached[visual[0]].name, "Folder");
+        assert_eq!(cache.get(&key).unwrap().len(), 2);
+    }
+
+    #[test]
     fn trash_folder_does_not_show_a_size_in_the_list_column() {
         assert!(!super::rows::shows_entry_size(true));
         assert!(super::rows::shows_entry_size(false));

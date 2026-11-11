@@ -51,6 +51,9 @@ pub(crate) enum WorkerMsg {
         tab_id: u64,
         generation: u64,
         result: Result<Vec<FileEntry>, ReadDirError>,
+        /// Ключ кэша и номер чтения. `None` — ZIP, WSL или путь без канонизации.
+        cache_key: Option<PathBuf>,
+        cache_generation: u64,
     },
     /// Завершился отложенный поиск по имени для вкладки.
     SearchResults {
@@ -179,6 +182,8 @@ pub struct FileManagerApp {
     thumbnail_jobs: HashMap<ThumbnailKey, Arc<AtomicBool>>,
     thumbnail_visible: HashSet<ThumbnailKey>,
     thumbnail_cache: HashMap<ThumbnailKey, egui::TextureHandle>,
+    /// Лёгкие списки уже открытых папок. Эскизы и дерево сюда не входят.
+    pub(crate) dir_cache: crate::core::dir_cache::DirCache,
     thumbnail_order: VecDeque<ThumbnailKey>,
     thumbnail_failed: HashSet<ThumbnailKey>,
     zip_generation: u64,
@@ -372,6 +377,7 @@ impl FileManagerApp {
             .map_or(drive_roots.len(), |index| index + 1);
         let mut tree = TreeState::new(drive_roots);
         tree.wsl_insert_after = wsl_insert_after;
+        let dir_cache_entries = store.settings.dir_cache_entries;
         let mut app = Self {
             store,
             i18n,
@@ -412,6 +418,7 @@ impl FileManagerApp {
             thumbnail_jobs: HashMap::new(),
             thumbnail_visible: HashSet::new(),
             thumbnail_cache: HashMap::new(),
+            dir_cache: crate::core::dir_cache::DirCache::new(dir_cache_entries),
             thumbnail_order: VecDeque::new(),
             thumbnail_failed: HashSet::new(),
             zip_generation: 0,
@@ -545,6 +552,8 @@ impl FileManagerApp {
                     tab_id,
                     generation,
                     result,
+                    cache_key,
+                    cache_generation,
                 } => {
                     let Some(tab) = super::tabs::listing_tab_index(&self.tabs, tab_id, generation)
                     else {
@@ -552,10 +561,21 @@ impl FileManagerApp {
                     };
                     match result {
                         Ok(entries) => {
+                            if let Some(key) = cache_key {
+                                // Поздний ответ другого чтения в кэш не пишется.
+                                let _ = self.dir_cache.store(&key, cache_generation, entries.clone());
+                            }
                             let pending_name = super::tabs::take_pending_selection(
                                 &mut self.pending_select,
                                 tab_id,
                             );
+                            let show_hidden = self.store.settings.show_hidden_files;
+                            let mut entries = fs::filter_hidden(entries, show_hidden);
+                            let (sort_key, sort_desc) = {
+                                let tab_state = &self.tabs[tab];
+                                (tab_state.sort_key, tab_state.sort_desc)
+                            };
+                            fs::sort_entries_by(&mut entries, sort_key, sort_desc);
                             let t = &mut self.tabs[tab];
                             t.entries = entries;
                             t.status = ListStatus::Ready;

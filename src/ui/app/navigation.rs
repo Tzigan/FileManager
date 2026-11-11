@@ -111,6 +111,11 @@ impl FileManagerApp {
 
     /// Reload `tab`'s current path in the background without touching history.
     pub(crate) fn navigate_fresh(&mut self, tab: usize, ctx: &egui::Context) {
+        self.reload_listing(tab, ctx, true);
+    }
+
+    /// `use_cache` выключен у кнопки «Обновить»: список читается с диска и заменяет запись.
+    fn reload_listing(&mut self, tab: usize, ctx: &egui::Context, use_cache: bool) {
         if self.tabs[tab].secure_trash {
             // Карточки, не readdir папки хранения.
             self.load_secure_trash_tab(tab);
@@ -146,7 +151,9 @@ impl FileManagerApp {
         t.cursor = 0;
         let path = t.path.clone();
         let archive_prefix = t.archive_prefix.clone();
-        let show_hidden_files = self.store.settings.show_hidden_files;
+        let show_hidden = self.store.settings.show_hidden_files;
+        let sort_key = t.sort_key;
+        let sort_desc = t.sort_desc;
         t.address_input = match &archive_prefix {
             Some(prefix) => format!("{}!/{prefix}", path.display()),
             None => path.display().to_string(),
@@ -162,6 +169,29 @@ impl FileManagerApp {
             self.persist_tabs();
         }
 
+        let cacheable = crate::core::dir_cache::uses_dir_cache(
+            false,
+            archive_prefix.is_some(),
+            crate::platform::is_wsl_path(&path),
+        );
+        let cache_key = cacheable
+            .then(|| crate::core::dir_cache::DirCache::canonical_key(&path))
+            .flatten();
+        self.dir_cache
+            .set_limit(self.store.settings.dir_cache_entries);
+        if use_cache {
+            if let Some(key) = cache_key.clone() {
+                if let Some(entries) = self.dir_cache.get(&key) {
+                    self.finish_listing(tab, entries, show_hidden, sort_key, sort_desc);
+                    return;
+                }
+            }
+        }
+        let cache_generation = cache_key
+            .as_ref()
+            .map(|key| self.dir_cache.begin(key))
+            .unwrap_or(0);
+
         let tx = self.msg_tx.clone();
         let ctx2 = ctx.clone();
         tracing::info!(tab_id, generation, "folder listing queued");
@@ -174,8 +204,6 @@ impl FileManagerApp {
                 }
                 None => fs::read_dir(&path, &cancel),
             };
-            // Фильтруем в worker, чтобы список скрытых файлов не собирался в UI.
-            let result = result.map(|entries| fs::filter_hidden(entries, show_hidden_files));
             match &result {
                 Ok(entries) => tracing::info!(
                     tab_id,
@@ -194,6 +222,8 @@ impl FileManagerApp {
                 tab_id,
                 generation,
                 result,
+                cache_key,
+                cache_generation,
             });
             ctx2.request_repaint();
         });
@@ -274,7 +304,25 @@ impl FileManagerApp {
 
     pub(crate) fn refresh(&mut self, ctx: &egui::Context) {
         self.refresh_wsl_distributions();
-        self.navigate_fresh(self.active, ctx);
+        if let Some(path) = self.tabs.get(self.active).map(|tab| tab.path.clone()) {
+            self.dir_cache.invalidate_dir(&path);
+        }
+        self.reload_listing(self.active, ctx, false);
+    }
+
+    fn finish_listing(
+        &mut self,
+        tab: usize,
+        entries: Vec<FileEntry>,
+        show_hidden: bool,
+        sort_key: crate::core::fs::SortKey,
+        sort_desc: bool,
+    ) {
+        let mut entries = fs::filter_hidden(entries, show_hidden);
+        fs::sort_entries_by(&mut entries, sort_key, sort_desc);
+        let state = &mut self.tabs[tab];
+        state.entries = entries;
+        state.status = ListStatus::Ready;
     }
 
     pub(super) fn cancel_loading(&mut self) {

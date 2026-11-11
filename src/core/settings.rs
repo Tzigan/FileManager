@@ -192,6 +192,13 @@ pub struct Settings {
     pub secure_trash_allow_fallback: bool,
     /// Папки, для которых обычное удаление идёт в защищённую корзину даже в режиме Windows.
     pub secure_trash_folders: Vec<PathBuf>,
+    /// Сколько последних папок держать в памяти, чтобы не читать их с диска снова.
+    #[serde(default = "default_dir_cache_entries")]
+    pub dir_cache_entries: usize,
+}
+
+fn default_dir_cache_entries() -> usize {
+    crate::core::dir_cache::default_dir_cache_entries()
 }
 
 fn default_true() -> bool {
@@ -227,6 +234,7 @@ impl Default for Settings {
             secure_trash_hash_max_bytes: default_hash_max_bytes(),
             secure_trash_allow_fallback: false,
             secure_trash_folders: Vec::new(),
+            dir_cache_entries: default_dir_cache_entries(),
         }
     }
 }
