@@ -88,6 +88,87 @@ pub(crate) fn paint_folder_icon(painter: &Painter, bounds: Rect) {
     );
 }
 
+/// Рисует оригинальный силуэт пингвина для группы WSL без внешнего логотипа или файла.
+pub(crate) fn paint_wsl_penguin_icon(painter: &Painter, bounds: Rect, accent: Color32) {
+    let width = bounds.width();
+    let height = bounds.height();
+    let scale = width.min(height);
+    let center_x = bounds.center().x;
+    let body_color = Color32::from_rgb(34, 40, 48);
+    let outline = accent.gamma_multiply(0.72);
+    let orange = Color32::from_rgb(232, 155, 53);
+    let stroke = Stroke::new((scale * 0.045).max(0.7), outline);
+
+    let body = oval_points(
+        pos2(center_x, bounds.top() + height * 0.63),
+        vec2(width * 0.32, height * 0.36),
+    );
+    painter.add(Shape::convex_polygon(body, body_color, stroke));
+    let head = pos2(center_x, bounds.top() + height * 0.30);
+    painter.circle_filled(head, scale * 0.24, body_color);
+    painter.circle_stroke(head, scale * 0.24, stroke);
+
+    let belly = oval_points(
+        pos2(center_x, bounds.top() + height * 0.66),
+        vec2(width * 0.20, height * 0.24),
+    );
+    painter.add(Shape::convex_polygon(
+        belly,
+        Color32::from_rgb(246, 247, 242),
+        Stroke::NONE,
+    ));
+    let face = oval_points(
+        pos2(center_x, bounds.top() + height * 0.32),
+        vec2(width * 0.16, height * 0.13),
+    );
+    painter.add(Shape::convex_polygon(
+        face,
+        Color32::from_rgb(246, 247, 242),
+        Stroke::NONE,
+    ));
+    for offset in [-0.075, 0.075] {
+        painter.circle_filled(
+            pos2(center_x + width * offset, bounds.top() + height * 0.29),
+            (scale * 0.045).max(0.75),
+            body_color,
+        );
+    }
+    painter.add(Shape::convex_polygon(
+        vec![
+            pos2(center_x - width * 0.07, bounds.top() + height * 0.36),
+            pos2(center_x + width * 0.07, bounds.top() + height * 0.36),
+            pos2(center_x, bounds.top() + height * 0.47),
+        ],
+        orange,
+        Stroke::NONE,
+    ));
+    for side in [-1.0, 1.0] {
+        let foot_x = center_x + width * side * 0.20;
+        painter.add(Shape::convex_polygon(
+            vec![
+                pos2(foot_x - width * 0.13, bounds.bottom() - height * 0.14),
+                pos2(foot_x + width * 0.13, bounds.bottom() - height * 0.14),
+                pos2(foot_x + width * 0.18, bounds.bottom() - height * 0.03),
+                pos2(foot_x - width * 0.18, bounds.bottom() - height * 0.03),
+            ],
+            orange,
+            Stroke::NONE,
+        ));
+    }
+}
+
+fn oval_points(center: egui::Pos2, radii: egui::Vec2) -> Vec<egui::Pos2> {
+    (0..20)
+        .map(|step| {
+            let angle = std::f32::consts::TAU * step as f32 / 20.0;
+            pos2(
+                center.x + angle.cos() * radii.x,
+                center.y + angle.sin() * radii.y,
+            )
+        })
+        .collect()
+}
+
 // Для системных закладок используем свои знаки и существующие иконки категорий.
 pub(crate) fn paint_system_bookmark_icon(
     painter: &Painter,

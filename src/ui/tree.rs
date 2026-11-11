@@ -127,7 +127,15 @@ impl crate::ui::FileManagerApp {
             if tree_disclosure_button(ui, expanded) {
                 toggle = true;
             }
-            paint_tree_icon(ui, false, false);
+            let (icon_rect, _) = ui.allocate_exact_size(
+                egui::vec2(style::TREE_ICON_WIDTH, style::TREE_ICON_HEIGHT),
+                egui::Sense::hover(),
+            );
+            icons::paint_wsl_penguin_icon(
+                ui.painter(),
+                icon_rect,
+                ui.visuals().selection.stroke.color,
+            );
             let response = ui.selectable_label(
                 false,
                 egui::RichText::new(self.t("tree.wsl.title")).strong(),
