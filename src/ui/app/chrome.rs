@@ -113,23 +113,33 @@ pub(crate) fn icon_refresh(p: &egui::Painter, r: egui::Rect, color: egui::Color3
     ));
 }
 
-/// Five-point star: filled (marked) or outline.
+/// Звезда закладки. Контур один и тот же: «не добавлено» — только обводка,
+/// «добавлено» — та же фигура, залитая цветом обводки. Размер задаёт прямоугольник кнопки.
 pub(crate) fn icon_star(p: &egui::Painter, r: egui::Rect, color: egui::Color32, filled: bool) {
-    let c = r.center();
-    let ro = r.width() * 0.5;
-    let ri = ro * 0.42;
-    let pts: Vec<egui::Pos2> = (0..10)
+    let center = r.center();
+    let outer = r.width() * 0.5;
+    let inner = outer * 0.42;
+    let points: Vec<egui::Pos2> = (0..10)
         .map(|i| {
-            let rad = if i % 2 == 0 { ro } else { ri };
-            let a = -std::f32::consts::FRAC_PI_2 + i as f32 * std::f32::consts::PI / 5.0;
-            c + egui::vec2(a.cos(), a.sin()) * rad
+            let radius = if i % 2 == 0 { outer } else { inner };
+            let angle = -std::f32::consts::FRAC_PI_2 + i as f32 * std::f32::consts::PI / 5.0;
+            center + egui::vec2(angle.cos(), angle.sin()) * radius
         })
         .collect();
+    let stroke = egui::Stroke::new(1.4, color);
     if filled {
-        p.add(egui::Shape::convex_polygon(pts, color, egui::Stroke::NONE));
-    } else {
-        let mut closed = pts;
-        closed.push(closed[0]);
-        p.add(egui::Shape::line(closed, egui::Stroke::new(1.4, color)));
+        // Выпуклая заливка склеивала лучи в пятиугольник. Треугольники от центра
+        // заполняют именно внутренность этого контура тем же цветом.
+        for index in 0..points.len() {
+            let next = points[(index + 1) % points.len()];
+            p.add(egui::Shape::convex_polygon(
+                vec![center, points[index], next],
+                color,
+                egui::Stroke::NONE,
+            ));
+        }
     }
+    let mut closed = points;
+    closed.push(closed[0]);
+    p.add(egui::Shape::line(closed, stroke));
 }
