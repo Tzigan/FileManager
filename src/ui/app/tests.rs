@@ -1,6 +1,6 @@
 //! Тесты расположения вкладок, навигации и окон.
 use super::{
-    PreviewState, breadcrumb_segments, configure_tab_scroll_style, dropped_paths,
+    PreviewState, breadcrumb_segments, configure_tab_scroll_style, dialogs, dropped_paths,
     floating_dialog_viewport, parse_archive_address, persisted_tab_path, tab_close_button_hovered,
     tab_scroll_source, tab_strip_content_margin,
 };
@@ -16,6 +16,26 @@ impl egui::DroppedFile for MockDrop {
     fn bytes(&self) -> Result<Vec<u8>, String> {
         Ok(vec![])
     }
+}
+
+#[test]
+fn update_install_respects_auto_restart_and_busy_work() {
+    assert_eq!(
+        dialogs::plan_update_install(true, false),
+        dialogs::UpdateInstallAction::ScheduleRestart
+    );
+    assert_eq!(
+        dialogs::plan_update_install(false, false),
+        dialogs::UpdateInstallAction::OfferRestart
+    );
+    assert_eq!(
+        dialogs::plan_update_install(true, true),
+        dialogs::UpdateInstallAction::Blocked
+    );
+    assert_eq!(
+        dialogs::plan_update_install(false, true),
+        dialogs::UpdateInstallAction::Blocked
+    );
 }
 
 #[test]

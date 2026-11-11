@@ -23,6 +23,8 @@ struct UpdaterArgs {
     process_id: u32,
     target_exe: PathBuf,
     stage_dir: PathBuf,
+    /// false — файлы можно заменить, но новый процесс не запускать.
+    auto_restart: bool,
 }
 
 #[derive(Debug)]
@@ -59,21 +61,28 @@ pub fn run() -> anyhow::Result<()> {
     }
     let transaction = match install_binaries(&args.target_exe, &args.stage_dir) {
         Ok(transaction) => transaction,
+        // Ошибка замены: новую версию не запускаем. install_binaries уже вернул старые файлы.
         Err(error) => return Err(error),
     };
 
-    let mut child = match Command::new(&transaction.target_exe)
-        .env(UPDATE_STAGE_ENV, &args.stage_dir)
-        .env(UPDATE_UPDATER_PID_ENV, std::process::id().to_string())
-        .spawn()
-    {
-        Ok(child) => child,
-        Err(error) => {
-            rollback(&transaction)?;
-            relaunch_previous(&transaction.target_exe)?;
-            return Err(error).context("launch updated FileManager");
-        }
-    };
+    // Вариант A. Старый процесс уже завершился, файлы лежат по целевому пути.
+    // Запуск только отсюда: не из основного окна и не из временного файла .tmp.
+    if restart_plan(true, args.auto_restart) == RestartPlan::DoNotStart {
+        let _ = fs::remove_dir_all(&transaction.backup_dir);
+        return Ok(());
+    }
+
+    let mut child =
+        match updated_app_command(&transaction.target_exe, &args.stage_dir, std::process::id())
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(error) => {
+                rollback(&transaction)?;
+                relaunch_previous(&transaction.target_exe)?;
+                return Err(error).context("launch updated FileManager");
+            }
+        };
 
     if let Err(error) = wait_for_startup(&mut child, &args.stage_dir.join(UPDATE_STARTED_MARKER)) {
         if child.try_wait()?.is_none() {
@@ -91,11 +100,99 @@ pub fn run() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Что делать после попытки установки. Новую версию запускаем только при успехе и включённом флаге.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RestartPlan {
+    StartUpdated,
+    DoNotStart,
+}
+
+fn restart_plan(install_succeeded: bool, auto_restart: bool) -> RestartPlan {
+    if install_succeeded && auto_restart {
+        RestartPlan::StartUpdated
+    } else {
+        RestartPlan::DoNotStart
+    }
+}
+
+/// Команда запуска уже установленного exe. Путь — целевой, не временная копия в каталоге установки.
+fn updated_app_command(target_exe: &Path, stage_dir: &Path, updater_pid: u32) -> Command {
+    let mut command = Command::new(target_exe);
+    command
+        .env(UPDATE_STAGE_ENV, stage_dir)
+        .env(UPDATE_UPDATER_PID_ENV, updater_pid.to_string());
+    command
+}
+
 fn relaunch_previous(target_exe: &Path) -> anyhow::Result<()> {
     Command::new(target_exe)
         .spawn()
         .context("relaunch previous FileManager after rollback")?;
     Ok(())
+}
+
+/// Короткий текст для MessageBox. Без цепочки anyhow и без путей из стека ошибки.
+pub fn user_facing_message(error: &anyhow::Error) -> String {
+    message_for(error, interface_is_russian())
+}
+
+fn message_for(error: &anyhow::Error, russian: bool) -> String {
+    if error_is_file_busy(error) {
+        return if russian {
+            "Файл занят. Закройте программу и повторите установку.".to_owned()
+        } else {
+            "The file is in use. Close FileManager and try the update again.".to_owned()
+        };
+    }
+    if chain_has(error, "launch updated FileManager")
+        || chain_has(error, "did not finish startup")
+        || chain_has(error, "exited before its first frame")
+    {
+        return if russian {
+            "Не удалось запустить новую версию. Предыдущая версия восстановлена.".to_owned()
+        } else {
+            "The new version could not be started. The previous version was restored.".to_owned()
+        };
+    }
+    if chain_has(error, "executable is missing") || chain_has(error, "not a FileManager") {
+        return if russian {
+            "Не найден файл программы для запуска.".to_owned()
+        } else {
+            "The application executable to start was not found.".to_owned()
+        };
+    }
+    if russian {
+        "Не удалось установить обновление. Новая версия не запущена.".to_owned()
+    } else {
+        "The update was not installed. The new version was not started.".to_owned()
+    }
+}
+
+fn error_is_file_busy(error: &anyhow::Error) -> bool {
+    // Занятый exe на Windows чаще всего даёт код 5, иногда 32 или 33.
+    error.chain().any(|item| {
+        item.downcast_ref::<std::io::Error>()
+            .and_then(|io| io.raw_os_error())
+            .is_some_and(|code| matches!(code, 5 | 32 | 33))
+    })
+}
+
+fn chain_has(error: &anyhow::Error, needle: &str) -> bool {
+    error.chain().any(|item| item.to_string().contains(needle))
+}
+
+fn interface_is_russian() -> bool {
+    let args = std::env::args().skip(1).collect::<Vec<_>>();
+    let mut index = 0;
+    while index < args.len() {
+        if args[index] == "--lang" {
+            return args
+                .get(index + 1)
+                .is_some_and(|value| value.eq_ignore_ascii_case("ru"));
+        }
+        index += 1;
+    }
+    true
 }
 
 pub fn show_error(message: &str) {
@@ -118,6 +215,7 @@ fn parse_args(args: &[OsString]) -> anyhow::Result<UpdaterArgs> {
     let mut process_id = None;
     let mut target_exe = None;
     let mut stage_dir = None;
+    let mut auto_restart = true;
     let mut index = 0;
     while index < args.len() {
         let name = args[index].to_string_lossy();
@@ -128,6 +226,15 @@ fn parse_args(args: &[OsString]) -> anyhow::Result<UpdaterArgs> {
             "--pid" => process_id = Some(value.to_string_lossy().parse::<u32>()?),
             "--target" => target_exe = Some(PathBuf::from(value)),
             "--stage" => stage_dir = Some(PathBuf::from(value)),
+            "--restart" => {
+                auto_restart = match value.to_string_lossy().as_ref() {
+                    "1" | "true" | "yes" => true,
+                    "0" | "false" | "no" => false,
+                    other => bail!("invalid --restart value: {other}"),
+                };
+            }
+            // Язык окна ошибки. На решение «запускать или нет» не влияет.
+            "--lang" => {}
             _ => bail!("unknown updater argument: {name}"),
         }
         index += 2;
@@ -136,6 +243,7 @@ fn parse_args(args: &[OsString]) -> anyhow::Result<UpdaterArgs> {
         process_id: process_id.context("missing --pid")?,
         target_exe: target_exe.context("missing --target")?,
         stage_dir: stage_dir.context("missing --stage")?,
+        auto_restart,
     })
 }
 
@@ -464,5 +572,68 @@ mod tests {
         assert_eq!(fs::read(&target).unwrap(), b"old app");
         fs::remove_dir_all(root).unwrap();
         fs::remove_dir_all(stage_dir).unwrap();
+    }
+
+    #[test]
+    fn successful_install_plans_to_start_the_updated_executable() {
+        assert_eq!(restart_plan(true, true), RestartPlan::StartUpdated);
+        let command = updated_app_command(
+            Path::new(r"C:\Program Files\FileManager\FileManager.exe"),
+            Path::new(r"C:\Temp\FileManager-update-stage-1"),
+            9,
+        );
+        assert_eq!(
+            command.get_program(),
+            Path::new(r"C:\Program Files\FileManager\FileManager.exe")
+        );
+        assert!(command.get_envs().any(|(key, value)| {
+            key == UPDATE_STAGE_ENV
+                && value.is_some_and(|value| value.to_string_lossy().contains("update-stage"))
+        }));
+    }
+
+    #[test]
+    fn failed_install_does_not_plan_a_restart() {
+        assert_eq!(restart_plan(false, true), RestartPlan::DoNotStart);
+        assert_eq!(restart_plan(false, false), RestartPlan::DoNotStart);
+    }
+
+    #[test]
+    fn auto_restart_flag_is_respected() {
+        assert_eq!(restart_plan(true, false), RestartPlan::DoNotStart);
+        let disabled = parse_args(&[
+            "--pid".into(),
+            "7".into(),
+            "--target".into(),
+            r"C:\Apps\FileManager.exe".into(),
+            "--stage".into(),
+            r"C:\Temp\FileManager-update-stage-x".into(),
+            "--restart".into(),
+            "0".into(),
+            "--lang".into(),
+            "en".into(),
+        ])
+        .unwrap();
+        assert!(!disabled.auto_restart);
+        assert_eq!(
+            restart_plan(true, disabled.auto_restart),
+            RestartPlan::DoNotStart
+        );
+    }
+
+    #[test]
+    fn busy_file_has_a_plain_message_and_does_not_restart() {
+        let error = anyhow::Error::new(std::io::Error::from_raw_os_error(32))
+            .context("move current executable to rollback directory");
+        let text = message_for(&error, true);
+        assert!(text.contains("Файл занят"));
+        assert!(!text.contains("rollback"));
+        assert_eq!(restart_plan(false, true), RestartPlan::DoNotStart);
+
+        let denied = anyhow::Error::new(std::io::Error::from_raw_os_error(5));
+        assert!(message_for(&denied, false).contains("file is in use"));
+
+        let launch = anyhow::Error::msg("open").context("launch updated FileManager");
+        assert!(message_for(&launch, true).contains("Не удалось запустить новую версию"));
     }
 }

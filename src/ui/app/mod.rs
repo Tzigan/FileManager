@@ -175,6 +175,10 @@ pub struct FileManagerApp {
     update_status: Option<String>,
     /// Ошибка обновления, показываемая в окне «О программе».
     update_err: Option<String>,
+    /// Когда отдать установку updater и закрыть корневое окно.
+    update_restart_at: Option<Instant>,
+    /// Автоперезапуск выключен: ждём кнопку, процесс не завершаем.
+    update_restart_offer: bool,
     tab_drag_state: tab_drag_preview::TabDragState,
     tab_drag_preview: tab_drag_preview::TabDragPreviewState,
     /// ID новой активной вкладки, которую нужно показать в строке.
@@ -401,6 +405,8 @@ impl FileManagerApp {
             update_ready: None,
             update_status: None,
             update_err: None,
+            update_restart_at: None,
+            update_restart_offer: false,
             tab_drag_state: tab_drag_preview::TabDragState::Idle,
             tab_drag_preview: tab_drag_preview::TabDragPreviewState::default(),
             tab_strip_scroll_target: None,
@@ -1059,6 +1065,7 @@ impl eframe::App for FileManagerApp {
         self.preview_window(&ctx);
         self.zip_status_window(&ctx);
         self.ops_dialogs(&ctx);
+        self.poll_update_restart(&ctx);
 
         // Keep repainting while operations run so progress stays live.
         if !self.ops_ui.jobs.is_empty()

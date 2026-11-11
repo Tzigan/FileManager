@@ -338,7 +338,13 @@ mod stubs {
     pub fn prepare_update_archive(_archive: &std::path::Path, _size: u64, _sha256: &str) -> anyhow::Result<std::path::PathBuf> {
         anyhow::bail!("automatic updates are supported only on Windows")
     }
-    pub fn launch_updater(_stage: &std::path::Path, _target: &std::path::Path, _pid: u32) -> anyhow::Result<()> {
+    pub fn launch_updater(
+        _stage: &std::path::Path,
+        _target: &std::path::Path,
+        _pid: u32,
+        _auto_restart: bool,
+        _russian: bool,
+    ) -> anyhow::Result<()> {
         anyhow::bail!("automatic updates are supported only on Windows")
     }
     pub fn signal_update_started() -> anyhow::Result<()> { Ok(()) }

@@ -54,10 +54,21 @@ pub struct Settings {
     /// Навигация по истории папок боковыми кнопками мыши.
     #[serde(default = "default_true")]
     pub enable_mouse_side_navigation: bool,
+    /// После успешной установки updater сам запускает новую версию.
+    #[serde(default = "default_true")]
+    pub auto_restart_after_update: bool,
+    /// Сколько секунд окно ещё остаётся открытым перед передачей установки updater.
+    /// Пользователь успевает увидеть сообщение. Не задержка внутри updater.
+    #[serde(default = "default_restart_delay_secs")]
+    pub update_restart_delay_secs: u32,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_restart_delay_secs() -> u32 {
+    3
 }
 
 impl Default for Settings {
@@ -79,6 +90,8 @@ impl Default for Settings {
             group_order: Vec::new(),
             single_instance: true,
             enable_mouse_side_navigation: true,
+            auto_restart_after_update: true,
+            update_restart_delay_secs: default_restart_delay_secs(),
         }
     }
 }
@@ -184,6 +197,8 @@ mod tests {
         store.settings.group_order = vec!["ext:txt".into(), "folder".into()];
         store.settings.single_instance = false;
         store.settings.enable_mouse_side_navigation = false;
+        store.settings.auto_restart_after_update = false;
+        store.settings.update_restart_delay_secs = 15;
         store.save().unwrap();
 
         let loaded = SettingsStore::load(&dir);
@@ -203,6 +218,8 @@ mod tests {
         assert_eq!(loaded.settings.group_order, vec!["ext:txt", "folder"]);
         assert!(!loaded.settings.single_instance);
         assert!(!loaded.settings.enable_mouse_side_navigation);
+        assert!(!loaded.settings.auto_restart_after_update);
+        assert_eq!(loaded.settings.update_restart_delay_secs, 15);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -229,6 +246,8 @@ mod tests {
         assert!(loaded.settings.group_order.is_empty());
         assert!(loaded.settings.single_instance);
         assert!(loaded.settings.enable_mouse_side_navigation);
+        assert!(loaded.settings.auto_restart_after_update);
+        assert_eq!(loaded.settings.update_restart_delay_secs, 3);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -267,5 +286,7 @@ mod tests_v06 {
         let s: Settings = serde_json::from_str("{}").unwrap();
         assert_eq!(s.view_mode, ViewMode::Table);
         assert!(s.pinned_tabs.is_empty());
+        assert!(s.auto_restart_after_update);
+        assert_eq!(s.update_restart_delay_secs, 3);
     }
 }
