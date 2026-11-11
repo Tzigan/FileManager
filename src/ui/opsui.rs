@@ -346,6 +346,9 @@ impl FileManagerApp {
                     0.0
                 };
                 let verb = self.stage_verb(job);
+                if ui.small_button("✕").clicked() {
+                    cancel_id = Some(job.id);
+                }
                 ui.add(
                     egui::ProgressBar::new(frac)
                         .desired_width(200.0)
@@ -360,9 +363,6 @@ impl FileManagerApp {
                         .map(|n| n.to_string_lossy().into_owned())
                         .unwrap_or_default()
                 ));
-                if ui.small_button("✕").clicked() {
-                    cancel_id = Some(job.id);
-                }
             });
         }
         if let Some(id) = cancel_id {
