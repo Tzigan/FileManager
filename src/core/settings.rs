@@ -35,7 +35,36 @@ pub struct DeleteRoute {
     pub permanent: bool,
 }
 
-/// Папки из списка — префиксы путей, не маски. Это ограничение 0.8.
+/// Папка из списка захватывает путь только целиком по компонентам.
+/// `C:\Work` включает `C:\Work\sub` и не включает `C:\Workplace`.
+/// TODO(0.8): маски имён (`*.tmp`, `Work*`) не поддерживаются и здесь не добавляются.
+pub fn path_is_within_folder(path: &Path, folder: &Path) -> bool {
+    let folder_parts: Vec<_> = folder.components().collect();
+    if folder_parts.is_empty() {
+        return false;
+    }
+    let path_parts: Vec<_> = path.components().collect();
+    if path_parts.len() < folder_parts.len() {
+        return false;
+    }
+    path_parts
+        .iter()
+        .zip(folder_parts.iter())
+        .all(|(path_part, folder_part)| {
+            path_part
+                .as_os_str()
+                .eq_ignore_ascii_case(folder_part.as_os_str())
+        })
+}
+
+/// Закладка «Корзина» открывает корзину приложения, когда удаление может в неё попасть.
+/// В режиме «спрашивать» это она, а не системная корзина: иначе список приложения неоткуда открыть.
+/// Системная корзина остаётся отдельным пунктом меню.
+pub fn bookmark_opens_secure_trash(mode: DeleteMode) -> bool {
+    matches!(mode, DeleteMode::SecureTrash | DeleteMode::Ask)
+}
+
+/// Папки из списка сравниваются по компонентам пути, не по сырой строке и не по маске.
 pub fn route_delete(
     mode: DeleteMode,
     permanent: bool,
@@ -53,7 +82,7 @@ pub fn route_delete(
     let (forced, rest): (Vec<_>, Vec<_>) = paths.iter().cloned().partition(|path| {
         folders
             .iter()
-            .any(|folder| !folder.as_os_str().is_empty() && path.starts_with(folder))
+            .any(|folder| path_is_within_folder(path, folder))
     });
     match mode {
         DeleteMode::SecureTrash => DeleteRoute {
@@ -393,5 +422,48 @@ mod tests_v06 {
         let permanent = route_delete(DeleteMode::SecureTrash, true, &[file.clone()], &folders);
         assert!(permanent.permanent);
         assert!(permanent.secure.is_empty());
+    }
+
+    #[test]
+    fn folder_rule_matches_components_not_a_string_prefix() {
+        let folder = PathBuf::from(r"C:\Work");
+        assert!(path_is_within_folder(
+            &PathBuf::from(r"C:\Work\sub"),
+            &folder
+        ));
+        assert!(path_is_within_folder(
+            &PathBuf::from(r"c:\work\sub\a.txt"),
+            &folder
+        ));
+        assert!(!path_is_within_folder(
+            &PathBuf::from(r"C:\Workplace"),
+            &folder
+        ));
+        assert!(!path_is_within_folder(&PathBuf::from(r"C:\Work2"), &folder));
+        let routed = route_delete(
+            DeleteMode::WindowsRecycle,
+            false,
+            &[
+                PathBuf::from(r"C:\Work\sub"),
+                PathBuf::from(r"C:\Workplace\a.txt"),
+                PathBuf::from(r"C:\Work2\a.txt"),
+            ],
+            &[folder],
+        );
+        assert_eq!(routed.secure, vec![PathBuf::from(r"C:\Work\sub")]);
+        assert_eq!(
+            routed.windows,
+            vec![
+                PathBuf::from(r"C:\Workplace\a.txt"),
+                PathBuf::from(r"C:\Work2\a.txt")
+            ]
+        );
+    }
+
+    #[test]
+    fn ask_mode_bookmark_opens_the_app_trash() {
+        assert!(bookmark_opens_secure_trash(DeleteMode::Ask));
+        assert!(bookmark_opens_secure_trash(DeleteMode::SecureTrash));
+        assert!(!bookmark_opens_secure_trash(DeleteMode::WindowsRecycle));
     }
 }

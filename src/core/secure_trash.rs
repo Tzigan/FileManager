@@ -30,6 +30,43 @@ pub enum TrashStatus {
     VolumeUnavailable,
 }
 
+/// Как проверялось содержимое. Большой файл не хешируется в окне,
+/// поэтому «суммы нет» — это честный статус, а не скрытая гарантия.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum IntegrityNote {
+    /// Хеш не считался: файл больше порога или порог выключен, перенос был переименованием.
+    #[default]
+    NotChecked,
+    /// Контрольная сумма содержимого записана.
+    Hashed,
+    /// Между томами файл скопирован и сверен по размеру, без хеша.
+    SizeChecked,
+}
+
+/// Одно правило для статуса: хеш важнее, иначе копия между томами отмечена сверкой размера.
+pub fn integrity_note_for(copied_across_volumes: bool, hashed: bool) -> IntegrityNote {
+    if hashed {
+        IntegrityNote::Hashed
+    } else if copied_across_volumes {
+        IntegrityNote::SizeChecked
+    } else {
+        IntegrityNote::NotChecked
+    }
+}
+
+/// Ключ подписи, если целостность содержимого не подтверждена хешем.
+/// None — хеш есть, отдельная оговорка не нужна.
+pub fn integrity_status_key(record: &TrashRecord) -> Option<&'static str> {
+    if record.integrity.is_some() || record.integrity_note == IntegrityNote::Hashed {
+        return None;
+    }
+    Some(match record.integrity_note {
+        IntegrityNote::SizeChecked => "trash.integrity.size",
+        IntegrityNote::Hashed | IntegrityNote::NotChecked => "trash.integrity.not_checked",
+    })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrashRecord {
     pub id: String,
@@ -38,12 +75,17 @@ pub struct TrashRecord {
     pub is_dir: bool,
     pub deleted_at: u64,
     pub size: u64,
-    pub attributes: u32,
     pub stored_path: String,
     /// None — том не удалось опознать, восстановление тогда строже.
     pub volume_id: Option<String>,
     pub status: TrashStatus,
     pub integrity: Option<String>,
+    /// Старые карточки без поля читаются как «не проверялась».
+    #[serde(default)]
+    pub integrity_note: IntegrityNote,
+    /// 0 — атрибуты в карточке не записаны, при восстановлении ничего не навязываем.
+    #[serde(default)]
+    pub attributes: u32,
 }
 
 #[derive(Debug)]
@@ -131,8 +173,9 @@ pub fn move_to_trash(source: &Path, options: &TrashOptions) -> Result<TrashRecor
     let id = unique_id();
     let payload = root.join("items").join(&id);
     fs::create_dir_all(payload.parent().unwrap()).map_err(TrashError::Io)?;
-    relocate(&source, &payload)?;
+    let copied = relocate(&source, &payload)?;
     let size = tree_size(&payload).unwrap_or(0);
+    let integrity = integrity_of(&payload, options.hash_max_bytes);
     let record = TrashRecord {
         id: id.clone(),
         original_path: source.to_string_lossy().to_string(),
@@ -147,7 +190,8 @@ pub fn move_to_trash(source: &Path, options: &TrashOptions) -> Result<TrashRecor
         stored_path: payload.to_string_lossy().to_string(),
         volume_id: options.volume_id.clone(),
         status: TrashStatus::InTrash,
-        integrity: integrity_of(&payload, options.hash_max_bytes),
+        integrity: integrity.clone(),
+        integrity_note: integrity_note_for(copied, integrity.is_some()),
     };
     if write_meta(&root, &record).is_err() {
         // Метаданные не записались: возвращаем объект назад и не оставляем сироту.
@@ -196,6 +240,7 @@ pub fn list_trash(volumes: &[PathBuf]) -> Vec<TrashRecord> {
                         volume_id: None,
                         status: TrashStatus::Damaged,
                         integrity: None,
+                        integrity_note: IntegrityNote::NotChecked,
                     }),
                 }
             }
@@ -219,6 +264,7 @@ pub fn list_trash(volumes: &[PathBuf]) -> Vec<TrashRecord> {
                     volume_id: None,
                     status: TrashStatus::Damaged,
                     integrity: None,
+                    integrity_note: IntegrityNote::NotChecked,
                 });
             }
         }
@@ -280,13 +326,43 @@ pub fn restore(
 }
 
 pub fn purge(record: &TrashRecord) -> Result<(), TrashError> {
+    // Сначала объект. Если он не удалился, карточка остаётся и запись не пропадает молча.
     if !record.stored_path.is_empty() {
-        let _ = remove_tree(&PathBuf::from(&record.stored_path));
+        remove_tree(&PathBuf::from(&record.stored_path))?;
     }
     if let Some(root) = meta_root_of(record) {
-        let _ = fs::remove_file(root.join("meta").join(format!("{}.json", record.id)));
+        let meta = root.join("meta").join(format!("{}.json", record.id));
+        match fs::remove_file(&meta) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(TrashError::Io(error)),
+        }
     }
     Ok(())
+}
+
+/// Что именно увидит пользователь в подтверждении удаления навсегда.
+pub fn removal_facts(records: &[TrashRecord]) -> Vec<(String, bool, u64, String)> {
+    records
+        .iter()
+        .map(|record| {
+            (
+                record.original_name.clone(),
+                record.is_dir,
+                record.size,
+                record.original_path.clone(),
+            )
+        })
+        .collect()
+}
+
+pub fn removal_totals(records: &[TrashRecord]) -> (usize, u64) {
+    (
+        records.len(),
+        records
+            .iter()
+            .fold(0u64, |sum, record| sum.saturating_add(record.size)),
+    )
 }
 
 pub fn empty_trash(volumes: &[PathBuf]) -> Vec<String> {
@@ -348,16 +424,26 @@ fn finish_restore(
         fs::create_dir_all(parent).map_err(TrashError::Io)?;
     }
     relocate(stored, target)?;
+    // Атрибуты возвращаются после успешного переноса. Ноль в карточке значит
+    // «не записаны», старую карточку из-за этого не отвергаем.
+    if record.attributes != 0 {
+        crate::platform::apply_stored_attributes(target, record.attributes)
+            .map_err(TrashError::Io)?;
+    }
     if let Some(root) = meta_root_of(record) {
         let _ = fs::remove_file(root.join("meta").join(format!("{}.json", record.id)));
     }
     Ok(target.to_path_buf())
 }
 
-fn relocate(source: &Path, dest: &Path) -> Result<(), TrashError> {
+/// true — объект скопирован между томами. false — переименован на том же томе.
+fn relocate(source: &Path, dest: &Path) -> Result<bool, TrashError> {
     match fs::rename(source, dest) {
-        Ok(()) => Ok(()),
-        Err(error) if is_cross_device(&error) => copy_then_remove(source, dest),
+        Ok(()) => Ok(false),
+        Err(error) if is_cross_device(&error) => {
+            copy_then_remove(source, dest)?;
+            Ok(true)
+        }
         Err(error) => Err(TrashError::Io(error)),
     }
 }
@@ -505,28 +591,21 @@ pub fn allowed_restore_roots(original: &Path) -> Vec<PathBuf> {
 }
 
 fn volume_root(path: &Path) -> Option<PathBuf> {
-    #[cfg(windows)]
-    {
-        let text = path.to_string_lossy();
-        let bytes = text.as_bytes();
-        if bytes.len() >= 3 && bytes[1] == b':' && (bytes[2] == b'\\' || bytes[2] == b'/') {
-            return Some(PathBuf::from(format!(
-                "{}:\\",
-                text.chars().next()?.to_ascii_uppercase()
-            )));
-        }
-        if let Some(rest) = text.strip_prefix(r"\\") {
-            let mut parts = rest.split('\\').filter(|part| !part.is_empty());
-            let server = parts.next()?;
-            let share = parts.next()?;
-            return Some(PathBuf::from(format!(r"\\{server}\{share}")));
-        }
-        None
+    let text = path.to_string_lossy();
+    let bytes = text.as_bytes();
+    if bytes.len() >= 3 && bytes[1] == b':' && (bytes[2] == b'\\' || bytes[2] == b'/') {
+        return Some(PathBuf::from(format!(
+            "{}:\\",
+            text.chars().next()?.to_ascii_uppercase()
+        )));
     }
-    #[cfg(not(windows))]
-    {
-        path.is_absolute().then(|| PathBuf::from("/"))
+    if let Some(rest) = text.strip_prefix(r"\\") {
+        let mut parts = rest.split('\\').filter(|part| !part.is_empty());
+        let server = parts.next()?;
+        let share = parts.next()?;
+        return Some(PathBuf::from(format!(r"\\{server}\{share}")));
     }
+    None
 }
 
 fn unique_id() -> String {
@@ -562,35 +641,18 @@ fn now_secs() -> u64 {
 }
 
 fn attributes_of(meta: &fs::Metadata) -> u32 {
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        meta.file_attributes()
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = meta;
-        0
-    }
+    use std::os::windows::fs::MetadataExt;
+    meta.file_attributes()
 }
 
 fn is_reparse(meta: &fs::Metadata) -> bool {
-    if meta.file_type().is_symlink() {
-        return true;
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
-    }
-    #[cfg(not(windows))]
-    {
-        false
-    }
+    use std::os::windows::fs::MetadataExt;
+    meta.file_type().is_symlink() || meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
 }
 
 fn is_cross_device(error: &io::Error) -> bool {
-    matches!(error.raw_os_error(), Some(17) | Some(18))
+    // ERROR_NOT_SAME_DEVICE. Других ОС в этом модуле нет.
+    error.raw_os_error() == Some(17)
 }
 
 struct Fnv(u64);
@@ -757,16 +819,7 @@ mod tests {
         let root = scratch();
         let outside = scratch();
         let link = root.join("link");
-        let created = {
-            #[cfg(windows)]
-            {
-                std::os::windows::fs::symlink_dir(&outside, &link)
-            }
-            #[cfg(not(windows))]
-            {
-                std::os::unix::fs::symlink(&outside, &link)
-            }
-        };
+        let created = std::os::windows::fs::symlink_dir(&outside, &link);
         if created.is_ok() {
             let target = link.join("file.txt");
             assert!(matches!(
@@ -774,27 +827,18 @@ mod tests {
                 Err(TrashError::PathEscape)
             ));
         }
-        // На Windows создание ссылки часто запрещено. Стандартная точка
-        // соединения уже есть в системе и должна останавливать восстановление.
-        #[cfg(windows)]
-        {
-            let junction = PathBuf::from(r"C:\Documents and Settings");
-            if junction.exists() {
-                assert!(matches!(
-                    validate_restore_path(&junction.join("file.txt"), &[PathBuf::from(r"C:\")]),
-                    Err(TrashError::PathEscape)
-                ));
-            } else if created.is_err() {
-                panic!(
-                    "не удалось проверить ссылку: нет прав создать её и нет системной точки соединения"
-                );
-            }
-        }
-        #[cfg(not(windows))]
-        {
-            if created.is_err() {
-                panic!("не удалось создать symbolic link для проверки пути");
-            }
+        // Создание ссылки часто запрещено правами. Стандартная точка соединения
+        // уже есть в Windows и должна останавливать восстановление.
+        let junction = PathBuf::from(r"C:\Documents and Settings");
+        if junction.exists() {
+            assert!(matches!(
+                validate_restore_path(&junction.join("file.txt"), &[PathBuf::from(r"C:\")]),
+                Err(TrashError::PathEscape)
+            ));
+        } else if created.is_err() {
+            panic!(
+                "не удалось проверить ссылку: нет прав создать её и нет системной точки соединения"
+            );
         }
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_dir_all(outside);
@@ -813,5 +857,118 @@ mod tests {
         assert!(empty_trash(&[root.clone()]).is_empty());
         assert!(list_trash(&[root.clone()]).is_empty());
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn purge_keeps_the_record_and_reports_when_one_file_is_locked() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let root = scratch();
+        let locked_file = root.join("locked.txt");
+        let free_file = root.join("free.txt");
+        fs::write(&locked_file, "keep").unwrap();
+        fs::write(&free_file, "gone").unwrap();
+        let locked = move_to_trash(&locked_file, &options(&root)).unwrap();
+        let free = move_to_trash(&free_file, &options(&root)).unwrap();
+        let hold = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&locked.stored_path)
+            .unwrap();
+        let errors = empty_trash(&[root.clone()]);
+        assert_eq!(errors.len(), 1);
+        assert!(Path::new(&locked.stored_path).exists());
+        assert!(!Path::new(&free.stored_path).exists());
+        drop(hold);
+        purge(&locked).unwrap();
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn removal_facts_name_the_object_its_kind_size_and_origin() {
+        let record = TrashRecord {
+            id: "1".into(),
+            original_path: r"C:\Work\a.txt".into(),
+            original_name: "a.txt".into(),
+            is_dir: false,
+            deleted_at: 1,
+            size: 4,
+            stored_path: String::new(),
+            volume_id: None,
+            status: TrashStatus::InTrash,
+            integrity: None,
+            integrity_note: IntegrityNote::NotChecked,
+            attributes: 0,
+        };
+        let facts = removal_facts(&[record.clone()]);
+        assert_eq!(
+            facts,
+            vec![("a.txt".into(), false, 4, r"C:\Work\a.txt".into())]
+        );
+        assert_eq!(removal_totals(&[record]), (1, 4));
+    }
+
+    #[test]
+    fn large_file_is_not_hashed_and_says_integrity_was_not_checked() {
+        let root = scratch();
+        let file = root.join("big.bin");
+        fs::write(&file, b"0123456789").unwrap();
+        let mut options = options(&root);
+        options.hash_max_bytes = 4;
+        let record = move_to_trash(&file, &options).unwrap();
+        assert!(record.integrity.is_none());
+        assert_eq!(record.integrity_note, IntegrityNote::NotChecked);
+        assert_eq!(
+            integrity_status_key(&record),
+            Some("trash.integrity.not_checked")
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn cross_volume_without_a_hash_is_marked_size_checked() {
+        assert_eq!(integrity_note_for(true, false), IntegrityNote::SizeChecked);
+        let record = TrashRecord {
+            id: "1".into(),
+            original_path: r"D:\a.txt".into(),
+            original_name: "a.txt".into(),
+            is_dir: false,
+            deleted_at: 1,
+            size: 9,
+            stored_path: String::new(),
+            volume_id: Some("VOL".into()),
+            status: TrashStatus::InTrash,
+            integrity: None,
+            integrity_note: integrity_note_for(true, false),
+            attributes: 0,
+        };
+        assert_eq!(integrity_status_key(&record), Some("trash.integrity.size"));
+    }
+
+    #[test]
+    fn restore_puts_hidden_and_readonly_attributes_back() {
+        use std::os::windows::fs::MetadataExt;
+        let root = scratch();
+        let file = root.join("secret.txt");
+        fs::write(&file, "hidden").unwrap();
+        crate::platform::set_attributes(&file, true, true).unwrap();
+        let record = move_to_trash(&file, &options(&root)).unwrap();
+        assert_ne!(record.attributes & 0x3, 0);
+        let restored = restore(&record, Some("VOL-1"), &[root.clone()], None).unwrap();
+        let attributes = fs::symlink_metadata(&restored).unwrap().file_attributes();
+        assert_ne!(attributes & 0x1, 0, "readonly");
+        assert_ne!(attributes & 0x2, 0, "hidden");
+        crate::platform::set_attributes(&restored, false, false).unwrap();
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn trash_module_has_no_unix_cfg_branch() {
+        let source = include_str!("secure_trash.rs");
+        let unix_cfg = format!("{}{}", "cfg(", "unix)");
+        let other_os = format!("{}{}", "cfg(not(", "windows))");
+        let target_os = format!("{}{}", "cfg(", "target_os");
+        assert!(!source.contains(&unix_cfg));
+        assert!(!source.contains(&other_os));
+        assert!(!source.contains(&target_os));
     }
 }

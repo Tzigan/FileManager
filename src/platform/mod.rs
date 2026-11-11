@@ -122,13 +122,13 @@ mod windows;
 
 #[cfg(windows)]
 pub use self::windows::{
-    AcquireResult, SingleInstanceGuard, acquire_single_instance, create_zip_archive, decode_image,
-    disk_usage, drives, extract_zip_all, extract_zip_file, extract_zip_folder, format_local_time,
-    free_space, get_clipboard_files, get_clipboard_text, install_context_menu, launch_updater,
-    notify_already_running, open_recycle_bin, open_terminal, pick_folder, pipe_listen, pipe_send,
-    prepare_update_archive, read_zip_dir_cancellable, recycle_bin, replace_file, search_zip,
-    set_attributes, set_clipboard_files, shell_open, signal_update_started, uninstall_context_menu,
-    volume_id,
+    AcquireResult, SingleInstanceGuard, acquire_single_instance, apply_stored_attributes,
+    create_zip_archive, decode_image, disk_usage, drives, extract_zip_all, extract_zip_file,
+    extract_zip_folder, format_local_time, free_space, get_clipboard_files, get_clipboard_text,
+    install_context_menu, launch_updater, notify_already_running, open_recycle_bin, open_terminal,
+    pick_folder, pipe_listen, pipe_send, prepare_update_archive, read_zip_dir_cancellable,
+    recycle_bin, replace_file, search_zip, set_attributes, set_clipboard_files, shell_open,
+    signal_update_started, uninstall_context_menu, volume_id,
 };
 
 #[cfg(windows)]
@@ -389,9 +389,6 @@ mod stubs {
     pub fn open_recycle_bin() -> std::io::Result<()> {
         Ok(())
     }
-    pub fn volume_id(_path: &std::path::Path) -> Option<String> {
-        None
-    }
     pub fn prepare_update_archive(
         _archive: &std::path::Path,
         _size: u64,
@@ -424,7 +421,6 @@ pub use stubs::{
     notify_already_running, open_recycle_bin, open_terminal, pick_folder, pipe_listen, pipe_send,
     prepare_update_archive, read_zip_dir_cancellable, recycle_bin, replace_file, search_zip,
     set_attributes, set_clipboard_files, shell_open, signal_update_started, uninstall_context_menu,
-    volume_id,
 };
 
 #[cfg(not(windows))]

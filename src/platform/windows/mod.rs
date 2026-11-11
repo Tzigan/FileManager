@@ -21,7 +21,10 @@ pub use drives::{drives, is_local_drive};
 pub use file_ops::replace_file;
 pub use image_decode::decode_image;
 pub use recycle::recycle_bin;
-pub use shell::{open_recycle_bin, open_terminal, pick_folder, set_attributes, shell_open};
+pub use shell::{
+    apply_stored_attributes, open_recycle_bin, open_terminal, pick_folder, set_attributes,
+    shell_open,
+};
 pub use single_instance::{
     AcquireResult, SingleInstanceGuard, acquire_single_instance, notify_already_running,
 };

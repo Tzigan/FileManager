@@ -202,14 +202,13 @@ impl FileManagerApp {
                 .filter(|item| ids.iter().any(|id| id == &item.id))
                 .cloned()
                 .collect();
-            let summary = chosen
-                .iter()
-                .map(|item| {
+            let summary = secure_trash::removal_facts(&chosen)
+                .into_iter()
+                .map(|(name, is_dir, size, origin)| {
                     format!(
-                        "{} ({}) — {}",
-                        item.original_name,
-                        crate::core::format::format_size(item.size),
-                        item.original_path
+                        "{name} ({}, {}) — {origin}",
+                        self.t(if is_dir { "trash.folder" } else { "trash.file" }),
+                        crate::core::format::format_size(size)
                     )
                 })
                 .collect::<Vec<_>>()
@@ -248,10 +247,7 @@ impl FileManagerApp {
             }
         }
         if self.trash_empty_confirm {
-            let count = items.len();
-            let bytes = items
-                .iter()
-                .fold(0u64, |sum, item| sum.saturating_add(item.size));
+            let (count, bytes) = secure_trash::removal_totals(&items);
             let mut decision = 0u8;
             egui::Window::new(self.t("trash.empty_title").to_owned())
                 .collapsible(false)
@@ -333,8 +329,11 @@ impl FileManagerApp {
             let roots = secure_trash::allowed_restore_roots(Path::new(&record.original_path));
             match secure_trash::restore(&record, current.as_deref(), &roots, conflict) {
                 Ok(path) => {
-                    self.trash_notice =
-                        Some(format!("{}: {}", self.t("trash.restored"), path.display()));
+                    let mut notice = format!("{}: {}", self.t("trash.restored"), path.display());
+                    if let Some(key) = secure_trash::integrity_status_key(&record) {
+                        notice = format!("{notice}. {}", self.t(key));
+                    }
+                    self.trash_notice = Some(notice);
                     let active = self.active;
                     self.navigate_fresh(active, ctx);
                 }
@@ -360,10 +359,15 @@ impl FileManagerApp {
         {
             return self.t("trash.status.volume").to_owned();
         }
-        if record.volume_id.is_none() {
-            return self.t("trash.status.unidentified").to_owned();
+        let base = if record.volume_id.is_none() {
+            self.t("trash.status.unidentified")
+        } else {
+            self.t("trash.status.ok")
+        };
+        match secure_trash::integrity_status_key(record) {
+            Some(key) => format!("{base}. {}", self.t(key)),
+            None => base.to_owned(),
         }
-        self.t("trash.status.ok").to_owned()
     }
 
     fn trash_time(&self, secs: u64) -> String {

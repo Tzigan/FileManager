@@ -282,9 +282,10 @@ impl crate::ui::FileManagerApp {
                     .retain(|entry| entry.kind != bookmark.kind);
             }
             SystemBookmarkTarget::RecycleBin => {
-                // Режим защищённой корзины открывает её список. Системная корзина остаётся отдельной.
-                if self.store.settings.delete_mode == crate::core::settings::DeleteMode::SecureTrash
-                {
+                // Secure и Ask ведут в корзину приложения. Windows-режим — в системную корзину.
+                if crate::core::settings::bookmark_opens_secure_trash(
+                    self.store.settings.delete_mode,
+                ) {
                     self.show_secure_trash = true;
                 } else if crate::platform::open_recycle_bin().is_err() {
                     self.system_bookmarks
