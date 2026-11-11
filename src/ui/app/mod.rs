@@ -110,8 +110,12 @@ pub(crate) enum WorkerMsg {
     UpdateLatest,
     /// Проверка или загрузка обновления завершилась ошибкой.
     UpdateFailed(String),
-    /// Фоновое помещение в защищённую корзину закончилось. Строки — уже понятные ошибки.
-    SecureTrashFinished(Vec<String>),
+    /// Фоновое помещение в защищённую корзину закончилось.
+    /// `paths` — исходные файлы: их папки надо сбросить в кэше, сама корзина кэшем списка не обслуживается.
+    SecureTrashFinished {
+        errors: Vec<String>,
+        paths: Vec<PathBuf>,
+    },
     /// Тяжёлые свойства одного объекта. Поколение отбрасывает ответ для уже другого выбора.
     EntryDetails {
         generation: u64,
@@ -733,6 +737,8 @@ impl FileManagerApp {
                     self.zip_creating = false;
                     self.zip_message = Some(match result {
                         Ok(path) => {
+                            // Извлечённый файл лежит в обычной папке, её список больше не актуален.
+                            self.dir_cache.invalidate_dir(&path);
                             format!("{}: {}", self.t("zip.extracted"), path.display())
                         }
                         Err(error) => self.zip_error_text(&error),
@@ -746,12 +752,15 @@ impl FileManagerApp {
                     // Чужое поколение или путь молча отбрасываются.
                     let _ = self.details_watch.receive(generation, &path, details);
                 }
-                WorkerMsg::SecureTrashFinished(errors) => {
+                WorkerMsg::SecureTrashFinished { errors, paths } => {
                     self.trash_notice = if errors.is_empty() {
                         Some(self.t("trash.moved").to_owned())
                     } else {
                         Some(errors.join("\n"))
                     };
+                    for path in paths {
+                        self.dir_cache.invalidate_dir(&path);
+                    }
                     let active = self.active;
                     self.navigate_fresh(active, ctx);
                 }
@@ -764,6 +773,8 @@ impl FileManagerApp {
                         continue;
                     }
                     self.zip_busy = false;
+                    // Новый архив появляется в папке назначения. Кэш этой папки надо сбросить до перечитывания.
+                    self.dir_cache.invalidate_dir(&destination);
                     if result.is_ok()
                         && let Some(index) = self
                             .tabs

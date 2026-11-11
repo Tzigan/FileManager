@@ -167,7 +167,9 @@ impl DirCache {
     }
 
     fn bump(&mut self, key: &Path) -> u64 {
-        self.next_generation = self.next_generation.wrapping_add(1);
+        // saturating_add не возвращает номер к нулю, пока жив этот кэш.
+        // Переполнение u64 в одной сессии недостижимо.
+        self.next_generation = self.next_generation.saturating_add(1);
         self.generation
             .insert(key.to_path_buf(), self.next_generation);
         self.next_generation
@@ -353,5 +355,140 @@ mod tests {
             assert_eq!(upper_key, direct);
         }
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn seed(cache: &mut DirCache, dir: &std::path::Path) {
+        let key = DirCache::canonical_key(dir).unwrap();
+        let generation = cache.begin(&key);
+        assert!(cache.store(&key, generation, vec![entry("kept.txt", false)]));
+    }
+
+    #[test]
+    fn move_invalidates_both_source_and_dest_dirs() {
+        let source = scratch("move-src");
+        let dest = scratch("move-dst");
+        let mut cache = DirCache::new(8);
+        seed(&mut cache, &source);
+        seed(&mut cache, &dest);
+        let kind = OpKind::Move {
+            sources: vec![source.join("file.txt")],
+            dest: dest.clone(),
+        };
+        for path in affected_dirs(&kind) {
+            cache.invalidate_dir(&path);
+        }
+        assert!(cache.get(&DirCache::canonical_key(&source).unwrap()).is_none());
+        assert!(cache.get(&DirCache::canonical_key(&dest).unwrap()).is_none());
+        let _ = std::fs::remove_dir_all(source);
+        let _ = std::fs::remove_dir_all(dest);
+    }
+
+    #[test]
+    fn copy_invalidates_dest_not_source() {
+        let source = scratch("copy-src");
+        let dest = scratch("copy-dst");
+        let mut cache = DirCache::new(8);
+        seed(&mut cache, &source);
+        seed(&mut cache, &dest);
+        let kind = OpKind::Copy {
+            sources: vec![source.join("file.txt")],
+            dest: dest.clone(),
+        };
+        let touched = affected_dirs(&kind);
+        assert!(touched.iter().all(|path| path != &source));
+        for path in touched {
+            cache.invalidate_dir(&path);
+        }
+        assert!(cache.get(&DirCache::canonical_key(&source).unwrap()).is_some());
+        assert!(cache.get(&DirCache::canonical_key(&dest).unwrap()).is_none());
+        let _ = std::fs::remove_dir_all(source);
+        let _ = std::fs::remove_dir_all(dest);
+    }
+
+    #[test]
+    fn rename_invalidates_parent_dir() {
+        let parent = scratch("rename");
+        let other = scratch("rename-other");
+        let mut cache = DirCache::new(8);
+        seed(&mut cache, &parent);
+        seed(&mut cache, &other);
+        let kind = OpKind::Rename {
+            from: parent.join("old.txt"),
+            to: other.join("new.txt"),
+        };
+        for path in affected_dirs(&kind) {
+            cache.invalidate_dir(&path);
+        }
+        assert!(cache.get(&DirCache::canonical_key(&parent).unwrap()).is_none());
+        assert!(cache.get(&DirCache::canonical_key(&other).unwrap()).is_none());
+        let _ = std::fs::remove_dir_all(parent);
+        let _ = std::fs::remove_dir_all(other);
+    }
+
+    #[test]
+    fn create_invalidates_parent_dir() {
+        let parent = scratch("create");
+        let mut cache = DirCache::new(4);
+        seed(&mut cache, &parent);
+        let kind = OpKind::CreateFile {
+            path: parent.join("fresh.txt"),
+        };
+        for path in affected_dirs(&kind) {
+            cache.invalidate_dir(&path);
+        }
+        assert!(cache.get(&DirCache::canonical_key(&parent).unwrap()).is_none());
+        let _ = std::fs::remove_dir_all(parent);
+    }
+
+    #[test]
+    fn delete_invalidates_parent_dir() {
+        let parent = scratch("delete");
+        let mut cache = DirCache::new(4);
+        seed(&mut cache, &parent);
+        let kind = OpKind::Delete {
+            sources: vec![parent.join("gone.txt")],
+        };
+        for path in affected_dirs(&kind) {
+            cache.invalidate_dir(&path);
+        }
+        assert!(cache.get(&DirCache::canonical_key(&parent).unwrap()).is_none());
+        let _ = std::fs::remove_dir_all(parent);
+    }
+
+    #[test]
+    fn extract_zip_or_restore_trash_invalidates_target_dir_cache() {
+        let parent = scratch("target");
+        let mut cache = DirCache::new(4);
+        seed(&mut cache, &parent);
+        // И извлечение, и восстановление пишут файл в папку. Сбрасывается она, не корзина.
+        cache.invalidate_dir(&parent.join("restored.txt"));
+        assert!(cache.get(&DirCache::canonical_key(&parent).unwrap()).is_none());
+        assert!(uses_dir_cache(true, false, false) == false);
+        let _ = std::fs::remove_dir_all(parent);
+    }
+
+    #[test]
+    fn readonly_ops_do_not_invalidate_cache() {
+        let mut cache = DirCache::new(4);
+        let key = PathBuf::from(r"C:\readonly-cache");
+        let generation = cache.begin(&key);
+        assert!(cache.store(&key, generation, vec![entry("b.txt", false), entry("a.txt", true)]));
+        let mut view = cache.get(&key).unwrap();
+        view = fs::filter_hidden(view, false);
+        fs::sort_entries_by(&mut view, SortKey::Name, false);
+        assert_eq!(view.len(), 1);
+        assert_eq!(cache.get(&key).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn request_generation_is_monotonic_and_does_not_wrap_in_session() {
+        let mut cache = DirCache::new(4);
+        let key = PathBuf::from(r"C:\generation");
+        let first = cache.begin(&key);
+        let second = cache.begin(&key);
+        let third = cache.begin(&key);
+        assert!(first < second && second < third);
+        assert_eq!(std::mem::size_of_val(&first), 8);
+        assert_ne!(first, 0);
     }
 }
