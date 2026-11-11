@@ -52,7 +52,9 @@ fn settings_category_column_width(ui: &egui::Ui, labels: &[String]) -> f32 {
         });
         widest.max(width)
     });
-    text_width + style::SPACE_MD * 2.0
+    // У selectable_label есть внутренние поля, без них длинная подпись
+    // переносится на вторую строку.
+    text_width + ui.spacing().button_padding.x * 2.0 + style::SPACE_MD
 }
 
 impl FileManagerApp {
@@ -170,7 +172,7 @@ impl FileManagerApp {
         let builder = floating_dialog_viewport(
             ctx,
             title,
-            egui::vec2(560.0, 760.0),
+            egui::vec2(640.0, 420.0),
             self.settings_viewport_placed,
         );
         let mut close_requested = false;
@@ -194,7 +196,10 @@ impl FileManagerApp {
             }
             egui::CentralPanel::default().show(viewport_ui, |ui| {
                 let content_height = ui.available_height();
-                ui.horizontal(|ui| {
+                // horizontal() выравнивает колонки по центру, поэтому короткая
+                // страница оказывалась посередине высокой панели. Здесь обе
+                // колонки начинаются сверху.
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
                     let sidebar_width = settings_category_column_width(ui, &category_labels);
                     ui.allocate_ui_with_layout(
                         egui::vec2(sidebar_width, content_height),
@@ -227,29 +232,36 @@ impl FileManagerApp {
                         egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
                     );
                     ui.add_space(style::SPACE_SM);
-                    let page_size = ui.available_size();
-                    ui.allocate_ui(page_size, |ui| {
-                        egui::ScrollArea::vertical()
-                            .id_salt("settings-page")
-                            .auto_shrink([false, false])
-                            .show(ui, |ui| {
-                                ui.set_min_width(ui.available_width());
-                                ui.add_space(style::SPACE_MD);
-                                match selected {
-                                    SettingsCategory::General => self.settings_general(ui),
-                                    SettingsCategory::Files => {
-                                        self.settings_files(ui, &mut hidden_files_changed);
+                    let page_width = ui.available_width();
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(page_width, content_height),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            egui::ScrollArea::vertical()
+                                .id_salt("settings-page")
+                                .auto_shrink([false, false])
+                                .show(ui, |ui| {
+                                    ui.set_width(page_width);
+                                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+                                    ui.add_space(style::SPACE_SM);
+                                    match selected {
+                                        SettingsCategory::General => self.settings_general(ui),
+                                        SettingsCategory::Files => {
+                                            self.settings_files(ui, &mut hidden_files_changed);
+                                        }
+                                        SettingsCategory::Tree => {
+                                            self.settings_tree(ui, &mut wsl_visibility_changed);
+                                        }
+                                        SettingsCategory::Navigation => {
+                                            self.settings_navigation(ui)
+                                        }
+                                        SettingsCategory::Trash => self.delete_mode_settings(ui),
+                                        SettingsCategory::Updates => self.settings_updates(ui),
                                     }
-                                    SettingsCategory::Tree => {
-                                        self.settings_tree(ui, &mut wsl_visibility_changed);
-                                    }
-                                    SettingsCategory::Navigation => self.settings_navigation(ui),
-                                    SettingsCategory::Trash => self.delete_mode_settings(ui),
-                                    SettingsCategory::Updates => self.settings_updates(ui),
-                                }
-                                ui.add_space(style::SPACE_MD);
-                            });
-                    });
+                                    ui.add_space(style::SPACE_MD);
+                                });
+                        },
+                    );
                 });
             });
         });
