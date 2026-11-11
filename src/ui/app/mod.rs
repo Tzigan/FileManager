@@ -1072,10 +1072,15 @@ fn tab_close_button_hovered(
     !dragging && !pinned && pointer.is_some_and(|pos| close_rect.contains(pos))
 }
 
-fn tab_strip_content_margin() -> egui::Margin {
+fn tab_strip_content_margin(centered: bool) -> egui::Margin {
     // Кнопка «+» снаружи прокрутки, поэтому справа дополнительный отступ не нужен.
     egui::Margin {
-        left: style::FRAME_PADDING_X,
+        // При центрировании убираем inset, чтобы он не сдвигал блок относительно центра.
+        left: if centered {
+            0
+        } else {
+            style::FRAME_PADDING_X
+        },
         right: 0,
         top: 0,
         bottom: 0,

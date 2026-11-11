@@ -77,11 +77,22 @@ fn tab_strip_uses_mouse_wheel_without_showing_a_scrollbar() {
         style.spacing.item_spacing.y,
         super::style::TAB_BAR_VERTICAL_SPACING
     );
-    let margin = tab_strip_content_margin();
+    let margin = tab_strip_content_margin(false);
     assert_eq!(margin.left, super::style::FRAME_PADDING_X);
     assert_eq!(margin.right, 0);
     assert_eq!(margin.top, 0);
     assert_eq!(margin.bottom, 0);
+    assert_eq!(tab_strip_content_margin(true).left, 0);
+}
+
+#[test]
+fn tab_strip_centers_only_when_the_entire_block_fits() {
+    use super::toolbar::tab_strip_center_offset;
+
+    assert_eq!(tab_strip_center_offset(120.0, 200.0), Some(40.0));
+    assert_eq!(tab_strip_center_offset(200.0, 200.0), Some(0.0));
+    assert_eq!(tab_strip_center_offset(201.0, 200.0), None);
+    assert_eq!(tab_strip_center_offset(80.0, 60.0), None);
 }
 
 #[test]

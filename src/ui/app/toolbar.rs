@@ -108,43 +108,86 @@ impl FileManagerApp {
                     .then(|| input.pointer.press_origin())
                     .flatten()
             });
-            let metas: Vec<(usize, bool, String)> = self
+            let button_font = egui::TextStyle::Button.resolve(ui.style());
+            let tab_text_color = ui.visuals().text_color();
+            // Галлеи задают фактическую ширину вкладок в текущем кадре.
+            let metas: Vec<_> = self
                 .tabs
                 .iter()
                 .enumerate()
                 .filter(|(_, tab)| !self.is_tab_detached(tab.id))
-                .map(|(index, tab)| (index, tab.pinned, tab.title()))
+                .map(|(index, tab)| {
+                    let title = tab.title();
+                    let galley = ui.painter().layout_no_wrap(
+                        title,
+                        button_font.clone(),
+                        tab_text_color,
+                    );
+                    (index, tab.pinned, galley)
+                })
                 .collect();
 
             let spacing = ui.spacing().item_spacing.x;
-            let scroll_target = self.tab_strip_scroll_target;
-            let mut scroll_request_sent = false;
-            let scroll_width = (ui.available_width()
+            let plus_galley = ui.painter().layout_no_wrap(
+                "+".to_owned(),
+                egui::TextStyle::Small.resolve(ui.style()),
+                ui.visuals().text_color(),
+            );
+            let plus_size = super::window_frame::new_tab_button_size(
+                plus_galley.size().y,
+                ui.spacing().interact_size.y,
+            );
+            let tab_content_width = metas
+                .iter()
+                .map(|(_, pinned, galley)| {
+                    let pin_width = if *pinned {
+                        super::window_frame::TAB_PIN_WIDTH
+                    } else {
+                        0.0
+                    };
+                    let close_width = if *pinned {
+                        0.0
+                    } else {
+                        super::window_frame::TAB_CLOSE_WIDTH
+                    };
+                    galley.size().x
+                        + super::window_frame::TAB_TEXT_EXTRA_WIDTH
+                        + pin_width
+                        + close_width
+                })
+                .sum::<f32>()
+                + spacing * metas.len().saturating_sub(1) as f32;
+            // Кнопка «+» и интервал перед ней входят в ширину центрируемого блока.
+            let block_width = tab_content_width + spacing + plus_size.x;
+            let center_area_width = (ui.available_width()
                 - super::window_frame::WINDOW_CONTROLS_WIDTH
                 - super::window_frame::MAIN_WINDOW_DRAG_AREA_MIN_WIDTH
-                - super::window_frame::TAB_PLUS_BUTTON_WIDTH
-                - spacing * 3.0)
-                .max(1.0);
+                - spacing * 2.0)
+                .max(0.0);
+            let scroll_width = (center_area_width - plus_size.x - spacing).max(1.0);
+            let center_offset = tab_strip_center_offset(block_width, center_area_width);
+            let centered = center_offset.is_some();
+            if let Some(offset) = center_offset {
+                ui.add_space(offset);
+            }
+
+            let scroll_target = self.tab_strip_scroll_target;
+            let mut scroll_request_sent = false;
             egui::ScrollArea::horizontal()
                 .id_salt("tab_strip_scroll")
                 .max_width(scroll_width)
                 .auto_shrink([true, true])
-                .content_margin(tab_strip_content_margin())
+                .content_margin(tab_strip_content_margin(centered))
                 .scroll_source(tab_scroll_source())
                 .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                 .show(ui, |ui| {
                     let mut scroll_target_rect = None;
                     ui.horizontal(|ui| {
-                        for (display_index, (i, pinned, title)) in metas.iter().enumerate() {
+                        for (display_index, (i, pinned, galley)) in metas.iter().enumerate() {
                             ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing.x = style::SPACE_XXS;
 
                                 // Клик переключает вкладку, а перетаскивание меняет её порядок.
-                                let galley = ui.painter().layout_no_wrap(
-                                    title.clone(),
-                                    egui::TextStyle::Button.resolve(ui.style()),
-                                    ui.visuals().text_color(),
-                                );
                                 // Крестик закрытия расположен внутри вкладки справа.
                                 let pin_w = if *pinned {
                                     super::window_frame::TAB_PIN_WIDTH
@@ -245,7 +288,7 @@ impl FileManagerApp {
                                         (text_left + text_right - galley.size().x) * 0.5,
                                         rect.center().y - galley.size().y * 0.5,
                                     ),
-                                    galley,
+                                    galley.clone(),
                                     color,
                                 );
                                 if *pinned {
@@ -376,15 +419,6 @@ impl FileManagerApp {
 
             // При переполнении кнопка остаётся рядом с видимой областью прокрутки;
             // без переполнения список сжимается до вкладок, и кнопка идёт сразу за ними.
-            let plus_galley = ui.painter().layout_no_wrap(
-                "+".to_owned(),
-                egui::TextStyle::Small.resolve(ui.style()),
-                ui.visuals().text_color(),
-            );
-            let plus_size = super::window_frame::new_tab_button_size(
-                plus_galley.size().y,
-                ui.spacing().interact_size.y,
-            );
             if ui
                 .add_sized(plus_size, egui::Button::new("+").small())
                 .clicked()
@@ -708,6 +742,11 @@ pub(super) fn tab_strip_scroll_alignment(
     } else {
         None
     }
+}
+
+pub(super) fn tab_strip_center_offset(block_width: f32, available_width: f32) -> Option<f32> {
+    // Переполненный блок оставляем у начала ScrollArea, чтобы не терять левый край.
+    (block_width <= available_width).then(|| (available_width - block_width) * 0.5)
 }
 
 fn primary_button_held(ctx: &egui::Context) -> bool {
