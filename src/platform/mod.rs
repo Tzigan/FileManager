@@ -106,6 +106,15 @@ impl DiskUsage {
             / self.total_bytes as u128;
         Some(percent.min(100) as u8)
     }
+
+    /// Доля занятости без округления. `None` — ёмкость неизвестна, это не ноль.
+    pub fn used_ratio(self) -> Option<f32> {
+        let used = self.total_bytes.checked_sub(self.free_bytes)?;
+        if self.total_bytes == 0 {
+            return None;
+        }
+        Some((used as f32 / self.total_bytes as f32).clamp(0.0, 1.0))
+    }
 }
 
 #[cfg(windows)]
@@ -427,6 +436,29 @@ mod disk_usage_tests {
             }
             .used_percent(),
             None
+        );
+        assert_eq!(
+            DiskUsage {
+                total_bytes: 0,
+                free_bytes: 0,
+            }
+            .used_ratio(),
+            None
+        );
+        let ratio = DiskUsage {
+            total_bytes: 1000,
+            free_bytes: 566,
+        }
+        .used_ratio()
+        .unwrap();
+        assert!((ratio - 0.434).abs() < 0.0001);
+        assert_eq!(
+            DiskUsage {
+                total_bytes: 1000,
+                free_bytes: 566,
+            }
+            .used_percent(),
+            Some(43)
         );
     }
 }
