@@ -69,6 +69,8 @@ pub fn integrity_note_for(copied_across_volumes: bool, hashed: bool) -> Integrit
 pub struct TrashListRow {
     pub id: String,
     pub name: String,
+    /// Расширение исходного имени. Подпись строки его не содержит.
+    pub extension: Option<String>,
     pub origin: String,
     pub is_dir: bool,
     pub size: u64,
@@ -84,6 +86,7 @@ pub fn list_row(record: &TrashRecord) -> TrashListRow {
     };
     TrashListRow {
         id: record.id.clone(),
+        extension: extension_of_original_name(&name),
         name,
         origin: record.original_path.clone(),
         is_dir: record.is_dir,
@@ -91,6 +94,15 @@ pub fn list_row(record: &TrashRecord) -> TrashListRow {
         deleted_at: record.deleted_at,
         stored_path: record.stored_path.clone(),
     }
+}
+
+/// Только исходное имя. Украшение «откуда · статус» сюда не передаётся.
+fn extension_of_original_name(name: &str) -> Option<String> {
+    let (stem, extension) = name.rsplit_once('.')?;
+    if stem.is_empty() || extension.is_empty() || extension.contains(' ') {
+        return None;
+    }
+    Some(extension.to_lowercase())
 }
 
 pub fn integrity_status_key(record: &TrashRecord) -> Option<&'static str> {
@@ -1157,6 +1169,10 @@ mod tests {
         assert!(!row.name.contains("99"));
         assert_eq!(row.id, "99");
         assert_eq!(row.origin, r"D:\docs\отчёт.txt");
+        assert_eq!(row.extension.as_deref(), Some("txt"));
+        let decorated = format!("{} · {}: {} • повреждена", row.name, "Откуда", row.origin);
+        assert_ne!(row.name, decorated);
+        assert!(!row.name.contains('·'));
     }
 
     #[test]

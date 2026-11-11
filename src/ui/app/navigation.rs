@@ -331,6 +331,10 @@ impl FileManagerApp {
         if idx != self.active && idx < self.tabs.len() && !self.is_tab_detached(self.tabs[idx].id) {
             self.active = idx;
             self.persist_tabs();
+            // Неактивная вкладка корзины могла устареть, пока действие шло в другой.
+            if self.tabs[idx].secure_trash {
+                self.load_secure_trash_tab(idx);
+            }
         }
     }
 

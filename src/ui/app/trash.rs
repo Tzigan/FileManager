@@ -100,7 +100,9 @@ impl FileManagerApp {
                 } else {
                     row.origin.clone()
                 };
-                notes.insert(row.id.clone(), format!("{origin} · {status}"));
+                // Суффикс только для отрисовки. entry.name и extension остаются данными карточки.
+                let note = format!("{}: {origin} · {status}", self.t("trash.col.origin"));
+                notes.insert(row.id.clone(), note);
                 let modified = (row.deleted_at > 0).then(|| {
                     std::time::UNIX_EPOCH + std::time::Duration::from_secs(row.deleted_at)
                 });
@@ -119,7 +121,7 @@ impl FileManagerApp {
                     size: Some(row.size),
                     modified,
                     created: None,
-                    extension: None,
+                    extension: row.extension,
                     archive_member: Some(row.id),
                 }
             })
