@@ -243,6 +243,14 @@ impl FileManagerApp {
         }
     }
 
+    fn folder_picker_error(&self, error: &std::io::Error) -> String {
+        match error.kind() {
+            std::io::ErrorKind::PermissionDenied => self.t("error.access_denied").to_owned(),
+            std::io::ErrorKind::NotFound => self.t("zip.options.error_folder").to_owned(),
+            _ => self.zip_create_error_text(error),
+        }
+    }
+
     pub(super) fn zip_create_error_text(&self, error: &std::io::Error) -> String {
         if error
             .raw_os_error()
@@ -368,6 +376,8 @@ impl FileManagerApp {
         let name_hint = self.t("zip.options.name_hint").to_owned();
         let folder_label = self.t("zip.options.folder").to_owned();
         let folder_hint = self.t("zip.options.folder_hint").to_owned();
+        let browse_label = self.t("zip.options.browse").to_owned();
+        let browse_hint = self.t("zip.options.browse_hint").to_owned();
         let method_label = self.t("zip.options.method").to_owned();
         let store_label = self.t("zip.method.store").to_owned();
         let deflate_label = self.t("zip.method.deflate").to_owned();
@@ -404,6 +414,7 @@ impl FileManagerApp {
         window.open(&mut open).show(ctx, |ui| {
             if let Some(dialog) = dialog.as_mut() {
                 let mut edited = false;
+                let mut picker_error = None;
                 ui.add_enabled_ui(!dialog.awaiting_conflict, |ui| {
                     ui.horizontal(|ui| {
                         ui.label(&name_label);
@@ -417,13 +428,40 @@ impl FileManagerApp {
                     });
                     ui.horizontal(|ui| {
                         ui.label(&folder_label);
+                        // Ширина поля — остаток строки, кнопка занимает высоту обычного элемента.
+                        let browse_side = ui.spacing().interact_size.y;
+                        let field_width = (ui.available_width()
+                            - browse_side
+                            - ui.spacing().item_spacing.x)
+                            .max(browse_side);
                         edited |= ui
                             .add(
                                 egui::TextEdit::singleline(&mut dialog.destination)
-                                    .desired_width(360.0)
+                                    .desired_width(field_width)
                                     .hint_text(&folder_hint),
                             )
                             .changed();
+                        // Кнопка справа от поля. Отмена диалога путь не меняет.
+                        let browse = ui
+                            .add_sized(
+                                egui::vec2(browse_side, browse_side),
+                                egui::Button::new(&browse_label),
+                            )
+                            .on_hover_text(&browse_hint);
+                        if browse.clicked() {
+                            let initial = folder_picker_start(dialog.destination.trim());
+                            match crate::platform::pick_folder(&browse_hint, initial.as_deref()) {
+                                Ok(Some(path)) => {
+                                    dialog.destination =
+                                        destination_after_folder_pick(&dialog.destination, Some(&path));
+                                    edited = true;
+                                }
+                                Ok(None) => {}
+                                Err(error) => {
+                                    picker_error = Some(self.folder_picker_error(&error));
+                                }
+                            }
+                        }
                     });
                     ui.separator();
                     ui.label(&method_label);
@@ -503,6 +541,9 @@ impl FileManagerApp {
                 });
                 if edited {
                     dialog.validation_error = None;
+                }
+                if let Some(error) = picker_error {
+                    dialog.validation_error = Some(error);
                 }
                 if let Some(error) = &dialog.validation_error {
                     ui.colored_label(ui.visuals().error_fg_color, error);
@@ -699,6 +740,29 @@ fn run_zip_extract(
     }
 }
 
+/// Папка, с которой открыть диалог: текущий путь, если это папка, иначе её родитель.
+pub(super) fn folder_picker_start(current: &str) -> Option<PathBuf> {
+    let path = PathBuf::from(current.trim());
+    if path.as_os_str().is_empty() {
+        return None;
+    }
+    if path.is_dir() {
+        Some(path)
+    } else {
+        path.parent()
+            .filter(|parent| parent.is_dir())
+            .map(Path::to_path_buf)
+    }
+}
+
+/// Выбранный путь заменяет поле. Отмена диалога оставляет прежний текст.
+pub(super) fn destination_after_folder_pick(current: &str, picked: Option<&Path>) -> String {
+    match picked {
+        Some(path) => path.display().to_string(),
+        None => current.to_owned(),
+    }
+}
+
 fn suggested_zip_name(tab: &crate::ui::tabs::Tab, sources: &[PathBuf], fallback: &str) -> String {
     if sources.len() != 1 {
         return fallback.to_owned();
@@ -851,6 +915,31 @@ mod zip_dialog_tests {
                 "zip.options.error_selection"
             ))
         ));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn folder_pick_replaces_the_path_and_cancel_keeps_it() {
+        let current = r"C:\keep";
+        assert_eq!(
+            destination_after_folder_pick(current, None),
+            current
+        );
+        assert_eq!(
+            destination_after_folder_pick(current, Some(Path::new(r"D:\archives"))),
+            r"D:\archives"
+        );
+        let root = temp_dir();
+        let nested = root.join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        let file = nested.join("note.txt");
+        std::fs::write(&file, b"x").unwrap();
+        assert_eq!(folder_picker_start(""), None);
+        assert_eq!(folder_picker_start(nested.to_str().unwrap()), Some(nested.clone()));
+        assert_eq!(
+            folder_picker_start(file.to_str().unwrap()),
+            Some(nested)
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 }

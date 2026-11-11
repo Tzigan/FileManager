@@ -71,6 +71,8 @@
   "zip.options.name_hint": "Расширение .zip добавится автоматически",
   "zip.options.folder": "Папка сохранения",
   "zip.options.folder_hint": "Путь к существующей папке",
+  "zip.options.browse": "...",
+  "zip.options.browse_hint": "Выбрать папку",
   "zip.options.method": "Метод сжатия",
   "zip.options.level": "Степень сжатия",
   "zip.options.preserve_structure": "Сохранять структуру папок",

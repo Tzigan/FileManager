@@ -69,6 +69,8 @@
   "zip.options.name_hint": "The .zip extension is added automatically",
   "zip.options.folder": "Save in",
   "zip.options.folder_hint": "Path to an existing folder",
+  "zip.options.browse": "...",
+  "zip.options.browse_hint": "Choose folder",
   "zip.options.method": "Compression method",
   "zip.options.level": "Compression level",
   "zip.options.preserve_structure": "Preserve folder structure",
