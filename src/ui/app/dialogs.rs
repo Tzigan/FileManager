@@ -647,22 +647,11 @@ impl FileManagerApp {
     /// Тяжёлые свойства читаются только для одного выбранного объекта или открытого окна.
     /// Повторный кадр с тем же путём новый поток не запускает.
     pub(super) fn sync_entry_details(&mut self, ctx: &egui::Context) {
-        let Some(path) = self.entry_details_subject() else {
-            self.entry_details_path = None;
-            self.entry_details = None;
-            self.entry_details_pending = false;
+        let subject = self.entry_details_subject();
+        let step = self.details_watch.follow(subject.as_deref());
+        let crate::core::entry_details::DetailsStep::Start { generation, path } = step else {
             return;
         };
-        if self.entry_details_path.as_ref() == Some(&path)
-            && (self.entry_details_pending || self.entry_details.is_some())
-        {
-            return;
-        }
-        self.entry_details_generation = self.entry_details_generation.wrapping_add(1);
-        let generation = self.entry_details_generation;
-        self.entry_details_path = Some(path.clone());
-        self.entry_details = None;
-        self.entry_details_pending = true;
         let tx = self.msg_tx.clone();
         let ctx = ctx.clone();
         thread::spawn(move || {
@@ -677,16 +666,22 @@ impl FileManagerApp {
     }
 
     fn entry_details_subject(&self) -> Option<PathBuf> {
-        if let Some(path) = &self.props_target {
-            return Some(path.clone());
-        }
-        let tab = self.tabs.get(self.active)?;
-        if tab.secure_trash || tab.archive_prefix.is_some() || tab.selection.len() != 1 {
-            return None;
-        }
-        let key = tab.selection.iter().next()?;
-        let entry = tab.entries.iter().find(|entry| key.matches(entry))?;
-        entry.archive_member.is_none().then(|| entry.path.clone())
+        let tab = self.tabs.get(self.active);
+        let selected = tab.and_then(|tab| {
+            if tab.selection.len() != 1 {
+                return None;
+            }
+            let key = tab.selection.iter().next()?;
+            tab.entries.iter().find(|entry| key.matches(entry))
+        });
+        crate::core::entry_details::heavy_details_path(
+            self.props_target.as_deref(),
+            tab.is_some_and(|tab| tab.archive_prefix.is_some()),
+            tab.is_some_and(|tab| tab.secure_trash),
+            selected.map(|entry| entry.path.as_path()),
+            selected.is_some_and(|entry| entry.archive_member.is_some()),
+        )
+        .map(Path::to_path_buf)
     }
 
     pub(super) fn act_props(&mut self) {

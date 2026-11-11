@@ -125,35 +125,28 @@ impl FileManagerApp {
 
     /// Строки, которые появляются только после отдельного запроса, не из списка папки.
     pub(crate) fn heavy_detail_lines(&self, path: &std::path::Path) -> Vec<(String, String)> {
-        if self.entry_details_path.as_deref() != Some(path) {
+        if self.details_watch.path.as_deref() != Some(path) {
             return Vec::new();
         }
-        if self.entry_details_pending {
+        if self.details_watch.pending {
             return vec![(
                 self.t("props.size_on_disk").to_owned(),
                 self.t("props.details_loading").to_owned(),
             )];
         }
-        let Some(details) = &self.entry_details else {
+        let Some(details) = &self.details_watch.details else {
             return Vec::new();
         };
         let unavailable = self.t("props.unavailable");
-        let size_on_disk = match details.size_on_disk {
-            crate::core::entry_details::Detail::Known(size) => {
-                crate::core::format::format_size(size)
-            }
-            crate::core::entry_details::Detail::Unavailable => unavailable.to_owned(),
-        };
-        let accessed = match details.accessed {
-            crate::core::entry_details::Detail::Known(time) => {
-                crate::platform::format_local_time(time, self.i18n.language())
-            }
-            crate::core::entry_details::Detail::Unavailable => unavailable.to_owned(),
-        };
-        let owner = match &details.owner {
-            crate::core::entry_details::Detail::Known(name) => name.clone(),
-            crate::core::entry_details::Detail::Unavailable => unavailable.to_owned(),
-        };
+        let size_on_disk = crate::core::entry_details::detail_text(
+            &details.size_on_disk,
+            unavailable,
+            |size| crate::core::format::format_size(*size),
+        );
+        let accessed = crate::core::entry_details::detail_text(&details.accessed, unavailable, |time| {
+            crate::platform::format_local_time(*time, self.i18n.language())
+        });
+        let owner = crate::core::entry_details::detail_text(&details.owner, unavailable, Clone::clone);
         let access = match details.access {
             crate::core::entry_details::Detail::Known(
                 crate::core::entry_details::AccessList::Null,

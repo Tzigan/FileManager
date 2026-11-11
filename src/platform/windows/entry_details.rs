@@ -193,6 +193,32 @@ mod tests {
     }
 
     #[test]
+    fn details_request_does_not_resolve_symlink_target() {
+        let dir = scratch("link");
+        let target = dir.join("target.bin");
+        fs::write(&target, vec![0u8; 100_000]).unwrap();
+        let link = dir.join("Alias");
+        let linked = std::os::windows::fs::symlink_dir(&dir, &link).is_ok()
+            || std::process::Command::new("cmd")
+                .args([
+                    "/C",
+                    "mklink",
+                    "/J",
+                    &link.to_string_lossy(),
+                    &dir.to_string_lossy(),
+                ])
+                .status()
+                .is_ok_and(|status| status.success());
+        assert!(linked, "нужна точка соединения или ссылка");
+        let details = read_entry_details(&link);
+        assert_eq!(details.size_on_disk, Detail::Unavailable);
+        assert_eq!(details.owner, Detail::Unavailable);
+        assert!(!details.folder_contents_not_counted);
+        let _ = fs::remove_dir(link);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn missing_path_is_unavailable() {
         let missing =
             std::env::temp_dir().join(format!("fm-entry-details-missing-{}", std::process::id()));
