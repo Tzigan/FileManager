@@ -14,6 +14,73 @@ pub enum Theme {
     Dark,
 }
 
+/// Куда попадает обычное удаление. Shift+Delete по-прежнему удаляет сразу.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeleteMode {
+    /// Системная Корзина Windows. Значение по умолчанию, чтобы старое поведение не менялось.
+    #[default]
+    WindowsRecycle,
+    /// Защищённая корзина приложения.
+    SecureTrash,
+    /// Спросить при каждом удалении.
+    Ask,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeleteRoute {
+    pub windows: Vec<PathBuf>,
+    pub secure: Vec<PathBuf>,
+    pub ask: Vec<PathBuf>,
+    pub permanent: bool,
+}
+
+/// Папки из списка — префиксы путей, не маски. Это ограничение 0.8.
+pub fn route_delete(
+    mode: DeleteMode,
+    permanent: bool,
+    paths: &[PathBuf],
+    folders: &[PathBuf],
+) -> DeleteRoute {
+    if permanent {
+        return DeleteRoute {
+            windows: paths.to_vec(),
+            secure: Vec::new(),
+            ask: Vec::new(),
+            permanent: true,
+        };
+    }
+    let (forced, rest): (Vec<_>, Vec<_>) = paths.iter().cloned().partition(|path| {
+        folders
+            .iter()
+            .any(|folder| !folder.as_os_str().is_empty() && path.starts_with(folder))
+    });
+    match mode {
+        DeleteMode::SecureTrash => DeleteRoute {
+            windows: Vec::new(),
+            secure: paths.to_vec(),
+            ask: Vec::new(),
+            permanent: false,
+        },
+        DeleteMode::Ask => DeleteRoute {
+            windows: Vec::new(),
+            secure: forced,
+            ask: rest,
+            permanent: false,
+        },
+        DeleteMode::WindowsRecycle => DeleteRoute {
+            windows: rest,
+            secure: forced,
+            ask: Vec::new(),
+            permanent: false,
+        },
+    }
+}
+
+fn default_hash_max_bytes() -> u64 {
+    crate::core::secure_trash::DEFAULT_HASH_MAX_BYTES
+}
+
 /// File list view: table with columns, compact list or icon grid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum ViewMode {
@@ -61,6 +128,15 @@ pub struct Settings {
     /// Пользователь успевает увидеть сообщение. Не задержка внутри updater.
     #[serde(default = "default_restart_delay_secs")]
     pub update_restart_delay_secs: u32,
+    /// Режим обычного удаления. Не подменяет системную корзину, пока пользователь сам не выбрал.
+    pub delete_mode: DeleteMode,
+    /// Файлы больше порога не хешируются: удаление не должно вешать окно.
+    #[serde(default = "default_hash_max_bytes")]
+    pub secure_trash_hash_max_bytes: u64,
+    /// Запасная корзина на системном диске, только если на своём томе нет места.
+    pub secure_trash_allow_fallback: bool,
+    /// Папки, для которых обычное удаление идёт в защищённую корзину даже в режиме Windows.
+    pub secure_trash_folders: Vec<PathBuf>,
 }
 
 fn default_true() -> bool {
@@ -92,6 +168,10 @@ impl Default for Settings {
             enable_mouse_side_navigation: true,
             auto_restart_after_update: true,
             update_restart_delay_secs: default_restart_delay_secs(),
+            delete_mode: DeleteMode::WindowsRecycle,
+            secure_trash_hash_max_bytes: default_hash_max_bytes(),
+            secure_trash_allow_fallback: false,
+            secure_trash_folders: Vec::new(),
         }
     }
 }
@@ -288,5 +368,30 @@ mod tests_v06 {
         assert!(s.pinned_tabs.is_empty());
         assert!(s.auto_restart_after_update);
         assert_eq!(s.update_restart_delay_secs, 3);
+        assert_eq!(s.delete_mode, DeleteMode::WindowsRecycle);
+        assert!(s.secure_trash_folders.is_empty());
+    }
+
+    #[test]
+    fn delete_mode_routes_without_replacing_windows_recycle() {
+        let file = PathBuf::from(r"C:\work\a.txt");
+        let forced = PathBuf::from(r"D:\private\a.txt");
+        let folders = vec![PathBuf::from(r"D:\private")];
+        let windows = route_delete(DeleteMode::WindowsRecycle, false, &[file.clone()], &[]);
+        assert_eq!(windows.windows, vec![file.clone()]);
+        assert!(windows.secure.is_empty());
+        let secure = route_delete(DeleteMode::SecureTrash, false, &[file.clone()], &[]);
+        assert_eq!(secure.secure, vec![file.clone()]);
+        let asked = route_delete(
+            DeleteMode::Ask,
+            false,
+            &[file.clone(), forced.clone()],
+            &folders,
+        );
+        assert_eq!(asked.ask, vec![file.clone()]);
+        assert_eq!(asked.secure, vec![forced]);
+        let permanent = route_delete(DeleteMode::SecureTrash, true, &[file.clone()], &folders);
+        assert!(permanent.permanent);
+        assert!(permanent.secure.is_empty());
     }
 }

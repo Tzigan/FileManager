@@ -8,6 +8,7 @@ use preview::PreviewState;
 mod search;
 mod tab_drag_preview;
 mod toolbar;
+mod trash;
 mod window_frame;
 
 pub(crate) use chrome::{
@@ -18,9 +19,9 @@ pub(crate) use chrome::{
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{channel, sync_channel, Receiver, Sender, SyncSender, TrySendError};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{Receiver, Sender, SyncSender, TrySendError, channel, sync_channel};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -34,7 +35,9 @@ use crate::core::preview::TextPreview;
 use crate::core::search::SearchValidationError;
 use crate::core::settings::{SettingsStore, Theme, ViewMode};
 use crate::core::update::UpdateManifest;
-use crate::platform::{DiskUsage, drives, install_context_menu, pipe_listen, uninstall_context_menu};
+use crate::platform::{
+    DiskUsage, drives, install_context_menu, pipe_listen, uninstall_context_menu,
+};
 use crate::ui::opsui::OpsUi;
 use crate::ui::tabs::{ListStatus, Tab};
 use crate::ui::tree::TreeState;
@@ -89,9 +92,7 @@ pub(crate) enum WorkerMsg {
         result: std::io::Result<Vec<PathBuf>>,
     },
     /// Обновились сведения о занятости томов.
-    DiskUsage {
-        values: HashMap<PathBuf, DiskUsage>,
-    },
+    DiskUsage { values: HashMap<PathBuf, DiskUsage> },
     /// Обнаружены установленные дистрибутивы WSL.
     WslDistributions(Vec<String>),
     /// A path forwarded by another instance / CLI — open in a new tab.
@@ -106,8 +107,9 @@ pub(crate) enum WorkerMsg {
     UpdateLatest,
     /// Проверка или загрузка обновления завершилась ошибкой.
     UpdateFailed(String),
+    /// Фоновое помещение в защищённую корзину закончилось. Строки — уже понятные ошибки.
+    SecureTrashFinished(Vec<String>),
 }
-
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct ThumbnailKey {
@@ -129,6 +131,12 @@ pub struct FileManagerApp {
     about_viewport_placed: bool,
     show_settings: bool,
     settings_viewport_placed: bool,
+    pub(crate) show_secure_trash: bool,
+    trash_selected: HashSet<String>,
+    trash_conflict: Option<String>,
+    trash_purge_ids: Option<Vec<String>>,
+    trash_empty_confirm: bool,
+    trash_notice: Option<String>,
     style_configured: bool,
     update_startup_signaled: bool,
     /// Update offer: (version, exe URL).
@@ -274,9 +282,7 @@ impl FileManagerApp {
             thread::spawn(move || {
                 if let Ok(r) = crate::core::update::check_latest() {
                     if crate::core::update::version_newer(env!("CARGO_PKG_VERSION"), &r.version) {
-                        let _ = msg_tx.send(WorkerMsg::UpdateFound {
-                            manifest: r,
-                        });
+                        let _ = msg_tx.send(WorkerMsg::UpdateFound { manifest: r });
                         ctx.request_repaint();
                     }
                 }
@@ -304,7 +310,10 @@ impl FileManagerApp {
                     } else {
                         fs::read_subdirs(&path)
                     };
-                    if msg_tx.send(WorkerMsg::TreeChildren { path, result }).is_err() {
+                    if msg_tx
+                        .send(WorkerMsg::TreeChildren { path, result })
+                        .is_err()
+                    {
                         break;
                     }
                     ctx.request_repaint();
@@ -361,6 +370,12 @@ impl FileManagerApp {
             about_viewport_placed: false,
             show_settings: false,
             settings_viewport_placed: false,
+            show_secure_trash: false,
+            trash_selected: HashSet::new(),
+            trash_conflict: None,
+            trash_purge_ids: None,
+            trash_empty_confirm: false,
+            trash_notice: None,
             style_configured: false,
             update_startup_signaled: false,
             pending_update: None,
@@ -400,7 +415,14 @@ impl FileManagerApp {
             wsl_distributions: Vec::new(),
             detached_tabs: HashMap::new(),
             tab_detach_error: None,
-            tabs: paths.into_iter().map(|p| { let mut t = Tab::new(p); t.pinned = pins.contains(&t.path); t }).collect(),
+            tabs: paths
+                .into_iter()
+                .map(|p| {
+                    let mut t = Tab::new(p);
+                    t.pinned = pins.contains(&t.path);
+                    t
+                })
+                .collect(),
             active,
             tree,
             system_bookmarks: crate::core::known_folders::system_bookmarks(),
@@ -507,20 +529,28 @@ impl FileManagerApp {
     fn drain_messages(&mut self, ctx: &egui::Context) {
         while let Ok(msg) = self.msg_rx.try_recv() {
             match msg {
-                WorkerMsg::Listing { tab_id, generation, result } => {
-                    let Some(tab) = super::tabs::listing_tab_index(&self.tabs, tab_id, generation) else {
+                WorkerMsg::Listing {
+                    tab_id,
+                    generation,
+                    result,
+                } => {
+                    let Some(tab) = super::tabs::listing_tab_index(&self.tabs, tab_id, generation)
+                    else {
                         continue;
                     };
                     match result {
                         Ok(entries) => {
-                            let pending_name =
-                                super::tabs::take_pending_selection(&mut self.pending_select, tab_id);
+                            let pending_name = super::tabs::take_pending_selection(
+                                &mut self.pending_select,
+                                tab_id,
+                            );
                             let t = &mut self.tabs[tab];
                             t.entries = entries;
                             t.status = ListStatus::Ready;
                             if let Some(name) = pending_name {
                                 if let Some(i) = t.entries.iter().position(|e| e.name == name) {
-                                    let key = crate::ui::tabs::SelectionKey::from_entry(&t.entries[i]);
+                                    let key =
+                                        crate::ui::tabs::SelectionKey::from_entry(&t.entries[i]);
                                     t.selection.insert(key.clone());
                                     t.cursor = i;
                                     t.anchor = Some(key);
@@ -653,9 +683,7 @@ impl FileManagerApp {
                     let Some(cancel) = self.thumbnail_jobs.remove(&key) else {
                         continue;
                     };
-                    if cancel.load(Ordering::Relaxed)
-                        || !self.thumbnail_visible.contains(&key)
-                    {
+                    if cancel.load(Ordering::Relaxed) || !self.thumbnail_visible.contains(&key) {
                         continue;
                     }
                     match result {
@@ -665,10 +693,7 @@ impl FileManagerApp {
                         }
                     }
                 }
-                WorkerMsg::ZipExtracted {
-                    generation,
-                    result,
-                } => {
+                WorkerMsg::ZipExtracted { generation, result } => {
                     if generation != self.zip_generation {
                         continue;
                     }
@@ -680,6 +705,15 @@ impl FileManagerApp {
                         }
                         Err(error) => self.zip_error_text(&error),
                     });
+                }
+                WorkerMsg::SecureTrashFinished(errors) => {
+                    self.trash_notice = if errors.is_empty() {
+                        Some(self.t("trash.moved").to_owned())
+                    } else {
+                        Some(errors.join("\n"))
+                    };
+                    let active = self.active;
+                    self.navigate_fresh(active, ctx);
                 }
                 WorkerMsg::ZipCreated {
                     generation,
@@ -913,10 +947,7 @@ fn is_zip_file(path: &Path) -> bool {
 
 fn persisted_tab_path(tab: &Tab) -> PathBuf {
     if tab.archive_prefix.is_some() {
-        tab.path
-            .parent()
-            .unwrap_or(&tab.path)
-            .to_path_buf()
+        tab.path.parent().unwrap_or(&tab.path).to_path_buf()
     } else {
         tab.path.clone()
     }
@@ -1026,6 +1057,7 @@ impl eframe::App for FileManagerApp {
         self.finish_thumbnail_frame();
         self.about_window(&ctx);
         self.settings_window(&ctx);
+        self.secure_trash_window(&ctx);
         self.props_window(&ctx);
         self.preview_window(&ctx);
         self.zip_status_window(&ctx);
@@ -1044,4 +1076,3 @@ impl eframe::App for FileManagerApp {
 
 #[cfg(test)]
 mod tests;
-

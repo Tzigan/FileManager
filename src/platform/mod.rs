@@ -102,8 +102,8 @@ impl DiskUsage {
         if self.total_bytes == 0 {
             return None;
         }
-        let percent = (used as u128 * 100 + self.total_bytes as u128 / 2)
-            / self.total_bytes as u128;
+        let percent =
+            (used as u128 * 100 + self.total_bytes as u128 / 2) / self.total_bytes as u128;
         Some(percent.min(100) as u8)
     }
 
@@ -121,12 +121,20 @@ impl DiskUsage {
 mod windows;
 
 #[cfg(windows)]
-pub use self::windows::{acquire_single_instance, create_zip_archive, decode_image, disk_usage, drives, extract_zip_all, extract_zip_file, extract_zip_folder, format_local_time, free_space, get_clipboard_files, get_clipboard_text, install_context_menu, launch_updater, notify_already_running, open_recycle_bin, open_terminal, pick_folder, pipe_listen, pipe_send, prepare_update_archive, read_zip_dir_cancellable, recycle_bin, replace_file, search_zip, set_attributes, set_clipboard_files, shell_open, signal_update_started, uninstall_context_menu, AcquireResult, SingleInstanceGuard};
+pub use self::windows::{
+    AcquireResult, SingleInstanceGuard, acquire_single_instance, create_zip_archive, decode_image,
+    disk_usage, drives, extract_zip_all, extract_zip_file, extract_zip_folder, format_local_time,
+    free_space, get_clipboard_files, get_clipboard_text, install_context_menu, launch_updater,
+    notify_already_running, open_recycle_bin, open_terminal, pick_folder, pipe_listen, pipe_send,
+    prepare_update_archive, read_zip_dir_cancellable, recycle_bin, replace_file, search_zip,
+    set_attributes, set_clipboard_files, shell_open, signal_update_started, uninstall_context_menu,
+    volume_id,
+};
 
 #[cfg(windows)]
 pub use self::windows::{
-    is_local_drive, is_wsl_path, read_wsl_dir, read_wsl_subdirs, wsl_distributions,
-    wsl_distribution_root,
+    is_local_drive, is_wsl_path, read_wsl_dir, read_wsl_subdirs, wsl_distribution_root,
+    wsl_distributions,
 };
 
 #[cfg(windows)]
@@ -259,7 +267,10 @@ mod stubs {
     pub fn disk_usage(_path: &std::path::Path) -> Option<super::DiskUsage> {
         None
     }
-    pub fn decode_image(_path: &std::path::Path, _max_dimension: u32) -> std::io::Result<super::DecodedImage> {
+    pub fn decode_image(
+        _path: &std::path::Path,
+        _max_dimension: u32,
+    ) -> std::io::Result<super::DecodedImage> {
         Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
             "image previews are supported only on Windows",
@@ -327,30 +338,65 @@ mod stubs {
     pub fn recycle_bin(paths: &[std::path::PathBuf]) -> std::io::Result<()> {
         for p in paths {
             let m = std::fs::metadata(p)?;
-            if m.is_dir() { std::fs::remove_dir_all(p)?; } else { std::fs::remove_file(p)?; }
+            if m.is_dir() {
+                std::fs::remove_dir_all(p)?;
+            } else {
+                std::fs::remove_file(p)?;
+            }
         }
         Ok(())
     }
-    pub fn replace_file(source: &std::path::Path, destination: &std::path::Path) -> std::io::Result<()> {
+    pub fn replace_file(
+        source: &std::path::Path,
+        destination: &std::path::Path,
+    ) -> std::io::Result<()> {
         std::fs::rename(source, destination)
     }
-    pub fn set_clipboard_files(_p: &[std::path::PathBuf]) -> std::io::Result<()> { Ok(()) }
-    pub fn get_clipboard_files() -> Vec<std::path::PathBuf> { Vec::new() }
-    pub fn get_clipboard_text() -> String { String::new() }
+    pub fn set_clipboard_files(_p: &[std::path::PathBuf]) -> std::io::Result<()> {
+        Ok(())
+    }
+    pub fn get_clipboard_files() -> Vec<std::path::PathBuf> {
+        Vec::new()
+    }
+    pub fn get_clipboard_text() -> String {
+        String::new()
+    }
     pub fn pipe_listen(_f: impl FnMut(std::path::PathBuf) + Send + 'static) {}
-    pub fn pipe_send(_p: &std::path::Path) -> std::io::Result<()> { Ok(()) }
-    pub fn install_context_menu(_e: &std::path::Path, _t: &str) -> std::io::Result<()> { Ok(()) }
-    pub fn uninstall_context_menu() -> std::io::Result<()> { Ok(()) }
-    pub fn shell_open(_p: &std::path::Path) -> std::io::Result<()> { Ok(()) }
-    pub fn pick_folder(_title: &str, _initial_dir: Option<&std::path::Path>) -> std::io::Result<Option<std::path::PathBuf>> {
+    pub fn pipe_send(_p: &std::path::Path) -> std::io::Result<()> {
+        Ok(())
+    }
+    pub fn install_context_menu(_e: &std::path::Path, _t: &str) -> std::io::Result<()> {
+        Ok(())
+    }
+    pub fn uninstall_context_menu() -> std::io::Result<()> {
+        Ok(())
+    }
+    pub fn shell_open(_p: &std::path::Path) -> std::io::Result<()> {
+        Ok(())
+    }
+    pub fn pick_folder(
+        _title: &str,
+        _initial_dir: Option<&std::path::Path>,
+    ) -> std::io::Result<Option<std::path::PathBuf>> {
         Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
             "folder selection is supported only on Windows",
         ))
     }
-    pub fn open_terminal(_p: &std::path::Path) -> std::io::Result<()> { Ok(()) }
-    pub fn open_recycle_bin() -> std::io::Result<()> { Ok(()) }
-    pub fn prepare_update_archive(_archive: &std::path::Path, _size: u64, _sha256: &str) -> anyhow::Result<std::path::PathBuf> {
+    pub fn open_terminal(_p: &std::path::Path) -> std::io::Result<()> {
+        Ok(())
+    }
+    pub fn open_recycle_bin() -> std::io::Result<()> {
+        Ok(())
+    }
+    pub fn volume_id(_path: &std::path::Path) -> Option<String> {
+        None
+    }
+    pub fn prepare_update_archive(
+        _archive: &std::path::Path,
+        _size: u64,
+        _sha256: &str,
+    ) -> anyhow::Result<std::path::PathBuf> {
         anyhow::bail!("automatic updates are supported only on Windows")
     }
     pub fn launch_updater(
@@ -362,17 +408,29 @@ mod stubs {
     ) -> anyhow::Result<()> {
         anyhow::bail!("automatic updates are supported only on Windows")
     }
-    pub fn signal_update_started() -> anyhow::Result<()> { Ok(()) }
-    pub fn set_attributes(_p: &std::path::Path, _r: bool, _h: bool) -> std::io::Result<()> { Ok(()) }
+    pub fn signal_update_started() -> anyhow::Result<()> {
+        Ok(())
+    }
+    pub fn set_attributes(_p: &std::path::Path, _r: bool, _h: bool) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 #[cfg(not(windows))]
-pub use stubs::{acquire_single_instance, create_zip_archive, decode_image, disk_usage, drives, extract_zip_all, extract_zip_file, extract_zip_folder, format_local_time, free_space, get_clipboard_files, get_clipboard_text, install_context_menu, launch_updater, notify_already_running, open_recycle_bin, open_terminal, pick_folder, pipe_listen, pipe_send, prepare_update_archive, read_zip_dir_cancellable, recycle_bin, replace_file, search_zip, set_attributes, set_clipboard_files, shell_open, signal_update_started, uninstall_context_menu, AcquireResult, SingleInstanceGuard};
+pub use stubs::{
+    AcquireResult, SingleInstanceGuard, acquire_single_instance, create_zip_archive, decode_image,
+    disk_usage, drives, extract_zip_all, extract_zip_file, extract_zip_folder, format_local_time,
+    free_space, get_clipboard_files, get_clipboard_text, install_context_menu, launch_updater,
+    notify_already_running, open_recycle_bin, open_terminal, pick_folder, pipe_listen, pipe_send,
+    prepare_update_archive, read_zip_dir_cancellable, recycle_bin, replace_file, search_zip,
+    set_attributes, set_clipboard_files, shell_open, signal_update_started, uninstall_context_menu,
+    volume_id,
+};
 
 #[cfg(not(windows))]
 pub use stubs::{
-    is_local_drive, is_wsl_path, read_wsl_dir, read_wsl_subdirs, wsl_distributions,
-    wsl_distribution_root,
+    is_local_drive, is_wsl_path, read_wsl_dir, read_wsl_subdirs, wsl_distribution_root,
+    wsl_distributions,
 };
 
 #[cfg(not(windows))]
@@ -392,7 +450,10 @@ mod zip_name_tests {
     #[test]
     fn normalizes_extension_and_rejects_invalid_archive_names() {
         assert_eq!(normalize_zip_archive_name("report").unwrap(), "report.zip");
-        assert_eq!(normalize_zip_archive_name("report.ZIP").unwrap(), "report.zip");
+        assert_eq!(
+            normalize_zip_archive_name("report.ZIP").unwrap(),
+            "report.zip"
+        );
         for name in ["", " ", "../report", "C:report", "CON", "bad?name"] {
             assert!(normalize_zip_archive_name(name).is_err(), "{name}");
         }

@@ -1,12 +1,12 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use crate::core::format::format_size;
 use crate::core::ops::{ConflictAction, ErrorAction, OpEvent, OpJob, OpKind, OpReply, OpStage};
-use crate::ui::tabs::SelectionKey;
 use crate::ui::FileManagerApp;
+use crate::ui::tabs::SelectionKey;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ClipboardCommand {
@@ -57,14 +57,29 @@ fn paths_for_selection(
 
 fn internal_paste_plan(clipboard: &Clipboard, dest: PathBuf) -> (OpKind, bool) {
     if clipboard.cut {
-        (OpKind::Move { sources: clipboard.paths.clone(), dest }, true)
+        (
+            OpKind::Move {
+                sources: clipboard.paths.clone(),
+                dest,
+            },
+            true,
+        )
     } else {
-        (OpKind::Copy { sources: clipboard.paths.clone(), dest }, false)
+        (
+            OpKind::Copy {
+                sources: clipboard.paths.clone(),
+                dest,
+            },
+            false,
+        )
     }
 }
 
 fn external_paste_plan(paths: Vec<PathBuf>, dest: PathBuf) -> Option<OpKind> {
-    (!paths.is_empty()).then_some(OpKind::Copy { sources: paths, dest })
+    (!paths.is_empty()).then_some(OpKind::Copy {
+        sources: paths,
+        dest,
+    })
 }
 
 fn delete_confirmation(paths: Vec<PathBuf>, permanent: bool) -> Option<(Vec<PathBuf>, bool)> {
@@ -78,7 +93,11 @@ enum DeleteDecision {
     Pending,
 }
 
-fn confirmed_delete(paths: Vec<PathBuf>, recycle: bool, decision: DeleteDecision) -> Option<OpKind> {
+fn confirmed_delete(
+    paths: Vec<PathBuf>,
+    recycle: bool,
+    decision: DeleteDecision,
+) -> Option<OpKind> {
     if decision != DeleteDecision::Confirm {
         return None;
     }
@@ -161,6 +180,7 @@ pub struct OpsUi {
     pub rename: Option<(PathBuf, String)>,
     pub create: Option<(bool, String)>, // (is_dir, name)
     pub delete_confirm: Option<(Vec<PathBuf>, bool)>, // (paths, recycle)
+    pub delete_ask: Option<Vec<PathBuf>>,
     pub conflict: Option<(u64, PathBuf, PathBuf)>,
     pub error_q: Option<(u64, PathBuf, String, bool)>,
     pub show_journal: bool,
@@ -239,7 +259,11 @@ impl FileManagerApp {
         // Internal clipboard first (tracks cut-vs-copy), then Explorer's.
         if let Some(cb) = self.ops_ui.clipboard.clone() {
             let dest = self.tabs[self.active].path.clone();
-            tracing::info!(count = cb.paths.len(), cut = cb.cut, "pasting internal file clipboard");
+            tracing::info!(
+                count = cb.paths.len(),
+                cut = cb.cut,
+                "pasting internal file clipboard"
+            );
             let (kind, clear_internal) = internal_paste_plan(&cb, dest);
             if matches!(kind, OpKind::Move { .. }) {
                 self.enqueue("ops.moving", kind);
@@ -295,7 +319,15 @@ impl FileManagerApp {
     pub(crate) fn drain_ops_events(&mut self, ctx: &egui::Context) {
         while let Ok(ev) = self.ops_evt.try_recv() {
             match ev {
-                OpEvent::Progress { id, stage, file, done_bytes, total_bytes, done_files, total_files } => {
+                OpEvent::Progress {
+                    id,
+                    stage,
+                    file,
+                    done_bytes,
+                    total_bytes,
+                    done_files,
+                    total_files,
+                } => {
                     if let Some(j) = self.ops_ui.jobs.iter_mut().find(|j| j.id == id) {
                         j.stage = stage;
                         j.file = file;
@@ -308,8 +340,15 @@ impl FileManagerApp {
                 OpEvent::AskConflict { id, src, dst } => {
                     self.ops_ui.conflict = Some((id, src, dst));
                 }
-                OpEvent::AskError { id, path, message, retryable } => {
-                    self.ops_ui.journal.push(format!("{}: {}", path.display(), message));
+                OpEvent::AskError {
+                    id,
+                    path,
+                    message,
+                    retryable,
+                } => {
+                    self.ops_ui
+                        .journal
+                        .push(format!("{}: {}", path.display(), message));
                     self.ops_ui.error_q = Some((id, path, message, retryable));
                 }
                 OpEvent::Done { id, failed } => {
@@ -399,6 +438,7 @@ impl FileManagerApp {
 
     pub(crate) fn ops_dialogs(&mut self, ctx: &egui::Context) {
         self.delete_dialog(ctx);
+        self.delete_ask_dialog(ctx);
         self.rename_dialog(ctx);
         self.create_dialog(ctx);
         self.conflict_dialog(ctx);
@@ -413,7 +453,11 @@ impl FileManagerApp {
         let title = self.t("dlg.delete_title").to_owned();
         let msg = format!(
             "{}: {}",
-            self.t(if recycle { "dlg.delete_msg_recycle" } else { "dlg.delete_msg" }),
+            self.t(if recycle {
+                "dlg.delete_msg_recycle"
+            } else {
+                "dlg.delete_msg"
+            }),
             paths.len()
         );
         let ok = self.t("dlg.ok").to_owned();
@@ -438,7 +482,10 @@ impl FileManagerApp {
         if decision == DeleteDecision::Pending {
             self.ops_ui.delete_confirm = Some((paths, recycle));
         } else if let Some(kind) = confirmed_delete(paths, recycle, decision) {
-            self.enqueue("ops.deleting", kind);
+            match kind {
+                OpKind::Recycle { sources } => self.dispatch_recycle(sources),
+                other => self.enqueue("ops.deleting", other),
+            }
         }
     }
 
@@ -484,7 +531,11 @@ impl FileManagerApp {
             return;
         };
         let title = self
-            .t(if is_dir { "dlg.create_folder_title" } else { "dlg.create_file_title" })
+            .t(if is_dir {
+                "dlg.create_folder_title"
+            } else {
+                "dlg.create_file_title"
+            })
             .to_owned();
         let ok = self.t("dlg.ok").to_owned();
         let cancel = self.t("dlg.cancel").to_owned();
@@ -504,11 +555,13 @@ impl FileManagerApp {
                         action = 2;
                     }
                 });
-        });
+            });
         if let Some((is_dir, _)) = self.ops_ui.create.take() {
             match action {
                 1 => {
-                    if let Some(kind) = creation_operation(&self.tabs[self.active].path, &name, is_dir) {
+                    if let Some(kind) =
+                        creation_operation(&self.tabs[self.active].path, &name, is_dir)
+                    {
                         self.enqueue("ops.creating", kind);
                     }
                 }
@@ -598,11 +651,13 @@ impl FileManagerApp {
             .open(&mut open)
             .resizable(true)
             .show(ctx, |ui| {
-                egui::ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
-                    for line in &items {
-                        ui.label(line);
-                    }
-                });
+                egui::ScrollArea::vertical()
+                    .max_height(300.0)
+                    .show(ui, |ui| {
+                        for line in &items {
+                            ui.label(line);
+                        }
+                    });
             });
         self.ops_ui.show_journal = open;
     }
@@ -640,7 +695,10 @@ mod tests {
         ]);
         assert_eq!(
             paths_for_selection(&entries, &selection),
-            vec![PathBuf::from("C:\\data\\a.txt"), PathBuf::from("C:\\data\\c.txt")]
+            vec![
+                PathBuf::from("C:\\data\\a.txt"),
+                PathBuf::from("C:\\data\\c.txt")
+            ]
         );
     }
 
@@ -705,8 +763,14 @@ mod tests {
         let a = PathBuf::from("C:\\a.txt");
         let selected = vec![a.clone()];
         assert!(delete_confirmation(Vec::new(), false).is_none());
-        assert_eq!(delete_confirmation(selected.clone(), false), Some((selected.clone(), true)));
-        assert_eq!(delete_confirmation(selected.clone(), true), Some((selected.clone(), false)));
+        assert_eq!(
+            delete_confirmation(selected.clone(), false),
+            Some((selected.clone(), true))
+        );
+        assert_eq!(
+            delete_confirmation(selected.clone(), true),
+            Some((selected.clone(), false))
+        );
 
         assert!(confirmed_delete(selected.clone(), true, DeleteDecision::Pending).is_none());
         assert!(confirmed_delete(selected.clone(), true, DeleteDecision::Cancel).is_none());
@@ -732,9 +796,14 @@ mod tests {
 
     #[test]
     fn create_dialog_accepts_trimmed_names_and_rejects_empty_or_windows_separators() {
-        assert_eq!(valid_creation_name("  отчёт 2026.txt  "), Some("отчёт 2026.txt"));
+        assert_eq!(
+            valid_creation_name("  отчёт 2026.txt  "),
+            Some("отчёт 2026.txt")
+        );
         assert_eq!(valid_creation_name("   "), None);
-        for invalid in ["a\\b", "a/b", "a:b", "a*b", "a?b", "a\"b", "a<b", "a>b", "a|b"] {
+        for invalid in [
+            "a\\b", "a/b", "a:b", "a*b", "a?b", "a\"b", "a<b", "a>b", "a|b",
+        ] {
             assert_eq!(valid_creation_name(invalid), None, "accepted {invalid:?}");
         }
         let parent = PathBuf::from("C:\\data");
@@ -758,7 +827,13 @@ mod tests {
         );
         assert_eq!(rename_target(&from, " old name.txt "), None);
         assert_eq!(rename_target(&from, "   "), None);
-        for invalid in [r"C:\outside.txt", r"..\outside.txt", "../outside.txt", ".", ".."] {
+        for invalid in [
+            r"C:\outside.txt",
+            r"..\outside.txt",
+            "../outside.txt",
+            ".",
+            "..",
+        ] {
             assert_eq!(rename_target(&from, invalid), None);
         }
         assert!(matches!(

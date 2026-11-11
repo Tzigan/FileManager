@@ -119,7 +119,7 @@ impl FileManagerApp {
         let builder = floating_dialog_viewport(
             ctx,
             title,
-            egui::vec2(560.0, 520.0),
+            egui::vec2(560.0, 760.0),
             self.settings_viewport_placed,
         );
         let mut close_requested = false;
@@ -247,6 +247,8 @@ impl FileManagerApp {
                             egui::RichText::new(self.t("settings.update_restart_delay_hint"))
                                 .weak(),
                         );
+                        self.delete_mode_settings(ui);
+                        ui.add_space(style::SPACE_MD);
                     });
                 });
             });
@@ -266,6 +268,98 @@ impl FileManagerApp {
         self.settings_viewport_placed = !close_requested;
         if close_requested {
             self.show_settings = false;
+        }
+    }
+
+    fn delete_mode_settings(&mut self, ui: &mut egui::Ui) {
+        use crate::core::settings::DeleteMode;
+
+        ui.add_space(style::SPACE_MD);
+        ui.separator();
+        ui.add_space(style::SPACE_SM);
+        ui.label(self.t("settings.delete_mode"));
+        let mut mode = self.store.settings.delete_mode;
+        let mut changed = false;
+        changed |= ui
+            .radio_value(
+                &mut mode,
+                DeleteMode::WindowsRecycle,
+                self.t("settings.delete_mode.windows"),
+            )
+            .changed();
+        changed |= ui
+            .radio_value(
+                &mut mode,
+                DeleteMode::SecureTrash,
+                self.t("settings.delete_mode.secure"),
+            )
+            .changed();
+        changed |= ui
+            .radio_value(
+                &mut mode,
+                DeleteMode::Ask,
+                self.t("settings.delete_mode.ask"),
+            )
+            .changed();
+        if changed {
+            self.store.settings.delete_mode = mode;
+            self.persist();
+        }
+        ui.add_space(style::SPACE_SM);
+        ui.label(egui::RichText::new(self.t("settings.delete_mode.hint")).weak());
+        ui.add_space(style::SPACE_SM);
+        let mut hash_mb = (self.store.settings.secure_trash_hash_max_bytes / (1024 * 1024)) as u32;
+        ui.label(self.t("settings.secure_trash_hash"));
+        if ui
+            .add(
+                egui::DragValue::new(&mut hash_mb)
+                    .range(0u32..=4096)
+                    .suffix(" MB"),
+            )
+            .changed()
+        {
+            self.store.settings.secure_trash_hash_max_bytes = u64::from(hash_mb) * 1024 * 1024;
+            self.persist();
+        }
+        ui.label(egui::RichText::new(self.t("settings.secure_trash_hash_hint")).weak());
+        ui.add_space(style::SPACE_SM);
+        let mut fallback = self.store.settings.secure_trash_allow_fallback;
+        if ui
+            .checkbox(&mut fallback, self.t("settings.secure_trash_fallback"))
+            .changed()
+        {
+            self.store.settings.secure_trash_allow_fallback = fallback;
+            self.persist();
+        }
+        ui.label(egui::RichText::new(self.t("settings.secure_trash_fallback_hint")).weak());
+        ui.add_space(style::SPACE_SM);
+        ui.label(self.t("settings.secure_trash_folders"));
+        ui.label(egui::RichText::new(self.t("settings.secure_trash_folders_hint")).weak());
+        let mut remove_at = None;
+        for (index, folder) in self.store.settings.secure_trash_folders.iter().enumerate() {
+            ui.horizontal(|ui| {
+                ui.label(folder.display().to_string());
+                if ui.button(self.t("settings.secure_trash_remove")).clicked() {
+                    remove_at = Some(index);
+                }
+            });
+        }
+        if let Some(index) = remove_at {
+            self.store.settings.secure_trash_folders.remove(index);
+            self.persist();
+        }
+        if ui
+            .button(self.t("settings.secure_trash_add_folder"))
+            .clicked()
+            && let Ok(Some(path)) =
+                crate::platform::pick_folder(&self.t("settings.secure_trash_add_folder"), None)
+            && !self.store.settings.secure_trash_folders.contains(&path)
+        {
+            self.store.settings.secure_trash_folders.push(path);
+            self.persist();
+        }
+        if ui.button(self.t("trash.open")).clicked() {
+            self.show_secure_trash = true;
         }
     }
 
