@@ -41,11 +41,7 @@ impl FileManagerApp {
         } else {
             egui::Sense::click()
         };
-        let bg_resp = ui.interact(
-            bg,
-            ui.scope_id().with("empty_list_area"),
-            bg_sense,
-        );
+        let bg_resp = ui.interact(bg, ui.scope_id().with("empty_list_area"), bg_sense);
         let mut group_drop: Option<(Vec<String>, String, bool)> = None;
         let mut marquee_rect = None;
         match self.store.settings.view_mode {
@@ -103,11 +99,7 @@ impl FileManagerApp {
                     );
                 }
                 let rows = self.build_rows();
-                let visual_order = self
-                    .store
-                    .settings
-                    .group_by_type
-                    .then(|| item_order(&rows));
+                let visual_order = self.store.settings.group_by_type.then(|| item_order(&rows));
                 let group_keys: Vec<String> = rows
                     .iter()
                     .filter_map(|row| match row {
@@ -232,7 +224,10 @@ mod tests {
         }
     }
 
-    fn keys_for(entries: &[FileEntry], indices: &[usize]) -> BTreeSet<crate::ui::tabs::SelectionKey> {
+    fn keys_for(
+        entries: &[FileEntry],
+        indices: &[usize],
+    ) -> BTreeSet<crate::ui::tabs::SelectionKey> {
         indices
             .iter()
             .map(|&index| crate::ui::tabs::SelectionKey::from_entry(&entries[index]))
@@ -404,8 +399,14 @@ mod tests {
                 })
                 .collect::<BTreeSet<_>>()
         };
-        assert_eq!(selected_names(&grouped), BTreeSet::from(["a.md".to_owned(), "z.txt".to_owned()]));
-        assert_eq!(selected_names(&flat), BTreeSet::from(["a.md".to_owned(), "z.txt".to_owned()]));
+        assert_eq!(
+            selected_names(&grouped),
+            BTreeSet::from(["a.md".to_owned(), "z.txt".to_owned()])
+        );
+        assert_eq!(
+            selected_names(&flat),
+            BTreeSet::from(["a.md".to_owned(), "z.txt".to_owned()])
+        );
     }
 
     #[test]
@@ -735,5 +736,49 @@ mod tests {
         assert_eq!(entry_at(&entries, 0).unwrap().name, "still valid.txt");
         assert!(entry_at(&entries, 4).is_none());
         assert!(entry_at(&[], 0).is_none());
+    }
+
+    #[test]
+    fn trash_rows_group_and_sort_by_card_fields_not_the_painted_suffix() {
+        let mut notes = entry("notes.txt", false, Some("txt"));
+        notes.size = Some(10);
+        notes.modified = Some(UNIX_EPOCH + Duration::from_secs(20));
+        let mut bigger = entry("bigger.txt", false, Some("txt"));
+        bigger.size = Some(30);
+        bigger.modified = Some(UNIX_EPOCH + Duration::from_secs(5));
+        let painted = format!("{} · Откуда: D:\\docs • повреждена", notes.name);
+        assert_ne!(notes.name, painted);
+        assert_eq!(notes.extension.as_deref(), Some("txt"));
+        let entries = vec![bigger.clone(), notes.clone()];
+        let rows = table_rows_sorted(&entries, true, &[], "Папка", "Файл", SortKey::Name, false);
+        let names: Vec<_> = item_order(&rows)
+            .into_iter()
+            .map(|index| entries[index].name.as_str())
+            .collect();
+        assert_eq!(names, vec!["bigger.txt", "notes.txt"]);
+        let by_size = table_rows_sorted(&entries, true, &[], "Папка", "Файл", SortKey::Size, true);
+        let sized: Vec<_> = item_order(&by_size)
+            .into_iter()
+            .map(|index| entries[index].size)
+            .collect();
+        assert_eq!(sized, vec![Some(30), Some(10)]);
+        let by_time = table_rows_sorted(
+            &entries,
+            true,
+            &[],
+            "Папка",
+            "Файл",
+            SortKey::Modified,
+            false,
+        );
+        let times: Vec<_> = item_order(&by_time)
+            .into_iter()
+            .map(|index| entries[index].modified)
+            .collect();
+        assert_eq!(times, vec![bigger.modified, notes.modified]);
+        assert!(rows.iter().any(|row| matches!(
+            row,
+            ListRow::Header { key, .. } if key == "ext:txt"
+        )));
     }
 }

@@ -288,6 +288,7 @@
   "trash.status.volume": "Volume unavailable",
   "trash.status.unidentified": "Volume not identified",
   "trash.col.deleted": "Deleted",
+  "trash.col.origin": "From",
   "trash.integrity.not_checked": "integrity was not checked",
   "trash.integrity.size": "only the size was checked, no checksum",
   "trash.err.not_found": "Trash item was not found",

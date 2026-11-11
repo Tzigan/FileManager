@@ -106,7 +106,9 @@ impl FileManagerApp {
         );
 
         if let Some(sx) = size_x {
-            let size_text = if entry.is_dir && !self.tabs[self.active].secure_trash {
+            // Как в обычной папке: у каталога колонка размера пустая.
+            // Сумма из карточки остаётся в подтверждении очистки.
+            let size_text = if entry.is_dir {
                 String::new()
             } else {
                 entry.size.map(format_size).unwrap_or_default()

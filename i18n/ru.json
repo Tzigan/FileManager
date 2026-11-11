@@ -290,6 +290,7 @@
   "trash.status.volume": "Том недоступен",
   "trash.status.unidentified": "Том не идентифицирован",
   "trash.col.deleted": "Удалено",
+  "trash.col.origin": "Откуда",
   "trash.integrity.not_checked": "целостность не проверялась",
   "trash.integrity.size": "сверен только размер, без контрольной суммы",
   "trash.err.not_found": "Объект в корзине не найден",
