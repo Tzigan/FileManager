@@ -1,4 +1,5 @@
 pub mod cli;
+pub mod entry_details;
 pub mod format;
 pub mod fs;
 pub mod history;

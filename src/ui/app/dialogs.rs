@@ -644,6 +644,51 @@ impl FileManagerApp {
         }
     }
 
+    /// Тяжёлые свойства читаются только для одного выбранного объекта или открытого окна.
+    /// Повторный кадр с тем же путём новый поток не запускает.
+    pub(super) fn sync_entry_details(&mut self, ctx: &egui::Context) {
+        let Some(path) = self.entry_details_subject() else {
+            self.entry_details_path = None;
+            self.entry_details = None;
+            self.entry_details_pending = false;
+            return;
+        };
+        if self.entry_details_path.as_ref() == Some(&path)
+            && (self.entry_details_pending || self.entry_details.is_some())
+        {
+            return;
+        }
+        self.entry_details_generation = self.entry_details_generation.wrapping_add(1);
+        let generation = self.entry_details_generation;
+        self.entry_details_path = Some(path.clone());
+        self.entry_details = None;
+        self.entry_details_pending = true;
+        let tx = self.msg_tx.clone();
+        let ctx = ctx.clone();
+        thread::spawn(move || {
+            let details = crate::platform::read_entry_details(&path);
+            let _ = tx.send(WorkerMsg::EntryDetails {
+                generation,
+                path,
+                details,
+            });
+            ctx.request_repaint();
+        });
+    }
+
+    fn entry_details_subject(&self) -> Option<PathBuf> {
+        if let Some(path) = &self.props_target {
+            return Some(path.clone());
+        }
+        let tab = self.tabs.get(self.active)?;
+        if tab.secure_trash || tab.archive_prefix.is_some() || tab.selection.len() != 1 {
+            return None;
+        }
+        let key = tab.selection.iter().next()?;
+        let entry = tab.entries.iter().find(|entry| key.matches(entry))?;
+        entry.archive_member.is_none().then(|| entry.path.clone())
+    }
+
     pub(super) fn act_props(&mut self) {
         let tab = &self.tabs[self.active];
         if tab.archive_prefix.is_some() {
@@ -728,6 +773,9 @@ impl FileManagerApp {
                             self.t("props.created"),
                             crate::platform::format_local_time(c, self.i18n.language())
                         ));
+                    }
+                    for (label, value) in self.heavy_detail_lines(&target) {
+                        ui.label(format!("{label}: {value}"));
                     }
                     ui.separator();
                     let mut ro = e.readonly;
