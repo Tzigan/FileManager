@@ -61,11 +61,20 @@ fn component_folded(component: std::path::Component<'_>) -> String {
     component.as_os_str().to_string_lossy().to_lowercase()
 }
 
-/// Та же `fs::canonicalize`, что и при восстановлении: на Windows раскрывает `..`,
-/// symlink и junction. Отдельной проверки побега здесь нет.
-/// Если путь не существует, не угадываем и не относим его к защищённой папке.
-fn canonical_existing(path: &Path) -> Option<PathBuf> {
-    fs::canonicalize(path).ok()
+/// Где лежит сам удаляемый объект, без разрешения финальной ссылки.
+///
+/// Полная `fs::canonicalize` всего пути раскрыла бы symlink или junction,
+/// и корзина выбиралась бы по цели ссылки, а не по папке, в которой ссылка стоит.
+/// Родитель канонизируется: `..`, junction и symlink в предках по-прежнему не обходят список.
+/// Восстановление здесь не участвует — там проверяется уже реальное место назначения.
+/// Нет родителя (корень тома) или родитель не канонизируется — `None`, папка не применяется.
+fn location_for_routing(path: &Path) -> Option<PathBuf> {
+    let name = path.file_name()?;
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())?;
+    let canonical_parent = fs::canonicalize(parent).ok()?;
+    Some(canonical_parent.join(name))
 }
 
 /// Закладка «Корзина» открывает корзину приложения, когда удаление может в неё попасть.
@@ -91,11 +100,14 @@ pub fn route_delete(
         };
     }
     let (forced, rest): (Vec<_>, Vec<_>) = paths.iter().cloned().partition(|path| {
-        let Some(path) = canonical_existing(path) else {
+        let Some(path) = location_for_routing(path) else {
             return false;
         };
         folders.iter().any(|folder| {
-            canonical_existing(folder).is_some_and(|folder| path_is_within_folder(&path, &folder))
+            // Папка из настройки канонизируется целиком: это корень правила, не удаляемый объект.
+            fs::canonicalize(folder)
+                .ok()
+                .is_some_and(|folder| path_is_within_folder(&path, &folder))
         })
     });
     match mode {
@@ -498,6 +510,7 @@ mod tests_v06 {
         assert!(routed.secure.is_empty());
         assert_eq!(routed.windows, vec![via_parent]);
 
+        // Файла ещё нет, но родитель Work существует: место объекта известно.
         let missing = work.join("gone.txt");
         let missing_route = route_delete(
             DeleteMode::WindowsRecycle,
@@ -505,7 +518,16 @@ mod tests_v06 {
             &[missing.clone()],
             &[work.clone()],
         );
-        assert!(missing_route.secure.is_empty());
+        assert_eq!(missing_route.secure, vec![missing]);
+        // Родителя нет — не угадываем и защищённую папку не применяем.
+        let missing_parent = work.join("absent").join("gone.txt");
+        let unknown = route_delete(
+            DeleteMode::WindowsRecycle,
+            false,
+            &[missing_parent.clone()],
+            &[work.clone()],
+        );
+        assert!(unknown.secure.is_empty());
 
         let inside = work.join("a.txt");
         fs::write(&inside, "a").unwrap();
@@ -530,7 +552,128 @@ mod tests_v06 {
             &[work],
         );
         assert_eq!(link_route.secure, vec![through_link]);
+        let _ = fs::remove_dir(&link);
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn reparse_object_is_classified_by_where_it_sits() {
+        let root_only = route_delete(
+            DeleteMode::WindowsRecycle,
+            false,
+            &[PathBuf::from(r"C:\")],
+            &[PathBuf::from(r"C:\Work")],
+        );
+        assert!(root_only.secure.is_empty());
+
+        let root = std::env::temp_dir().join(format!(
+            "fm-reparse-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let work = root.join("Work");
+        let other = root.join("Other");
+        fs::create_dir_all(&work).unwrap();
+        fs::create_dir_all(&other).unwrap();
+        fs::write(work.join("keep.txt"), "a").unwrap();
+        fs::write(other.join("keep.txt"), "b").unwrap();
+
+        let link_outside = other.join("to-work");
+        let link_inside = work.join("to-other");
+        assert!(
+            place_directory_reparse(&link_outside, &work),
+            "не удалось создать ссылку или точку соединения"
+        );
+        assert!(
+            place_directory_reparse(&link_inside, &other),
+            "не удалось создать ссылку или точку соединения"
+        );
+        let junction_outside = other.join("junction-to-work");
+        let junction_inside = work.join("junction-to-other");
+        assert!(place_junction(&junction_outside, &work));
+        assert!(place_junction(&junction_inside, &other));
+
+        let outside_route = route_delete(
+            DeleteMode::WindowsRecycle,
+            false,
+            &[link_outside.clone()],
+            &[work.clone()],
+        );
+        assert!(
+            outside_route.secure.is_empty(),
+            "ссылка в Other не должна считаться объектом внутри Work"
+        );
+
+        let inside_route = route_delete(
+            DeleteMode::WindowsRecycle,
+            false,
+            &[link_inside.clone()],
+            &[work.clone()],
+        );
+        assert_eq!(inside_route.secure, vec![link_inside.clone()]);
+
+        let junction_outside_route = route_delete(
+            DeleteMode::WindowsRecycle,
+            false,
+            &[junction_outside.clone()],
+            &[work.clone()],
+        );
+        assert!(junction_outside_route.secure.is_empty());
+        let junction_inside_route = route_delete(
+            DeleteMode::WindowsRecycle,
+            false,
+            &[junction_inside.clone()],
+            &[work.clone()],
+        );
+        assert_eq!(junction_inside_route.secure, vec![junction_inside.clone()]);
+
+        let plain = route_delete(
+            DeleteMode::WindowsRecycle,
+            false,
+            &[work.join("keep.txt"), other.join("keep.txt")],
+            &[work.clone()],
+        );
+        assert_eq!(plain.secure, vec![work.join("keep.txt")]);
+        assert_eq!(plain.windows, vec![other.join("keep.txt")]);
+
+        let _ = fs::remove_dir(&link_outside);
+        let _ = fs::remove_dir(&link_inside);
+        let _ = fs::remove_dir(&junction_outside);
+        let _ = fs::remove_dir(&junction_inside);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    fn place_junction(link: &Path, target: &Path) -> bool {
+        std::process::Command::new("cmd")
+            .args([
+                "/C",
+                "mklink",
+                "/J",
+                &link.to_string_lossy(),
+                &target.to_string_lossy(),
+            ])
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
+    fn place_directory_reparse(link: &Path, target: &Path) -> bool {
+        if std::os::windows::fs::symlink_dir(target, link).is_ok() {
+            return true;
+        }
+        // Без права на symbolic link точка соединения проверяет то же правило:
+        // финальный reparse point не разрешается.
+        std::process::Command::new("cmd")
+            .args([
+                "/C",
+                "mklink",
+                "/J",
+                &link.to_string_lossy(),
+                &target.to_string_lossy(),
+            ])
+            .status()
+            .is_ok_and(|status| status.success())
     }
 
     #[test]
