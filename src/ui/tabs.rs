@@ -1,7 +1,7 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::core::fs::{FileEntry, SortKey};
@@ -166,6 +166,10 @@ pub struct Tab {
     pub cancel: Arc<AtomicBool>,
     pub error: Option<String>,
     pub search: SearchState,
+    /// Вкладка показывает карточки корзины, а не каталог хранения.
+    pub secure_trash: bool,
+    /// id карточки → «откуда удалено · статус» для подписи строки.
+    pub trash_notes: HashMap<String, String>,
 }
 
 impl Tab {
@@ -191,11 +195,16 @@ impl Tab {
             cancel: Arc::new(AtomicBool::new(false)),
             error: None,
             search: SearchState::default(),
+            secure_trash: false,
+            trash_notes: HashMap::new(),
         }
     }
 
     /// Tab caption: the folder name, or the full path for drive roots.
     pub fn title(&self) -> String {
+        if self.secure_trash {
+            return self.address_input.clone();
+        }
         self.path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -215,6 +224,14 @@ impl Tab {
 }
 
 /// Opens a folder as a new tab and returns its index.
+pub(crate) fn retain_existing_selection(
+    selection: &mut BTreeSet<SelectionKey>,
+    entries: &[FileEntry],
+) {
+    let live: BTreeSet<_> = entries.iter().map(SelectionKey::from_entry).collect();
+    selection.retain(|key| live.contains(key));
+}
+
 pub(crate) fn append_tab(tabs: &mut Vec<Tab>, path: PathBuf) -> usize {
     let index = tabs.len();
     tabs.push(Tab::new(path));
@@ -226,7 +243,10 @@ pub(crate) fn listing_tab_index(tabs: &[Tab], id: u64, generation: u64) -> Optio
         .position(|tab| tab.id == id && tab.generation == generation)
 }
 
-pub(crate) fn take_pending_selection(pending: &mut Option<(u64, String)>, tab_id: u64) -> Option<String> {
+pub(crate) fn take_pending_selection(
+    pending: &mut Option<(u64, String)>,
+    tab_id: u64,
+) -> Option<String> {
     if pending.as_ref().is_some_and(|(id, _)| *id == tab_id) {
         pending.take().map(|(_, name)| name)
     } else {
@@ -240,8 +260,13 @@ pub(crate) fn close_tab_state(tabs: &mut Vec<Tab>, active: usize, index: usize) 
     if tabs.len() <= 1 || index >= tabs.len() || tabs[index].pinned {
         return None;
     }
-    tabs[index].cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-    tabs[index].search.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+    tabs[index]
+        .cancel
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    tabs[index]
+        .search
+        .cancel
+        .store(true, std::sync::atomic::Ordering::Relaxed);
     tabs.remove(index);
     Some(if index < active {
         active - 1
@@ -260,8 +285,13 @@ pub(crate) fn close_other_tabs_state(tabs: &mut Vec<Tab>, index: usize) -> Optio
     while i > 0 {
         i -= 1;
         if i != index && !tabs[i].pinned {
-            tabs[i].cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-            tabs[i].search.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            tabs[i]
+                .cancel
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            tabs[i]
+                .search
+                .cancel
+                .store(true, std::sync::atomic::Ordering::Relaxed);
             tabs.remove(i);
         }
     }
@@ -270,12 +300,20 @@ pub(crate) fn close_other_tabs_state(tabs: &mut Vec<Tab>, index: usize) -> Optio
 
 /// Range (lo, hi) between anchor and target (Explorer shift semantics).
 pub(crate) fn range_from(anchor: usize, target: usize) -> (usize, usize) {
-    if anchor <= target { (anchor, target) } else { (target, anchor) }
+    if anchor <= target {
+        (anchor, target)
+    } else {
+        (target, anchor)
+    }
 }
 
 /// Move an item to a drop slot in the original list (`0..=len`).
 /// Returns its final index; invalid slots leave the list untouched.
-pub(crate) fn move_to_drop_slot<T>(items: &mut Vec<T>, source: usize, slot: usize) -> Option<usize> {
+pub(crate) fn move_to_drop_slot<T>(
+    items: &mut Vec<T>,
+    source: usize,
+    slot: usize,
+) -> Option<usize> {
     if source >= items.len() || slot > items.len() {
         return None;
     }
@@ -360,10 +398,7 @@ pub(crate) fn apply_click(
     index
 }
 
-pub(crate) fn select_all_entries(
-    selection: &mut BTreeSet<SelectionKey>,
-    entries: &[FileEntry],
-) {
+pub(crate) fn select_all_entries(selection: &mut BTreeSet<SelectionKey>, entries: &[FileEntry]) {
     selection.extend(entries.iter().map(SelectionKey::from_entry));
 }
 
@@ -403,11 +438,9 @@ fn visual_position_for_key(
     key: &SelectionKey,
 ) -> Option<usize> {
     if let Some(order) = visual_order {
-        order.iter().position(|&index| {
-            entries
-                .get(index)
-                .is_some_and(|entry| key.matches(entry))
-        })
+        order
+            .iter()
+            .position(|&index| entries.get(index).is_some_and(|entry| key.matches(entry)))
     } else {
         entries.iter().position(|entry| key.matches(entry))
     }
@@ -431,8 +464,9 @@ pub(crate) fn apply_cursor_move(
         if anchor.is_none() {
             *anchor = entries.get(current).map(SelectionKey::from_entry);
         }
-        let anchor_position =
-            anchor.as_ref().and_then(|key| visual_position_for_key(entries, visual_order, key));
+        let anchor_position = anchor
+            .as_ref()
+            .and_then(|key| visual_position_for_key(entries, visual_order, key));
         if let Some(anchor_position) = anchor_position {
             let (lo, hi) = range_from(anchor_position, target_position);
             selection.clear();
@@ -507,15 +541,7 @@ mod tests {
         let entries: Vec<_> = (0..8).map(entry).collect();
         let (mut selection, mut anchor) = (BTreeSet::new(), None);
         assert_eq!(
-            apply_click(
-                &mut selection,
-                &mut anchor,
-                &entries,
-                None,
-                3,
-                false,
-                false,
-            ),
+            apply_click(&mut selection, &mut anchor, &entries, None, 3, false, false,),
             3
         );
         assert_eq!(selection, keys_for(&entries, &[3]));
@@ -526,34 +552,10 @@ mod tests {
     fn ctrl_click_toggles() {
         let entries: Vec<_> = (0..8).map(entry).collect();
         let (mut selection, mut anchor) = (BTreeSet::new(), None);
-        apply_click(
-            &mut selection,
-            &mut anchor,
-            &entries,
-            None,
-            1,
-            false,
-            false,
-        );
-        apply_click(
-            &mut selection,
-            &mut anchor,
-            &entries,
-            None,
-            5,
-            true,
-            false,
-        );
+        apply_click(&mut selection, &mut anchor, &entries, None, 1, false, false);
+        apply_click(&mut selection, &mut anchor, &entries, None, 5, true, false);
         assert_eq!(selection, keys_for(&entries, &[1, 5]));
-        apply_click(
-            &mut selection,
-            &mut anchor,
-            &entries,
-            None,
-            5,
-            true,
-            false,
-        );
+        apply_click(&mut selection, &mut anchor, &entries, None, 5, true, false);
         assert_eq!(selection, keys_for(&entries, &[1]));
     }
 
@@ -746,7 +748,10 @@ mod tests {
         assert_eq!(close_tab_state(&mut one, 0, 0), None);
         assert_eq!(one.len(), 1);
 
-        let mut pinned = vec![Tab::new(PathBuf::from("C:\\pin")), Tab::new(PathBuf::from("C:\\other"))];
+        let mut pinned = vec![
+            Tab::new(PathBuf::from("C:\\pin")),
+            Tab::new(PathBuf::from("C:\\other")),
+        ];
         pinned[0].pinned = true;
         let cancel = pinned[0].cancel.clone();
         assert_eq!(close_tab_state(&mut pinned, 1, 0), None);
@@ -797,7 +802,10 @@ mod tests {
         let mut pending = Some((41, "wanted.txt".to_owned()));
         assert_eq!(take_pending_selection(&mut pending, 12), None);
         assert_eq!(pending, Some((41, "wanted.txt".to_owned())));
-        assert_eq!(take_pending_selection(&mut pending, 41), Some("wanted.txt".to_owned()));
+        assert_eq!(
+            take_pending_selection(&mut pending, 41),
+            Some("wanted.txt".to_owned())
+        );
         assert_eq!(pending, None);
     }
 
@@ -870,5 +878,20 @@ mod tests {
             None
         );
         assert_eq!(selection, keys_for(&entries, &[2]));
+    }
+
+    #[test]
+    fn trash_selection_keeps_surviving_ids_after_refresh() {
+        let mut kept = entry(1);
+        kept.archive_member = Some("keep".into());
+        kept.name = "note.txt".into();
+        let mut gone = entry(2);
+        gone.archive_member = Some("gone".into());
+        let mut selection = BTreeSet::new();
+        selection.insert(SelectionKey::from_entry(&kept));
+        selection.insert(SelectionKey::from_entry(&gone));
+        retain_existing_selection(&mut selection, &[kept.clone()]);
+        assert_eq!(selection, BTreeSet::from([SelectionKey::from_entry(&kept)]));
+        assert_ne!(kept.name, kept.path.display().to_string());
     }
 }

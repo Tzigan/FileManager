@@ -179,6 +179,7 @@ pub(crate) fn paint_system_bookmark_icon(
 ) {
     match kind {
         SystemBookmarkKind::RecycleBin => paint_recycle_bin_icon(painter, bounds, accent),
+        SystemBookmarkKind::SecureTrash => paint_secure_trash_icon(painter, bounds, accent),
         SystemBookmarkKind::Downloads => paint_download_icon(painter, bounds, accent),
         SystemBookmarkKind::Desktop => paint_desktop_icon(painter, bounds, accent),
         SystemBookmarkKind::Documents => {
@@ -204,17 +205,8 @@ fn paint_desktop_icon(painter: &Painter, bounds: Rect, color: Color32) {
         pos2(bounds.left() + width * 0.12, bounds.top() + height * 0.12),
         pos2(bounds.right() - width * 0.12, bounds.top() + height * 0.68),
     );
-    painter.rect_filled(
-        screen,
-        style::RADIUS_ICON_FINE,
-        color.gamma_multiply(0.16),
-    );
-    painter.rect_stroke(
-        screen,
-        style::RADIUS_ICON_FINE,
-        stroke,
-        StrokeKind::Inside,
-    );
+    painter.rect_filled(screen, style::RADIUS_ICON_FINE, color.gamma_multiply(0.16));
+    painter.rect_stroke(screen, style::RADIUS_ICON_FINE, stroke, StrokeKind::Inside);
     let center_x = screen.center().x;
     painter.line_segment(
         [
@@ -225,8 +217,14 @@ fn paint_desktop_icon(painter: &Painter, bounds: Rect, color: Color32) {
     );
     painter.line_segment(
         [
-            pos2(bounds.left() + width * 0.30, bounds.bottom() - height * 0.12),
-            pos2(bounds.right() - width * 0.30, bounds.bottom() - height * 0.12),
+            pos2(
+                bounds.left() + width * 0.30,
+                bounds.bottom() - height * 0.12,
+            ),
+            pos2(
+                bounds.right() - width * 0.30,
+                bounds.bottom() - height * 0.12,
+            ),
         ],
         stroke,
     );
@@ -239,10 +237,7 @@ fn paint_download_icon(painter: &Painter, bounds: Rect, color: Color32) {
     let center_x = bounds.center().x;
     let arrow_tip = pos2(center_x, bounds.top() + height * 0.62);
     painter.line_segment(
-        [
-            pos2(center_x, bounds.top() + height * 0.12),
-            arrow_tip,
-        ],
+        [pos2(center_x, bounds.top() + height * 0.12), arrow_tip],
         stroke,
     );
     painter.line_segment(
@@ -283,25 +278,51 @@ fn paint_download_icon(painter: &Painter, bounds: Rect, color: Color32) {
     );
 }
 
+fn paint_secure_trash_icon(painter: &Painter, bounds: Rect, color: Color32) {
+    let stroke = Stroke::new((bounds.width().min(bounds.height()) * 0.08).max(1.0), color);
+    let body = Rect::from_min_max(
+        pos2(
+            bounds.left() + bounds.width() * 0.18,
+            bounds.top() + bounds.height() * 0.28,
+        ),
+        pos2(
+            bounds.right() - bounds.width() * 0.18,
+            bounds.bottom() - bounds.height() * 0.12,
+        ),
+    );
+    painter.rect_stroke(body, 2.0, stroke, egui::StrokeKind::Inside);
+    painter.line_segment(
+        [
+            pos2(body.left() + body.width() * 0.2, body.center().y),
+            pos2(body.center().x, body.bottom() - body.height() * 0.28),
+        ],
+        stroke,
+    );
+    painter.line_segment(
+        [
+            pos2(body.center().x, body.bottom() - body.height() * 0.28),
+            pos2(
+                body.right() - body.width() * 0.18,
+                body.top() + body.height() * 0.28,
+            ),
+        ],
+        stroke,
+    );
+}
+
 fn paint_recycle_bin_icon(painter: &Painter, bounds: Rect, color: Color32) {
     let width = bounds.width();
     let height = bounds.height();
     let stroke = Stroke::new((width.min(height) * 0.07).max(1.0), color);
     let body = Rect::from_min_max(
         pos2(bounds.left() + width * 0.24, bounds.top() + height * 0.30),
-        pos2(bounds.right() - width * 0.22, bounds.bottom() - height * 0.10),
+        pos2(
+            bounds.right() - width * 0.22,
+            bounds.bottom() - height * 0.10,
+        ),
     );
-    painter.rect_filled(
-        body,
-        style::RADIUS_ICON_FINE,
-        color.gamma_multiply(0.12),
-    );
-    painter.rect_stroke(
-        body,
-        style::RADIUS_ICON_FINE,
-        stroke,
-        StrokeKind::Inside,
-    );
+    painter.rect_filled(body, style::RADIUS_ICON_FINE, color.gamma_multiply(0.12));
+    painter.rect_stroke(body, style::RADIUS_ICON_FINE, stroke, StrokeKind::Inside);
     let lid_y = bounds.top() + height * 0.23;
     painter.line_segment(
         [
@@ -312,8 +333,14 @@ fn paint_recycle_bin_icon(painter: &Painter, bounds: Rect, color: Color32) {
     );
     painter.line_segment(
         [
-            pos2(bounds.center().x - width * 0.12, bounds.top() + height * 0.14),
-            pos2(bounds.center().x + width * 0.12, bounds.top() + height * 0.14),
+            pos2(
+                bounds.center().x - width * 0.12,
+                bounds.top() + height * 0.14,
+            ),
+            pos2(
+                bounds.center().x + width * 0.12,
+                bounds.top() + height * 0.14,
+            ),
         ],
         stroke,
     );

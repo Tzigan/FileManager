@@ -136,8 +136,8 @@ pub struct FileManagerApp {
     pub(crate) show_secure_trash: bool,
     trash_selected: HashSet<String>,
     trash_conflict: Option<String>,
-    trash_purge_ids: Option<Vec<String>>,
-    trash_empty_confirm: bool,
+    pub(crate) trash_purge_ids: Option<Vec<String>>,
+    pub(crate) trash_empty_confirm: bool,
     trash_notice: Option<String>,
     style_configured: bool,
     update_startup_signaled: bool,
@@ -889,6 +889,8 @@ impl FileManagerApp {
                     ui.label(self.t(status).to_owned());
                 } else if no_results {
                     ui.label(self.t("search.no_results").to_owned());
+                } else if self.tabs[self.active].secure_trash {
+                    ui.label(self.t("trash.empty_list").to_owned());
                 } else {
                     ui.label(self.t("folder.empty").to_owned());
                 }
@@ -1061,6 +1063,7 @@ impl eframe::App for FileManagerApp {
         self.about_window(&ctx);
         self.settings_window(&ctx);
         self.secure_trash_window(&ctx);
+        self.trash_confirm_windows(&ctx);
         self.props_window(&ctx);
         self.preview_window(&ctx);
         self.zip_status_window(&ctx);

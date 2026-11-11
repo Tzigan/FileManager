@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SystemBookmarkKind {
     RecycleBin,
+    /// Корзина приложения. Всегда открывается как вкладка со списком карточек.
+    SecureTrash,
     Downloads,
     Desktop,
     Documents,
@@ -15,6 +17,7 @@ impl SystemBookmarkKind {
     pub fn label_key(self) -> &'static str {
         match self {
             Self::RecycleBin => "bookmark.recycle_bin",
+            Self::SecureTrash => "bookmark.secure_trash",
             Self::Downloads => "bookmark.downloads",
             Self::Desktop => "bookmark.desktop",
             Self::Documents => "bookmark.documents",
@@ -29,6 +32,8 @@ impl SystemBookmarkKind {
 pub enum SystemBookmarkTarget {
     Folder(PathBuf),
     RecycleBin,
+    /// Не папка хранения. Вкладка читает карточки, а не readdir.
+    SecureTrash,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -47,6 +52,10 @@ pub fn system_bookmarks() -> Vec<SystemBookmark> {
         kind: SystemBookmarkKind::RecycleBin,
         target: SystemBookmarkTarget::RecycleBin,
     });
+    bookmarks.push(SystemBookmark {
+        kind: SystemBookmarkKind::SecureTrash,
+        target: SystemBookmarkTarget::SecureTrash,
+    });
 
     let Some(dirs) = directories::UserDirs::new() else {
         return bookmarks;
@@ -64,6 +73,12 @@ pub fn system_bookmarks() -> Vec<SystemBookmark> {
         }
     }
     bookmarks
+}
+
+/// Защищённая корзина всегда открывается новой вкладкой. Остальные закладки
+/// слушаются клика: текущая вкладка или новая.
+pub fn bookmark_forces_new_tab(target: &SystemBookmarkTarget) -> bool {
+    matches!(target, SystemBookmarkTarget::SecureTrash)
 }
 
 fn folder_bookmark(kind: SystemBookmarkKind, path: Option<&Path>) -> Option<SystemBookmark> {
@@ -103,5 +118,20 @@ mod tests {
             bookmark.kind == SystemBookmarkKind::RecycleBin
                 && bookmark.target == SystemBookmarkTarget::RecycleBin
         }));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn secure_trash_bookmark_is_its_own_target() {
+        assert!(system_bookmarks().iter().any(|bookmark| {
+            bookmark.kind == SystemBookmarkKind::SecureTrash
+                && bookmark.target == SystemBookmarkTarget::SecureTrash
+        }));
+        assert_ne!(
+            SystemBookmarkKind::SecureTrash.label_key(),
+            SystemBookmarkKind::RecycleBin.label_key()
+        );
+        assert!(bookmark_forces_new_tab(&SystemBookmarkTarget::SecureTrash));
+        assert!(!bookmark_forces_new_tab(&SystemBookmarkTarget::RecycleBin));
     }
 }
