@@ -258,6 +258,7 @@ impl FileManagerApp {
                                         SettingsCategory::Trash => self.delete_mode_settings(ui),
                                         SettingsCategory::Updates => self.settings_updates(ui),
                                     }
+                                    // Снизу тот же отступ, что и в начале страницы, чтобы поле не липло к рамке.
                                     ui.add_space(style::SPACE_MD);
                                 });
                         },
