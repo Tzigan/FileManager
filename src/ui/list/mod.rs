@@ -785,7 +785,7 @@ mod tests {
     #[test]
     fn grouped_visual_order_is_rebuilt_from_cached_entries() {
         let mut cache = crate::core::dir_cache::DirCache::new(4);
-        let key = PathBuf::from(r"C:\grouped-cache");
+        let key = crate::core::dir_cache::CacheKey::new(r"C:\grouped-cache", "TEST");
         let entries = vec![
             entry("notes.txt", false, Some("txt")),
             entry("Folder", true, None),

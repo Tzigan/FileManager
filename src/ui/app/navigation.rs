@@ -174,19 +174,18 @@ impl FileManagerApp {
             archive_prefix.is_some(),
             crate::platform::is_wsl_path(&path),
         );
-        let cache_key = cacheable
-            .then(|| crate::core::dir_cache::DirCache::canonical_key(&path))
-            .flatten();
         self.dir_cache
             .set_limit(self.store.settings.dir_cache_entries);
-        if use_cache {
-            if let Some(key) = cache_key.clone() {
-                if let Some(entries) = self.dir_cache.get(&key) {
-                    self.finish_listing(tab, entries, show_hidden, sort_key, sort_desc);
-                    return;
-                }
+        if use_cache && cacheable {
+            // Нет канонического пути или тома — это промах, а не старая запись.
+            if let Some(entries) = self.dir_cache.lookup(&path) {
+                self.finish_listing(tab, entries, show_hidden, sort_key, sort_desc);
+                return;
             }
         }
+        let cache_key = cacheable
+            .then(|| crate::core::dir_cache::DirCache::cache_key(&path))
+            .flatten();
         let cache_generation = cache_key
             .as_ref()
             .map(|key| self.dir_cache.begin(key))
