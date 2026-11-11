@@ -2,6 +2,50 @@
 
 use super::*;
 
+pub(super) struct PreviewState {
+    pub(super) target: Option<PathBuf>,
+    pub(super) text: Option<TextPreview>,
+    pub(super) image: Option<egui::TextureHandle>,
+    pub(super) image_dimensions: Option<(u32, u32)>,
+    pub(super) error: Option<String>,
+    pub(super) loading: bool,
+    pub(super) viewport_placed: bool,
+    pub(super) generation: u64,
+    pub(super) cancel: Arc<AtomicBool>,
+}
+
+impl Default for PreviewState {
+    fn default() -> Self {
+        Self {
+            target: None,
+            text: None,
+            image: None,
+            image_dimensions: None,
+            error: None,
+            loading: false,
+            viewport_placed: false,
+            generation: 0,
+            cancel: Arc::new(AtomicBool::new(false)),
+        }
+    }
+}
+
+impl PreviewState {
+    pub(super) fn clear(&mut self) {
+        self.cancel.store(true, Ordering::Relaxed);
+        self.cancel = Arc::new(AtomicBool::new(false));
+        self.generation = self.generation.wrapping_add(1);
+        self.target = None;
+        self.text = None;
+        self.image = None;
+        self.image_dimensions = None;
+        self.error = None;
+        self.loading = false;
+        self.viewport_placed = false;
+    }
+}
+
+
 impl FileManagerApp {
     pub(crate) fn open_preview(&mut self, path: PathBuf, ctx: &egui::Context) {
         if !crate::core::preview::supports_preview(&path) {
