@@ -117,6 +117,8 @@ pub(crate) fn map_entry(item: &fs::DirEntry) -> Option<FileEntry> {
     // metadata() follows symlinks; on Windows it reuses the find data
     // already fetched by the directory enumeration, so it is cheap.
     let meta = item.metadata().ok();
+    // Размер на диске, дата доступа, владелец и список доступа здесь не читаются:
+    // это отдельные запросы, их делает панель свойств для одного объекта.
     // Скрытый и системный атрибуты извлекаем из уже полученной метаинформации.
     let (hidden, system) = visibility_attributes(item, meta.as_ref());
 
@@ -396,6 +398,21 @@ mod tests_v02 {
         let _ = stdfs::remove_dir_all(&d);
         stdfs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn listing_records_logical_size_without_allocated_size() {
+        let d = tmp("logical");
+        stdfs::write(d.join("note.txt"), b"hi").unwrap();
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let entries = read_dir(&d, &cancel).unwrap();
+        let note = entries
+            .iter()
+            .find(|entry| entry.name == "note.txt")
+            .unwrap();
+        assert_eq!(note.size, Some(2));
+        assert_eq!(listing_extension(false, &note.path).as_deref(), Some("txt"));
+        stdfs::remove_dir_all(&d).ok();
     }
 
     #[test]

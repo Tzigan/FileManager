@@ -2,19 +2,15 @@ use std::collections::HashSet;
 
 use crate::core::format::format_size;
 use crate::platform::format_local_time;
-use crate::ui::tabs::SelectionKey;
 use crate::ui::FileManagerApp;
+use crate::ui::tabs::SelectionKey;
 
 impl FileManagerApp {
     /// Right-side properties panel (~380 px): details of the selected
     /// entry, a multi-selection summary, or the current folder.
     pub(crate) fn props_panel(&self, ui: &mut egui::Ui) {
         let tab = &self.tabs[self.active];
-        let selected_keys: HashSet<_> = tab
-            .selection
-            .iter()
-            .map(SelectionKey::borrowed)
-            .collect();
+        let selected_keys: HashSet<_> = tab.selection.iter().map(SelectionKey::borrowed).collect();
         let selected: Vec<_> = tab
             .entries
             .iter()
@@ -33,13 +29,19 @@ impl FileManagerApp {
     fn props_folder_info(&self, ui: &mut egui::Ui) {
         let (name, path, count) = {
             let tab = &self.tabs[self.active];
-            (tab.title(), tab.path.display().to_string(), tab.entries.len())
+            (
+                tab.title(),
+                tab.path.display().to_string(),
+                tab.entries.len(),
+            )
         };
-        egui::Grid::new("props_folder").num_columns(2).show(ui, |ui| {
-            self.prop_row(ui, "props.name", &name);
-            self.prop_row(ui, "props.location", &path);
-            self.prop_row(ui, "status.items", &count.to_string());
-        });
+        egui::Grid::new("props_folder")
+            .num_columns(2)
+            .show(ui, |ui| {
+                self.prop_row(ui, "props.name", &name);
+                self.prop_row(ui, "props.location", &path);
+                self.prop_row(ui, "status.items", &count.to_string());
+            });
     }
 
     fn props_single(&self, ui: &mut egui::Ui, entry: &crate::core::fs::FileEntry) {
@@ -76,35 +78,109 @@ impl FileManagerApp {
         }
         let attrs = attrs.join(", ");
 
-        egui::Grid::new("props_single").num_columns(2).show(ui, |ui| {
-            self.prop_row(ui, "props.name", &name);
-            self.prop_row(ui, "props.location", &location);
-            self.prop_row(ui, "props.type", &type_text);
-            if !entry.is_dir {
-                self.prop_row(ui, "props.size", &size);
-            }
-            self.prop_row(ui, "props.created", &created);
-            self.prop_row(ui, "props.modified", &modified);
-            if !attrs.is_empty() {
-                self.prop_row(ui, "props.attributes", &attrs);
-            }
-        });
+        egui::Grid::new("props_single")
+            .num_columns(2)
+            .show(ui, |ui| {
+                self.prop_row(ui, "props.name", &name);
+                self.prop_row(ui, "props.location", &location);
+                self.prop_row(ui, "props.type", &type_text);
+                if !entry.is_dir {
+                    self.prop_row(ui, "props.size", &size);
+                }
+                self.prop_row(ui, "props.created", &created);
+                self.prop_row(ui, "props.modified", &modified);
+                for (label, value) in self.heavy_detail_lines(&entry.path) {
+                    self.prop_row_text(ui, &label, &value);
+                }
+                if !attrs.is_empty() {
+                    self.prop_row(ui, "props.attributes", &attrs);
+                }
+            });
     }
 
-    fn props_multi(&self, ui: &mut egui::Ui, count: usize, selected: &[&crate::core::fs::FileEntry]) {
-        let total: u64 = selected
-            .iter()
-            .filter_map(|entry| entry.size)
-            .sum();
-        egui::Grid::new("props_multi").num_columns(2).show(ui, |ui| {
-            self.prop_row(ui, "props.selected_count", &count.to_string());
-            self.prop_row(ui, "props.size", &format_size(total));
-        });
+    fn props_multi(
+        &self,
+        ui: &mut egui::Ui,
+        count: usize,
+        selected: &[&crate::core::fs::FileEntry],
+    ) {
+        let total: u64 = selected.iter().filter_map(|entry| entry.size).sum();
+        egui::Grid::new("props_multi")
+            .num_columns(2)
+            .show(ui, |ui| {
+                self.prop_row(ui, "props.selected_count", &count.to_string());
+                self.prop_row(ui, "props.size", &format_size(total));
+            });
     }
 
     fn prop_row(&self, ui: &mut egui::Ui, key: &str, value: &str) {
-        ui.label(self.t(key).to_owned());
-        ui.label(value);
+        self.prop_row_text(ui, self.t(key), value);
+    }
+
+    fn prop_row_text(&self, ui: &mut egui::Ui, label: &str, value: &str) {
+        ui.label(label.to_owned());
+        ui.label(value.to_owned());
         ui.end_row();
+    }
+
+    /// Строки, которые появляются только после отдельного запроса, не из списка папки.
+    pub(crate) fn heavy_detail_lines(&self, path: &std::path::Path) -> Vec<(String, String)> {
+        if self.entry_details_path.as_deref() != Some(path) {
+            return Vec::new();
+        }
+        if self.entry_details_pending {
+            return vec![(
+                self.t("props.size_on_disk").to_owned(),
+                self.t("props.details_loading").to_owned(),
+            )];
+        }
+        let Some(details) = &self.entry_details else {
+            return Vec::new();
+        };
+        let unavailable = self.t("props.unavailable");
+        let size_on_disk = match details.size_on_disk {
+            crate::core::entry_details::Detail::Known(size) => {
+                crate::core::format::format_size(size)
+            }
+            crate::core::entry_details::Detail::Unavailable => unavailable.to_owned(),
+        };
+        let accessed = match details.accessed {
+            crate::core::entry_details::Detail::Known(time) => {
+                crate::platform::format_local_time(time, self.i18n.language())
+            }
+            crate::core::entry_details::Detail::Unavailable => unavailable.to_owned(),
+        };
+        let owner = match &details.owner {
+            crate::core::entry_details::Detail::Known(name) => name.clone(),
+            crate::core::entry_details::Detail::Unavailable => unavailable.to_owned(),
+        };
+        let access = match details.access {
+            crate::core::entry_details::Detail::Known(
+                crate::core::entry_details::AccessList::Null,
+            ) => self.t("props.access_null").to_owned(),
+            crate::core::entry_details::Detail::Known(
+                crate::core::entry_details::AccessList::Empty,
+            ) => self.t("props.access_empty").to_owned(),
+            crate::core::entry_details::Detail::Known(
+                crate::core::entry_details::AccessList::Present { entries },
+            ) => format!("{} ({entries})", self.t("props.access_present")),
+            crate::core::entry_details::Detail::Unavailable => unavailable.to_owned(),
+        };
+        let mut lines = vec![
+            (self.t("props.size_on_disk").to_owned(), size_on_disk),
+            (self.t("props.accessed").to_owned(), accessed),
+            (self.t("props.owner").to_owned(), owner),
+            (self.t("props.access").to_owned(), access),
+        ];
+        if details.folder_contents_not_counted {
+            lines.insert(
+                1,
+                (
+                    self.t("props.folder_contents").to_owned(),
+                    self.t("props.folder_contents_value").to_owned(),
+                ),
+            );
+        }
+        lines
     }
 }

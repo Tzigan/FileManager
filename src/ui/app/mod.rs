@@ -109,6 +109,12 @@ pub(crate) enum WorkerMsg {
     UpdateFailed(String),
     /// Фоновое помещение в защищённую корзину закончилось. Строки — уже понятные ошибки.
     SecureTrashFinished(Vec<String>),
+    /// Тяжёлые свойства одного объекта. Поколение отбрасывает ответ для уже другого выбора.
+    EntryDetails {
+        generation: u64,
+        path: PathBuf,
+        details: crate::core::entry_details::EntryDetails,
+    },
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -160,6 +166,11 @@ pub struct FileManagerApp {
     tab_strip_scroll_target: Option<u64>,
     /// Path shown in the properties dialog.
     pub(crate) props_target: Option<PathBuf>,
+    /// Запрос тяжёлых свойств. Список папки его не заполняет.
+    pub(crate) entry_details_generation: u64,
+    pub(crate) entry_details_path: Option<PathBuf>,
+    pub(crate) entry_details: Option<crate::core::entry_details::EntryDetails>,
+    pub(crate) entry_details_pending: bool,
     props_viewport_placed: bool,
     preview: PreviewState,
     /// Tabs requested by widgets while the current frame is rendering.
@@ -394,6 +405,10 @@ impl FileManagerApp {
             tab_drag_preview: tab_drag_preview::TabDragPreviewState::default(),
             tab_strip_scroll_target: None,
             props_target: None,
+            entry_details_generation: 0,
+            entry_details_path: None,
+            entry_details: None,
+            entry_details_pending: false,
             props_viewport_placed: false,
             preview: PreviewState::default(),
             pending_open_tabs: Vec::new(),
@@ -709,6 +724,18 @@ impl FileManagerApp {
                         Err(error) => self.zip_error_text(&error),
                     });
                 }
+                WorkerMsg::EntryDetails {
+                    generation,
+                    path,
+                    details,
+                } => {
+                    if self.entry_details_generation == generation
+                        && self.entry_details_path.as_ref() == Some(&path)
+                    {
+                        self.entry_details = Some(details);
+                        self.entry_details_pending = false;
+                    }
+                }
                 WorkerMsg::SecureTrashFinished(errors) => {
                     self.trash_notice = if errors.is_empty() {
                         Some(self.t("trash.moved").to_owned())
@@ -1021,6 +1048,7 @@ impl eframe::App for FileManagerApp {
             }
         }
         self.drain_messages(&ctx);
+        self.sync_entry_details(&ctx);
         self.schedule_disk_usage_refresh(&ctx);
         self.drain_ops_events(&ctx);
         self.handle_keys(&ctx);
