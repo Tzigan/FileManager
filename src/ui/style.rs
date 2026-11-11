@@ -24,6 +24,56 @@ pub(crate) const TREE_DISCLOSURE_SIZE: f32 = 18.0;
 pub(crate) const TREE_ICON_WIDTH: f32 = 20.0;
 pub(crate) const TREE_ICON_HEIGHT: f32 = 18.0;
 
+/// Доля занятости и sRGB-цвет. Зелёный держится до половины диска:
+/// иначе переход к янтарю с нуля делает уже 43% жёлтым.
+const DISK_USAGE_COLOR_STOPS: &[(f32, [u8; 3])] = &[
+    (0.0, [46, 160, 90]),
+    (0.50, [46, 160, 90]),
+    (0.75, [214, 158, 46]),
+    (0.90, [204, 68, 62]),
+];
+
+/// Цвет заполненной части полоски. Считается по доле 0..1, не по округлённому проценту.
+pub(crate) fn disk_usage_fill(ratio: f32) -> egui::Color32 {
+    let ratio = ratio.clamp(0.0, 1.0);
+    let stops = DISK_USAGE_COLOR_STOPS;
+    let first = stops[0];
+    if ratio <= first.0 {
+        return srgb(first.1);
+    }
+    for pair in stops.windows(2) {
+        let (start, start_color) = pair[0];
+        let (end, end_color) = pair[1];
+        if ratio <= end {
+            let span = end - start;
+            let t = if span <= f32::EPSILON {
+                1.0
+            } else {
+                (ratio - start) / span
+            };
+            return lerp_srgb(start_color, end_color, t);
+        }
+    }
+    srgb(stops[stops.len() - 1].1)
+}
+
+fn srgb(channels: [u8; 3]) -> egui::Color32 {
+    egui::Color32::from_rgb(channels[0], channels[1], channels[2])
+}
+
+/// egui хранит пиксели в sRGB, а смешивает в linear RGB. Так 43% и 60% не схлопываются в один оттенок.
+fn lerp_srgb(from: [u8; 3], to: [u8; 3], t: f32) -> egui::Color32 {
+    let from = egui::Rgba::from(srgb(from));
+    let to = egui::Rgba::from(srgb(to));
+    let mix = |a: f32, b: f32| a + (b - a) * t;
+    egui::Color32::from(egui::Rgba::from_rgba_unmultiplied(
+        mix(from.r(), to.r()),
+        mix(from.g(), to.g()),
+        mix(from.b(), to.b()),
+        1.0,
+    ))
+}
+
 pub(crate) fn configure(ctx: &Context) {
     ctx.all_styles_mut(configure_style);
 }
@@ -128,5 +178,18 @@ mod tests {
         assert_eq!(style.spacing.interact_size.y, CONTEXT_MENU_ITEM_HEIGHT);
         assert_eq!(style.spacing.item_spacing.x, SPACE_SM);
         assert_eq!(style.spacing.item_spacing.y, SPACE_XXS);
+    }
+
+    #[test]
+    fn disk_usage_color_changes_continuously_and_holds_the_warning_color() {
+        let calm = disk_usage_fill(0.0);
+        let amber = disk_usage_fill(0.75);
+        let warning = disk_usage_fill(0.90);
+        assert_eq!(disk_usage_fill(0.43), calm);
+        assert_eq!(disk_usage_fill(1.0), warning);
+        assert_ne!(disk_usage_fill(0.60), calm);
+        assert_ne!(disk_usage_fill(0.60), amber);
+        assert_ne!(calm, amber);
+        assert_ne!(amber, warning);
     }
 }

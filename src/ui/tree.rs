@@ -305,12 +305,13 @@ impl crate::ui::FileManagerApp {
         let expanded = self.tree.expanded.contains(path);
         let kids = self.tree.children.get(path).cloned();
         let loading = self.tree.pending.contains(path);
-        // Неизвестную ёмкость скрываем; известное значение берём только из кэша.
-        let usage_percent = if depth == 0 {
+        // Неизвестную ёмкость скрываем: в кэше её нет, это не зелёная полоска на 0%.
+        let usage = if depth == 0 {
             self.tree
                 .disk_usage
                 .get(path)
-                .and_then(|usage| usage.used_percent())
+                .copied()
+                .filter(|usage| usage.used_ratio().is_some())
         } else {
             None
         };
@@ -373,13 +374,13 @@ impl crate::ui::FileManagerApp {
                     ui.close();
                 }
             });
-            if let Some(percent) = usage_percent {
+            if let Some(usage) = usage {
                 let right_reserved = if loading {
                     ui.spacing().interact_size.x + ui.spacing().item_spacing.x
                 } else {
                     0.0
                 };
-                disk_usage_indicator(ui, percent, right_reserved);
+                disk_usage_indicator(ui, usage, right_reserved);
             }
             if loading {
                 ui.spinner();
@@ -431,8 +432,14 @@ impl crate::ui::FileManagerApp {
     }
 }
 
-fn disk_usage_indicator(ui: &mut egui::Ui, percent: u8, right_reserved: f32) {
-    // Полоса занимает остаток строки после имени и процента, не меняя высоту строки.
+fn disk_usage_indicator(ui: &mut egui::Ui, usage: DiskUsage, right_reserved: f32) {
+    // Текст округляется для чтения. Заливка и её цвет считаются по точной доле.
+    let Some(ratio) = usage.used_ratio() else {
+        return;
+    };
+    let Some(percent) = usage.used_percent() else {
+        return;
+    };
     let label = format!("{percent}%");
     let text_color = ui.visuals().weak_text_color();
     let font = egui::TextStyle::Small.resolve(ui.style());
@@ -469,16 +476,13 @@ fn disk_usage_indicator(ui: &mut egui::Ui, percent: u8, right_reserved: f32) {
             let visuals = ui.visuals();
             ui.painter()
                 .rect_filled(track, radius, visuals.widgets.inactive.bg_fill);
-            if percent > 0 {
+            if ratio > 0.0 {
                 let fill = egui::Rect::from_min_max(
                     track.min,
-                    egui::pos2(
-                        track.min.x + track.width() * percent as f32 / 100.0,
-                        track.max.y,
-                    ),
+                    egui::pos2(track.min.x + track.width() * ratio, track.max.y),
                 );
                 ui.painter()
-                    .rect_filled(fill, radius, visuals.selection.stroke.color);
+                    .rect_filled(fill, radius, style::disk_usage_fill(ratio));
             }
         },
     );
