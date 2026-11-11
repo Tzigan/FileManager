@@ -65,6 +65,49 @@ impl FileManagerApp {
         ctx.request_repaint();
     }
 
+    /// «Извлечь в...» для открытого архива: пустое выделение — весь архив, иначе только выбранные элементы.
+    pub(crate) fn prompt_zip_extract_to(&mut self, ctx: &egui::Context) {
+        let archive = self.tabs[self.active].path.clone();
+        let initial = archive.parent().map(Path::to_path_buf);
+        let plan = plan_zip_extract_to(&selected_zip_members(self));
+        self.prompt_zip_extract_plan(archive, initial.as_deref(), plan, ctx);
+    }
+
+    /// «Извлечь в...» для ZIP-файла в обычной папке: всегда весь архив.
+    pub(crate) fn prompt_zip_file_extract_to(&mut self, archive: PathBuf, ctx: &egui::Context) {
+        let initial = archive.parent().map(Path::to_path_buf);
+        self.prompt_zip_extract_plan(
+            archive,
+            initial.as_deref(),
+            ZipExtractTarget::EntireArchive,
+            ctx,
+        );
+    }
+
+    fn prompt_zip_extract_plan(
+        &mut self,
+        archive: PathBuf,
+        initial_dir: Option<&Path>,
+        plan: ZipExtractTarget,
+        ctx: &egui::Context,
+    ) {
+        if !self.can_start_zip_operation() {
+            return;
+        }
+        // Окно выбора папки системное и модальное. Долгое извлечение после него идёт в фоне.
+        let title = self.t("zip.pick_folder").to_owned();
+        match crate::platform::pick_folder(&title, initial_dir) {
+            Ok(None) => {}
+            Ok(Some(destination)) => self
+                .spawn_zip_extraction(move || run_zip_extract(&archive, &destination, &plan), ctx),
+            Err(error) => {
+                self.zip_creating = false;
+                self.zip_message = Some(self.zip_error_text(&error));
+                ctx.request_repaint();
+            }
+        }
+    }
+
     pub(crate) fn extract_zip_file(&mut self, member: String, ctx: &egui::Context) {
         let archive = self.tabs[self.active].path.clone();
         let destination = archive
@@ -170,7 +213,13 @@ impl FileManagerApp {
             std::io::ErrorKind::PermissionDenied => self.t("error.access_denied").to_owned(),
             std::io::ErrorKind::FileTooLarge => self.t("zip.error_too_large").to_owned(),
             std::io::ErrorKind::Unsupported => self.t("zip.error_zip64_unsupported").to_owned(),
-            std::io::ErrorKind::NotFound => self.t("zip.error_invalid").to_owned(),
+            std::io::ErrorKind::NotFound => {
+                if error.to_string().contains("destination folder") {
+                    self.t("zip.error_folder").to_owned()
+                } else {
+                    self.t("zip.error_invalid").to_owned()
+                }
+            }
             std::io::ErrorKind::InvalidData => {
                 if error.to_string().contains("unsafe path") {
                     self.t("zip.error_path").to_owned()
@@ -546,6 +595,110 @@ impl FileManagerApp {
     }
 }
 
+/// Куда извлекать после выбора папки.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum ZipExtractTarget {
+    /// Весь архив, включая вызов с самого ZIP-файла вне архива.
+    EntireArchive,
+    /// Выбранные элементы: имя в архиве и признак папки.
+    Members(Vec<(String, bool)>),
+}
+
+pub(super) fn plan_zip_extract_to(selected: &[(String, bool)]) -> ZipExtractTarget {
+    if selected.is_empty() {
+        ZipExtractTarget::EntireArchive
+    } else {
+        ZipExtractTarget::Members(selected.to_vec())
+    }
+}
+
+fn selected_zip_members(app: &FileManagerApp) -> Vec<(String, bool)> {
+    let tab = &app.tabs[app.active];
+    tab.entries
+        .iter()
+        .filter_map(|entry| {
+            let member = entry.archive_member.clone()?;
+            let key = crate::ui::tabs::SelectionKey::from_entry(entry);
+            tab.selection
+                .contains(&key)
+                .then_some((member, entry.is_dir))
+        })
+        .collect()
+}
+
+/// Путь, который существующее извлечение создаст в выбранной папке.
+pub(super) fn zip_member_destination(destination: &Path, member: &str, is_dir: bool) -> PathBuf {
+    let member = member.trim_matches('/');
+    if !is_dir {
+        let name = member
+            .rsplit('/')
+            .next()
+            .filter(|name| !name.is_empty())
+            .unwrap_or(member);
+        return destination.join(name);
+    }
+    let mut path = destination.to_path_buf();
+    for part in member.split('/').filter(|part| !part.is_empty()) {
+        path.push(part);
+    }
+    path
+}
+
+pub(super) fn zip_archive_destination(destination: &Path, archive: &Path) -> Option<PathBuf> {
+    archive
+        .file_stem()
+        .filter(|stem| !stem.is_empty())
+        .map(|stem| destination.join(stem))
+}
+
+fn run_zip_extract(
+    archive: &Path,
+    destination: &Path,
+    plan: &ZipExtractTarget,
+) -> std::io::Result<PathBuf> {
+    if !destination.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "destination folder is unavailable",
+        ));
+    }
+    // Сначала проверяем совпадения, чтобы не записать часть файлов и не замолчать о конфликте.
+    match plan {
+        ZipExtractTarget::EntireArchive => {
+            if zip_archive_destination(destination, archive).is_some_and(|path| path.exists()) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    "destination already exists",
+                ));
+            }
+            crate::platform::extract_zip_all(archive, destination)
+        }
+        ZipExtractTarget::Members(members) => {
+            for (member, is_dir) in members {
+                if zip_member_destination(destination, member, *is_dir).exists() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::AlreadyExists,
+                        "destination already exists",
+                    ));
+                }
+            }
+            let mut last = destination.to_path_buf();
+            for (member, is_dir) in members {
+                last = if *is_dir {
+                    crate::platform::extract_zip_folder(archive, member, destination)?
+                } else {
+                    crate::platform::extract_zip_file(archive, member, destination)?
+                };
+            }
+            if members.len() == 1 {
+                Ok(last)
+            } else {
+                Ok(destination.to_path_buf())
+            }
+        }
+    }
+}
+
 fn suggested_zip_name(tab: &crate::ui::tabs::Tab, sources: &[PathBuf], fallback: &str) -> String {
     if sources.len() != 1 {
         return fallback.to_owned();
@@ -651,6 +804,24 @@ mod zip_dialog_tests {
             conflict_path: None,
             validation_error: None,
         };
+
+        assert_eq!(plan_zip_extract_to(&[]), ZipExtractTarget::EntireArchive);
+        assert_eq!(
+            plan_zip_extract_to(&[("docs".into(), true), ("docs/a.txt".into(), false)]),
+            ZipExtractTarget::Members(vec![("docs".into(), true), ("docs/a.txt".into(), false)])
+        );
+        assert_eq!(
+            zip_member_destination(Path::new(r"D:\out"), "docs/a.txt", false),
+            PathBuf::from(r"D:\out\a.txt")
+        );
+        assert_eq!(
+            zip_member_destination(Path::new(r"D:\out"), "docs/pics", true),
+            PathBuf::from(r"D:\out\docs\pics")
+        );
+        assert_eq!(
+            zip_archive_destination(Path::new(r"D:\out"), Path::new(r"C:\files\photos.zip")),
+            Some(PathBuf::from(r"D:\out\photos"))
+        );
 
         let options = validate_zip_create_dialog(&dialog).unwrap();
         assert_eq!(options.archive_name, "notes.zip");

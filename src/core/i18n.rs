@@ -137,6 +137,8 @@ mod tests {
             "Restart after update"
         );
         assert_eq!(en.t("update.restarting"), "Update installed. Restarting...");
+        assert_eq!(ru.t("zip.extract_to"), "Извлечь в...");
+        assert_eq!(en.t("zip.extract_to"), "Extract to...");
         assert_eq!(
             ru.t("update.busy_ops"),
             "Сначала дождитесь окончания копирования или распаковки либо отмените операцию. Установка не начата."
