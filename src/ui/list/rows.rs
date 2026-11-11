@@ -2,6 +2,11 @@
 
 use super::*;
 
+/// В списке размер виден у файла. У папки колонка пустая и в корзине, и в обычной папке.
+pub(crate) fn shows_entry_size(is_dir: bool) -> bool {
+    !is_dir
+}
+
 pub(super) fn entry_at(entries: &[FileEntry], index: usize) -> Option<FileEntry> {
     entries.get(index).cloned()
 }
@@ -108,7 +113,7 @@ impl FileManagerApp {
         if let Some(sx) = size_x {
             // Как в обычной папке: у каталога колонка размера пустая.
             // Сумма из карточки остаётся в подтверждении очистки.
-            let size_text = if entry.is_dir {
+            let size_text = if !shows_entry_size(entry.is_dir) {
                 String::new()
             } else {
                 entry.size.map(format_size).unwrap_or_default()

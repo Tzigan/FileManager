@@ -2,6 +2,11 @@
 
 use super::*;
 
+/// Неактивная вкладка корзины перечитывает карточки, когда на неё переключаются.
+pub(crate) fn should_reload_trash_on_switch(switching_away: bool, target_is_trash: bool) -> bool {
+    switching_away && target_is_trash
+}
+
 impl FileManagerApp {
     /// Open `path` in a new tab (pipe-forwarded from another instance).
     pub(crate) fn open_path_in_new_tab(&mut self, path: PathBuf, ctx: &egui::Context) {
@@ -332,7 +337,7 @@ impl FileManagerApp {
             self.active = idx;
             self.persist_tabs();
             // Неактивная вкладка корзины могла устареть, пока действие шло в другой.
-            if self.tabs[idx].secure_trash {
+            if should_reload_trash_on_switch(true, self.tabs[idx].secure_trash) {
                 self.load_secure_trash_tab(idx);
             }
         }
@@ -425,5 +430,17 @@ impl FileManagerApp {
             .position(|tab| tab.id == source_id)
             .unwrap_or_default();
         self.persist_tabs();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_reload_trash_on_switch;
+
+    #[test]
+    fn inactive_trash_tab_is_reread_when_it_becomes_active() {
+        assert!(should_reload_trash_on_switch(true, true));
+        assert!(!should_reload_trash_on_switch(false, true));
+        assert!(!should_reload_trash_on_switch(true, false));
     }
 }
