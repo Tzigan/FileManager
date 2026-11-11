@@ -36,7 +36,9 @@ fn main() {
     }
 
     if let Err(error) = updater::run() {
-        updater::show_error(&format!("{error:#}"));
+        // Пользователь видит короткую причину. Цепочка anyhow остаётся только в отладочном выводе.
+        eprintln!("{error:#}");
+        updater::show_error(&updater::user_facing_message(&error));
         std::process::exit(1);
     }
 }

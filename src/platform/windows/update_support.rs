@@ -72,9 +72,16 @@ pub fn prepare_update_archive(
     Ok(stage)
 }
 
-pub fn launch_updater(stage: &Path, target_exe: &Path, process_id: u32) -> anyhow::Result<()> {
+pub fn launch_updater(
+    stage: &Path,
+    target_exe: &Path,
+    process_id: u32,
+    auto_restart: bool,
+    russian: bool,
+) -> anyhow::Result<()> {
     validate_stage_files(stage)?;
     let updater = stage.join("FileManagerUpdater.exe");
+    // Updater из каталога подготовки, не из папки установки: текущий exe ещё занят этим процессом.
     Command::new(&updater)
         .arg("--pid")
         .arg(process_id.to_string())
@@ -82,6 +89,10 @@ pub fn launch_updater(stage: &Path, target_exe: &Path, process_id: u32) -> anyho
         .arg(target_exe)
         .arg("--stage")
         .arg(stage)
+        .arg("--restart")
+        .arg(if auto_restart { "1" } else { "0" })
+        .arg("--lang")
+        .arg(if russian { "ru" } else { "en" })
         .spawn()
         .with_context(|| format!("launch updater {}", updater.display()))?;
     Ok(())

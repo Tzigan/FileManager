@@ -102,7 +102,10 @@ mod tests {
         assert_eq!(ru.t("tree.collapse"), "Свернуть");
         assert_eq!(ru.t("menu.settings"), "Настройки");
         assert_eq!(ru.t("settings.category.general"), "Общие");
-        assert_eq!(ru.t("settings.single_instance"), "Один экземпляр приложения");
+        assert_eq!(
+            ru.t("settings.single_instance"),
+            "Один экземпляр приложения"
+        );
         assert_eq!(
             ru.t("settings.single_instance_hint"),
             "Повторный запуск откроет папку в уже запущенном окне. Выключите настройку, чтобы разрешить несколько окон."
@@ -120,6 +123,23 @@ mod tests {
         assert_eq!(
             en.t("settings.single_instance_hint"),
             "New launches open folders in the existing window. Turn this off to allow multiple windows."
+        );
+        assert_eq!(
+            ru.t("settings.auto_restart_after_update"),
+            "Перезапускать после обновления"
+        );
+        assert_eq!(
+            ru.t("update.restarting"),
+            "Обновление установлено. Перезапуск..."
+        );
+        assert_eq!(
+            en.t("settings.auto_restart_after_update"),
+            "Restart after update"
+        );
+        assert_eq!(en.t("update.restarting"), "Update installed. Restarting...");
+        assert_eq!(
+            ru.t("update.busy_ops"),
+            "Сначала дождитесь окончания копирования или распаковки либо отмените операцию. Установка не начата."
         );
     }
 

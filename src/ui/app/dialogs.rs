@@ -59,7 +59,12 @@ impl FileManagerApp {
                         ui.horizontal(|ui| {
                             ui.label(self.t("update.ready").to_owned());
                             if ui.button(self.t("update.install").to_owned()).clicked() {
-                                self.install_ready_update(ctx, &viewport_ctx);
+                                self.request_update_install(&viewport_ctx);
+                            }
+                            if self.update_restart_offer
+                                && ui.button(self.t("update.restart_now").to_owned()).clicked()
+                            {
+                                self.arm_update_restart(&viewport_ctx);
                             }
                         });
                     } else {
@@ -114,7 +119,7 @@ impl FileManagerApp {
         let builder = floating_dialog_viewport(
             ctx,
             title,
-            egui::vec2(560.0, 360.0),
+            egui::vec2(560.0, 520.0),
             self.settings_viewport_placed,
         );
         let mut close_requested = false;
@@ -180,8 +185,7 @@ impl FileManagerApp {
                                 .weak(),
                         );
                         ui.add_space(style::SPACE_MD);
-                        let show_hidden_label =
-                            self.t("settings.show_hidden_files").to_owned();
+                        let show_hidden_label = self.t("settings.show_hidden_files").to_owned();
                         if ui
                             .checkbox(
                                 &mut self.store.settings.show_hidden_files,
@@ -198,10 +202,7 @@ impl FileManagerApp {
                         ui.add_space(style::SPACE_MD);
                         let show_wsl_label = self.t("settings.show_wsl_in_tree").to_owned();
                         if ui
-                            .checkbox(
-                                &mut self.store.settings.show_wsl_in_tree,
-                                show_wsl_label,
-                            )
+                            .checkbox(&mut self.store.settings.show_wsl_in_tree, show_wsl_label)
                             .changed()
                         {
                             wsl_visibility_changed = true;
@@ -209,6 +210,42 @@ impl FileManagerApp {
                         ui.add_space(style::SPACE_SM);
                         ui.label(
                             egui::RichText::new(self.t("settings.show_wsl_in_tree_hint")).weak(),
+                        );
+                        ui.add_space(style::SPACE_MD);
+                        let auto_restart_label =
+                            self.t("settings.auto_restart_after_update").to_owned();
+                        if ui
+                            .checkbox(
+                                &mut self.store.settings.auto_restart_after_update,
+                                auto_restart_label,
+                            )
+                            .changed()
+                        {
+                            self.persist();
+                        }
+                        ui.add_space(style::SPACE_SM);
+                        ui.label(
+                            egui::RichText::new(self.t("settings.auto_restart_after_update_hint"))
+                                .weak(),
+                        );
+                        ui.add_space(style::SPACE_MD);
+                        ui.label(self.t("settings.update_restart_delay"));
+                        let mut delay = self.store.settings.update_restart_delay_secs;
+                        if ui
+                            .add(
+                                egui::DragValue::new(&mut delay)
+                                    .range(0u32..=60)
+                                    .suffix(" s"),
+                            )
+                            .changed()
+                        {
+                            self.store.settings.update_restart_delay_secs = delay;
+                            self.persist();
+                        }
+                        ui.add_space(style::SPACE_SM);
+                        ui.label(
+                            egui::RichText::new(self.t("settings.update_restart_delay_hint"))
+                                .weak(),
                         );
                     });
                 });
@@ -301,28 +338,115 @@ impl FileManagerApp {
         });
     }
 
-    fn install_ready_update(&mut self, main_ctx: &egui::Context, about_ctx: &egui::Context) {
+    /// Установка ещё не началась: либо откладываем выход, либо спрашиваем пользователя.
+    fn request_update_install(&mut self, ctx: &egui::Context) {
+        match plan_update_install(
+            self.store.settings.auto_restart_after_update,
+            self.update_blocked_by_work(),
+        ) {
+            UpdateInstallAction::Blocked => {
+                self.update_restart_at = None;
+                self.update_restart_offer = false;
+                self.update_err = Some(self.t("update.busy_ops").to_owned());
+                ctx.request_repaint();
+            }
+            UpdateInstallAction::OfferRestart => {
+                // Файлы всё равно нельзя заменить, пока этот процесс их держит.
+                // Не закрываем окно, пока пользователь сам не подтвердит перезапуск.
+                self.prepare_saved_state();
+                self.update_restart_at = None;
+                self.update_restart_offer = true;
+                self.update_err = None;
+                self.update_status = Some(self.t("update.restart_offer").to_owned());
+                ctx.request_repaint();
+            }
+            UpdateInstallAction::ScheduleRestart => {
+                self.arm_update_restart(ctx);
+            }
+        }
+    }
+
+    fn arm_update_restart(&mut self, ctx: &egui::Context) {
+        if self.update_blocked_by_work() {
+            self.update_restart_at = None;
+            self.update_err = Some(self.t("update.busy_ops").to_owned());
+            ctx.request_repaint();
+            return;
+        }
+        self.prepare_saved_state();
+        self.update_restart_offer = false;
+        self.update_err = None;
+        self.update_status = Some(self.t("update.restarting").to_owned());
+        let delay = Duration::from_secs(self.store.settings.update_restart_delay_secs as u64);
+        self.update_restart_at = Some(Instant::now() + delay);
+        ctx.request_repaint();
+    }
+
+    /// Текущие вкладки и режим отображения уже умеет сохранять настройки. История и выделение живут только в памяти.
+    fn prepare_saved_state(&mut self) {
+        self.persist_tabs();
+    }
+
+    fn update_blocked_by_work(&self) -> bool {
+        !self.ops_ui.jobs.is_empty()
+            || self.ops_ui.conflict.is_some()
+            || self.ops_ui.error_q.is_some()
+            || self.zip_busy
+            || self.zip_creating
+    }
+
+    pub(super) fn poll_update_restart(&mut self, ctx: &egui::Context) {
+        let Some(at) = self.update_restart_at else {
+            return;
+        };
+        if self.update_blocked_by_work() {
+            self.update_restart_at = None;
+            self.update_status = None;
+            self.update_err = Some(self.t("update.busy_ops").to_owned());
+            ctx.request_repaint();
+            return;
+        }
+        let now = Instant::now();
+        if now < at {
+            ctx.request_repaint_after(at.saturating_duration_since(now));
+            return;
+        }
+        self.finish_update_restart(ctx);
+    }
+
+    fn finish_update_restart(&mut self, ctx: &egui::Context) {
+        self.update_restart_at = None;
         let Some(stage_dir) = self.update_ready.clone() else {
             return;
         };
+        // К этому моменту пользователь либо включил автоперезапуск, либо нажал кнопку.
+        let restart = true;
+        let russian = self.store.settings.language == crate::core::i18n::Language::Ru;
         let launch_result = std::env::current_exe()
             .context("locate current FileManager executable")
             .and_then(|target| {
-                crate::platform::launch_updater(&stage_dir, &target, std::process::id())
+                crate::platform::launch_updater(
+                    &stage_dir,
+                    &target,
+                    std::process::id(),
+                    restart,
+                    russian,
+                )
             });
         match launch_result {
             Ok(()) => {
-                about_ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                main_ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                // Раньше Close вызывался без id и попадал в окно «О программе»:
+                // основной процесс оставался жив, updater ждал его pid и не доходил до запуска.
+                ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Close);
             }
             Err(error) => {
                 tracing::error!(path = %stage_dir.display(), error = %error, "failed to launch update installer");
                 let _ = std::fs::remove_dir_all(&stage_dir);
                 self.update_ready = None;
                 self.update_status = None;
+                self.update_restart_offer = false;
                 self.update_err = Some(self.t("update.install_failed").to_owned());
-                main_ctx.request_repaint();
-                about_ctx.request_repaint();
+                ctx.request_repaint();
             }
         }
     }
@@ -333,9 +457,10 @@ impl FileManagerApp {
             return;
         }
         let selected = if tab.selection.len() == 1 {
-            tab.selection.iter().next().and_then(|key| {
-                tab.entries.iter().find(|entry| key.matches(entry))
-            })
+            tab.selection
+                .iter()
+                .next()
+                .and_then(|key| tab.entries.iter().find(|entry| key.matches(entry)))
         } else {
             tab.entries.get(tab.cursor)
         };
@@ -441,6 +566,27 @@ impl FileManagerApp {
         if close_requested {
             self.props_target = None;
         }
+    }
+}
+
+/// Решение до запуска updater. Сам запуск нового exe делает updater после замены файлов.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum UpdateInstallAction {
+    Blocked,
+    OfferRestart,
+    ScheduleRestart,
+}
+
+pub(super) fn plan_update_install(
+    auto_restart: bool,
+    blocked_by_work: bool,
+) -> UpdateInstallAction {
+    if blocked_by_work {
+        UpdateInstallAction::Blocked
+    } else if auto_restart {
+        UpdateInstallAction::ScheduleRestart
+    } else {
+        UpdateInstallAction::OfferRestart
     }
 }
 
