@@ -201,6 +201,13 @@ pub struct Settings {
     /// Пауза, после которой пачка внешних изменений становится одним чтением папки.
     #[serde(default = "default_dir_watch_debounce_ms")]
     pub dir_watch_debounce_ms: u64,
+    /// Лимит одновременных поисков и ZIP-операций; файловые операции остаются последовательными.
+    #[serde(default = "default_max_concurrent_bg_ops")]
+    pub max_concurrent_bg_ops: usize,
+}
+
+fn default_max_concurrent_bg_ops() -> usize {
+    crate::core::bg_ops::DEFAULT_CONCURRENT_BG_OPS
 }
 
 fn default_dir_watch_debounce_ms() -> u64 {
@@ -247,6 +254,7 @@ impl Default for Settings {
             dir_cache_entries: default_dir_cache_entries(),
             dir_watch_enabled: true,
             dir_watch_debounce_ms: default_dir_watch_debounce_ms(),
+            max_concurrent_bg_ops: default_max_concurrent_bg_ops(),
         }
     }
 }
@@ -312,6 +320,19 @@ mod tests {
         assert!(!s.show_hidden_files);
         assert!(s.show_wsl_in_tree);
         assert!(s.enable_mouse_side_navigation);
+        assert_eq!(
+            s.max_concurrent_bg_ops,
+            crate::core::bg_ops::DEFAULT_CONCURRENT_BG_OPS
+        );
+    }
+
+    #[test]
+    fn older_settings_without_background_limit_use_safe_default() {
+        let settings: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(
+            settings.max_concurrent_bg_ops,
+            crate::core::bg_ops::DEFAULT_CONCURRENT_BG_OPS
+        );
     }
 
     #[test]
@@ -354,6 +375,7 @@ mod tests {
         store.settings.enable_mouse_side_navigation = false;
         store.settings.auto_restart_after_update = false;
         store.settings.update_restart_delay_secs = 15;
+        store.settings.max_concurrent_bg_ops = 4;
         store.save().unwrap();
 
         let loaded = SettingsStore::load(&dir);
@@ -375,6 +397,7 @@ mod tests {
         assert!(!loaded.settings.enable_mouse_side_navigation);
         assert!(!loaded.settings.auto_restart_after_update);
         assert_eq!(loaded.settings.update_restart_delay_secs, 15);
+        assert_eq!(loaded.settings.max_concurrent_bg_ops, 4);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

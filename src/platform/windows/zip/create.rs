@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Seek, Write};
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 
 use crate::platform::{ZipCompressionLevel, ZipCompressionMethod, ZipCreateOptions, ZipExistingBehavior};
 use zip::CompressionMethod;
@@ -11,7 +12,25 @@ use zip::write::{SimpleFileOptions, ZipWriter};
 
 use super::common::*;
 
+#[allow(dead_code)]
 pub fn create_zip_archive(sources: &[PathBuf], options: &ZipCreateOptions) -> io::Result<PathBuf> {
+    create_zip_archive_inner(sources, options, None)
+}
+
+pub fn create_zip_archive_cancellable(
+    sources: &[PathBuf],
+    options: &ZipCreateOptions,
+    cancel: &AtomicBool,
+) -> io::Result<PathBuf> {
+    create_zip_archive_inner(sources, options, Some(cancel))
+}
+
+fn create_zip_archive_inner(
+    sources: &[PathBuf],
+    options: &ZipCreateOptions,
+    cancel: Option<&AtomicBool>,
+) -> io::Result<PathBuf> {
+    check_cancel(cancel)?;
     if sources.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -44,6 +63,7 @@ pub fn create_zip_archive(sources: &[PathBuf], options: &ZipCreateOptions) -> io
     let mut entries = Vec::with_capacity(sources.len());
     let mut selected_paths = HashSet::new();
     for source in sources {
+        check_cancel(cancel)?;
         let metadata = fs::symlink_metadata(source)?;
         if metadata.file_type().is_symlink() {
             return Err(io::Error::new(
@@ -86,6 +106,7 @@ pub fn create_zip_archive(sources: &[PathBuf], options: &ZipCreateOptions) -> io
     let stage = create_stage_dir(&destination)?;
     let staged_archive = stage.join("archive.zip");
     let result = (|| {
+        check_cancel(cancel)?;
         let file = OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -110,6 +131,7 @@ pub fn create_zip_archive(sources: &[PathBuf], options: &ZipCreateOptions) -> io
                 &mut member_count,
                 &mut files_written,
                 &mut seen_files,
+                cancel,
             )?;
         }
         if !options.preserve_folder_structure && files_written == 0 {
@@ -121,6 +143,7 @@ pub fn create_zip_archive(sources: &[PathBuf], options: &ZipCreateOptions) -> io
         let archive_file = writer.finish().map_err(zip_writer_error)?;
         archive_file.sync_all()?;
         drop(archive_file);
+        check_cancel(cancel)?;
         match options.existing_behavior {
             ZipExistingBehavior::AddSuffix => {
                 move_zip_to_unique_name(&staged_archive, &destination, archive_stem)
@@ -222,7 +245,9 @@ pub(super) fn write_zip_path<W: Write + Seek>(
     member_count: &mut usize,
     files_written: &mut usize,
     seen_files: &mut HashSet<String>,
+    cancel: Option<&AtomicBool>,
 ) -> io::Result<()> {
+    check_cancel(cancel)?;
     let metadata = fs::symlink_metadata(path)?;
     let file_type = metadata.file_type();
     // Не следуем по ссылкам, чтобы не включать в архив данные вне выбранной папки.
@@ -268,6 +293,7 @@ pub(super) fn write_zip_path<W: Write + Seek>(
                 .map_err(zip_writer_error)?;
         }
         for child in fs::read_dir(&canonical_path)? {
+            check_cancel(cancel)?;
             let child = child?;
             let child_path = child.path();
             let child_metadata = fs::symlink_metadata(&child_path)?;
@@ -297,6 +323,7 @@ pub(super) fn write_zip_path<W: Write + Seek>(
                 member_count,
                 files_written,
                 seen_files,
+                cancel,
             )?;
         }
     } else if metadata.is_file() {
@@ -317,11 +344,12 @@ pub(super) fn write_zip_path<W: Write + Seek>(
             .start_file(member.trim_end_matches('/'), file_options)
             .map_err(zip_writer_error)?;
         let mut source = fs::File::open(&canonical_path)?;
-        copy_with_limit(
+        copy_with_limit_cancellable(
             &mut source,
             writer,
             total_bytes,
             "selected content exceeds the ZIP size limit",
+            cancel,
         )?;
         *files_written = files_written.saturating_add(1);
     } else {
@@ -369,4 +397,3 @@ pub(super) fn move_zip_to_unique_name(
         "could not choose an unused archive name",
     ))
 }
-

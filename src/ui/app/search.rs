@@ -5,10 +5,14 @@ use crate::core::search as core_search;
 
 impl FileManagerApp {
     fn schedule_search(&mut self) {
+        let tab_id = self.tabs[self.active].id;
+        self.cancel_search_bg_ops(tab_id);
         self.tabs[self.active].search.schedule();
     }
 
     pub(super) fn start_search(&mut self, tab: usize, ctx: &egui::Context) {
+        let tab_id = self.tabs[tab].id;
+        self.cancel_search_bg_ops(tab_id);
         if !self.tabs[tab].search.has_criteria() {
             self.tabs[tab].search.running = false;
             self.tabs[tab].search.results_active = false;
@@ -49,36 +53,65 @@ impl FileManagerApp {
         };
         options.show_hidden = self.store.settings.show_hidden_files;
 
-        let state = &mut self.tabs[tab];
-        state.generation = state.generation.wrapping_add(1);
-        state.cancel.store(true, Ordering::Relaxed);
-        state.cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        state.status = ListStatus::Loading;
-        state.error = None;
-        state.search.running = true;
-        state.search.results_active = true;
-        state.search.validation_error = None;
-        state.clear_selection();
-        state.cursor = 0;
-        let tab_id = state.id;
-        let generation = state.search.generation;
-        let root = state.path.clone();
-        let archive_prefix = state.archive_prefix.clone();
-        let cancel = state.search.cancel.clone();
+        let (generation, root, archive_prefix, cancel) = {
+            let state = &mut self.tabs[tab];
+            state.generation = state.generation.wrapping_add(1);
+            state.cancel.store(true, Ordering::Relaxed);
+            state.cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            state.status = ListStatus::Loading;
+            state.error = None;
+            state.search.running = false;
+            state.search.results_active = true;
+            state.search.validation_error = None;
+            state.clear_selection();
+            state.cursor = 0;
+            (
+                state.search.generation,
+                state.path.clone(),
+                state.archive_prefix.clone(),
+                Arc::clone(&state.search.cancel),
+            )
+        };
         let tx = self.msg_tx.clone();
         let ctx = ctx.clone();
-        thread::spawn(move || {
-            let result = match archive_prefix {
-                Some(prefix) => crate::platform::search_zip(&root, &prefix, &options, &cancel),
-                None => core_search::search(&root, &options, &cancel),
-            };
-            let _ = tx.send(WorkerMsg::SearchResults {
-                tab_id,
-                generation,
-                result,
-            });
-            ctx.request_repaint();
-        });
+        match self.bg_ops_pool.submit_with_cancel(
+            crate::core::bg_ops::BgOpKind::Search,
+            Arc::clone(&cancel),
+            move |cancel| {
+                let result = match archive_prefix {
+                    Some(prefix) => crate::platform::search_zip(&root, &prefix, &options, &cancel),
+                    None => core_search::search(&root, &options, &cancel),
+                };
+                let result = if cancel.load(Ordering::Relaxed) {
+                    Err(crate::core::fs::ReadDirError::Cancelled)
+                } else {
+                    result
+                };
+                let _ = tx.send(WorkerMsg::SearchResults {
+                    tab_id,
+                    generation,
+                    result,
+                });
+                ctx.request_repaint();
+            },
+        ) {
+            Ok(id) => {
+                self.bg_op_ui.insert(
+                    id,
+                    super::BgOpUiTask {
+                        kind: super::BgOpUiKind::Search { tab_id, generation },
+                        queued: true,
+                    },
+                );
+            }
+            Err(_) => {
+                let error = self.t("background_ops.failed").to_owned();
+                let state = &mut self.tabs[tab];
+                state.status = ListStatus::Ready;
+                state.search.results_active = false;
+                state.search.validation_error = Some(error);
+            }
+        }
     }
 
     pub(super) fn dispatch_due_searches(&mut self, ctx: &egui::Context) {

@@ -6,7 +6,11 @@ mod extract;
 mod read;
 
 pub use create::create_zip_archive;
+pub use create::create_zip_archive_cancellable;
 pub use extract::{extract_zip_all, extract_zip_file, extract_zip_folder};
+pub use extract::{
+    extract_zip_all_cancellable, extract_zip_file_cancellable, extract_zip_folder_cancellable,
+};
 pub use read::{read_zip_dir_cancellable, search_zip};
 
 #[cfg(test)]
@@ -115,6 +119,47 @@ mod tests {
         let path = std::env::temp_dir().join(format!("filemanager-zip-{id}"));
         fs::create_dir(&path).unwrap();
         path
+    }
+
+    #[test]
+    fn cancelled_zip_work_does_not_leave_a_final_output() {
+        let root = temp_dir();
+        let source = root.join("source.txt");
+        fs::write(&source, b"payload").unwrap();
+        let cancelled = AtomicBool::new(true);
+
+        assert_eq!(
+            create_zip_archive_cancellable(
+                std::slice::from_ref(&source),
+                &create_options(&root, "cancelled"),
+                &cancelled,
+            )
+            .unwrap_err()
+            .kind(),
+            io::ErrorKind::Interrupted
+        );
+        assert!(!root.join("cancelled.zip").exists());
+
+        let archive =
+            create_zip_archive(std::slice::from_ref(&source), &create_options(&root, "archive"))
+                .unwrap();
+        let destination = root.join("out");
+        fs::create_dir(&destination).unwrap();
+        assert_eq!(
+            extract_zip_all_cancellable(&archive, &destination, &cancelled)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::Interrupted
+        );
+        assert_eq!(
+            extract_zip_file_cancellable(&archive, "source.txt", &destination, &cancelled)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::Interrupted
+        );
+        assert!(!destination.join("archive").exists());
+        assert!(!destination.join("source.txt").exists());
+        fs::remove_dir_all(root).unwrap();
     }
 
     fn create_options(root: &Path, name: &str) -> ZipCreateOptions {

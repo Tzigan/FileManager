@@ -1,3 +1,4 @@
+pub mod bg_ops;
 pub mod cli;
 pub mod dir_cache;
 pub mod dir_watch;

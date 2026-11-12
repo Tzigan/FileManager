@@ -298,6 +298,27 @@ impl FileManagerApp {
         }
         ui.add_space(style::SPACE_SM);
         ui.label(egui::RichText::new(self.t("settings.single_instance_hint")).weak());
+        ui.add_space(style::SPACE_MD);
+        ui.label(self.t("settings.max_concurrent_bg_ops"));
+        let mut limit = crate::core::bg_ops::clamp_concurrent_bg_ops(
+            self.store.settings.max_concurrent_bg_ops,
+        );
+        if ui
+            .add(
+                egui::DragValue::new(&mut limit)
+                    .range(
+                        crate::core::bg_ops::MIN_CONCURRENT_BG_OPS
+                            ..=crate::core::bg_ops::MAX_CONCURRENT_BG_OPS,
+                    ),
+            )
+            .changed()
+        {
+            self.store.settings.max_concurrent_bg_ops = limit;
+            self.bg_ops_pool.set_limit(limit);
+            self.persist();
+        }
+        ui.add_space(style::SPACE_SM);
+        ui.label(egui::RichText::new(self.t("settings.max_concurrent_bg_ops_hint")).weak());
     }
 
     fn settings_files(&mut self, ui: &mut egui::Ui, hidden_files_changed: &mut bool) {

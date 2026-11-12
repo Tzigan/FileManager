@@ -44,6 +44,8 @@ pub use wsl::{
     read_dir as read_wsl_dir, read_subdirs as read_wsl_subdirs,
 };
 pub use zip::{
-    create_zip_archive, extract_zip_all, extract_zip_file, extract_zip_folder,
-    read_zip_dir_cancellable, search_zip,
+    create_zip_archive_cancellable, extract_zip_all_cancellable, extract_zip_file_cancellable,
+    extract_zip_folder_cancellable, read_zip_dir_cancellable, search_zip,
 };
+#[allow(unused_imports)]
+pub use zip::{create_zip_archive, extract_zip_all, extract_zip_file, extract_zip_folder};

@@ -110,12 +110,15 @@ impl FileManagerApp {
     }
 
     /// Reload `tab`'s current path in the background without touching history.
+    /// Этот поток остаётся вне общего пула: отмена при смене пути должна освободить его слот сразу.
     pub(crate) fn navigate_fresh(&mut self, tab: usize, ctx: &egui::Context) {
         self.reload_listing(tab, ctx, true);
     }
 
     /// `use_cache` выключен у кнопки «Обновить»: список читается с диска и заменяет запись.
     fn reload_listing(&mut self, tab: usize, ctx: &egui::Context, use_cache: bool) {
+        let tab_id = self.tabs[tab].id;
+        self.cancel_search_bg_ops(tab_id);
         if self.tabs[tab].secure_trash {
             // Карточки, не readdir папки хранения.
             self.load_secure_trash_tab(tab);
@@ -481,9 +484,13 @@ impl FileManagerApp {
     }
 
     pub(super) fn cancel_loading(&mut self) {
+        let tab_id = self.tabs[self.active].id;
+        self.cancel_search_bg_ops(tab_id);
         let t = &mut self.tabs[self.active];
         t.cancel.store(true, Ordering::Relaxed);
         t.search.cancel.store(true, Ordering::Relaxed);
+        // Поздний успешный ответ не должен отменить явное действие пользователя.
+        t.search.generation = t.search.generation.wrapping_add(1);
         t.search.running = false;
         t.search.debounce_at = None;
         t.status = ListStatus::Ready;

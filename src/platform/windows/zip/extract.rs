@@ -3,14 +3,35 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 
 use super::common::*;
 
+#[allow(dead_code)]
 pub fn extract_zip_file(archive: &Path, member: &str, destination: &Path) -> io::Result<PathBuf> {
+    extract_zip_file_inner(archive, member, destination, None)
+}
+
+pub fn extract_zip_file_cancellable(
+    archive: &Path,
+    member: &str,
+    destination: &Path,
+    cancel: &AtomicBool,
+) -> io::Result<PathBuf> {
+    extract_zip_file_inner(archive, member, destination, Some(cancel))
+}
+
+fn extract_zip_file_inner(
+    archive: &Path,
+    member: &str,
+    destination: &Path,
+    cancel: Option<&AtomicBool>,
+) -> io::Result<PathBuf> {
+    check_cancel(cancel)?;
     let member = normalize_member(member)?
         .filter(|member| !member.is_dir)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "not an archive file"))?;
-    if !list_members(archive)?
+    if !list_members_with_cancel(archive, cancel)?
         .iter()
         .any(|item| !item.is_dir && item.path == member.path)
     {
@@ -31,11 +52,35 @@ pub fn extract_zip_file(archive: &Path, member: &str, destination: &Path) -> io:
         })?;
     let output = destination.join(filename);
     let mut total = 0;
-    extract_member_to(archive, &member.path, &output, &mut total)?;
+    extract_member_to_cancellable(archive, &member.path, &output, &mut total, cancel)?;
+    if let Err(error) = check_cancel(cancel) {
+        let _ = fs::remove_file(&output);
+        return Err(error);
+    }
     Ok(output)
 }
 
+#[allow(dead_code)]
 pub fn extract_zip_folder(archive: &Path, folder: &str, destination: &Path) -> io::Result<PathBuf> {
+    extract_zip_folder_inner(archive, folder, destination, None)
+}
+
+pub fn extract_zip_folder_cancellable(
+    archive: &Path,
+    folder: &str,
+    destination: &Path,
+    cancel: &AtomicBool,
+) -> io::Result<PathBuf> {
+    extract_zip_folder_inner(archive, folder, destination, Some(cancel))
+}
+
+fn extract_zip_folder_inner(
+    archive: &Path,
+    folder: &str,
+    destination: &Path,
+    cancel: Option<&AtomicBool>,
+) -> io::Result<PathBuf> {
+    check_cancel(cancel)?;
     let folder = normalize_prefix(folder)?;
     if folder.is_empty() {
         return Err(io::Error::new(
@@ -43,7 +88,7 @@ pub fn extract_zip_folder(archive: &Path, folder: &str, destination: &Path) -> i
             "archive folder was not specified",
         ));
     }
-    let members = list_members(archive)?;
+    let members = list_members_with_cancel(archive, cancel)?;
     if !members.iter().any(|member| {
         (member.path == folder && member.is_dir) || member.path.starts_with(&format!("{folder}/"))
     }) {
@@ -53,10 +98,28 @@ pub fn extract_zip_folder(archive: &Path, folder: &str, destination: &Path) -> i
         ));
     }
     let output = join_member(destination, &folder)?;
-    extract_tree(archive, &members, Some(&folder), destination, &output)
+    extract_tree(archive, &members, Some(&folder), destination, &output, cancel)
 }
 
+#[allow(dead_code)]
 pub fn extract_zip_all(archive: &Path, destination: &Path) -> io::Result<PathBuf> {
+    extract_zip_all_inner(archive, destination, None)
+}
+
+pub fn extract_zip_all_cancellable(
+    archive: &Path,
+    destination: &Path,
+    cancel: &AtomicBool,
+) -> io::Result<PathBuf> {
+    extract_zip_all_inner(archive, destination, Some(cancel))
+}
+
+fn extract_zip_all_inner(
+    archive: &Path,
+    destination: &Path,
+    cancel: Option<&AtomicBool>,
+) -> io::Result<PathBuf> {
+    check_cancel(cancel)?;
     let name = archive
         .file_stem()
         .and_then(|stem| stem.to_str())
@@ -65,9 +128,9 @@ pub fn extract_zip_all(archive: &Path, destination: &Path) -> io::Result<PathBuf
     let output_name = normalize_member(name)?
         .filter(|member| !member.is_dir)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid archive name"))?;
-    let members = list_members(archive)?;
+    let members = list_members_with_cancel(archive, cancel)?;
     let output = join_member(destination, &output_name.path)?;
-    extract_tree(archive, &members, None, destination, &output)
+    extract_tree(archive, &members, None, destination, &output, cancel)
 }
 
 pub(super) fn extract_tree(
@@ -76,7 +139,9 @@ pub(super) fn extract_tree(
     prefix: Option<&str>,
     destination_root: &Path,
     output: &Path,
+    cancel: Option<&AtomicBool>,
 ) -> io::Result<PathBuf> {
+    check_cancel(cancel)?;
     let destination_root = if destination_root.as_os_str().is_empty() {
         Path::new(".")
     } else {
@@ -124,6 +189,7 @@ pub(super) fn extract_tree(
     let result = (|| {
         let mut total = 0u64;
         for member in members {
+            check_cancel(cancel)?;
             let relative = match prefix {
                 Some(prefix) if member.path == prefix => "",
                 Some(prefix) => {
@@ -145,9 +211,16 @@ pub(super) fn extract_tree(
                 if let Some(parent) = destination.parent() {
                     fs::create_dir_all(parent)?;
                 }
-                extract_member_to(archive, &member.path, &destination, &mut total)?;
+                extract_member_to_cancellable(
+                    archive,
+                    &member.path,
+                    &destination,
+                    &mut total,
+                    cancel,
+                )?;
             }
         }
+        check_cancel(cancel)?;
         move_directory_no_replace(&stage, output)?;
         Ok(output.to_path_buf())
     })();
@@ -156,4 +229,3 @@ pub(super) fn extract_tree(
     }
     result
 }
-

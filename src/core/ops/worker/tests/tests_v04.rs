@@ -176,6 +176,90 @@ fn conflict_cancel_fails_job() {
 }
 
 #[test]
+fn file_ops_order_preserved_by_default() {
+    let dir = tmp("dependent-queue");
+    let first = dir.join("A");
+    fs::create_dir(&first).unwrap();
+    fs::write(first.join("item.txt"), b"dependent").unwrap();
+
+    let (jobs_tx, jobs_rx) = channel();
+    let (events_tx, events_rx) = channel::<OpEvent>();
+    let (_replies_tx, replies_rx) = channel();
+    let worker = spawn(jobs_rx, replies_rx, events_tx, test_ops_platform());
+    jobs_tx
+        .send(OpJob {
+            id: 1,
+            kind: OpKind::Move {
+                sources: vec![first],
+                dest: dir.join("B"),
+            },
+            cancel: Arc::new(AtomicBool::new(false)),
+        })
+        .unwrap();
+    jobs_tx
+        .send(OpJob {
+            id: 2,
+            kind: OpKind::Move {
+                sources: vec![dir.join("B").join("A")],
+                dest: dir.join("C"),
+            },
+            cancel: Arc::new(AtomicBool::new(false)),
+        })
+        .unwrap();
+    drop(jobs_tx);
+
+    let mut done = Vec::new();
+    while done.len() < 2 {
+        if let OpEvent::Done { id, .. } = events_rx.recv().unwrap() {
+            done.push(id);
+        }
+    }
+    worker.join().unwrap();
+
+    assert_eq!(done, [1, 2]);
+    assert!(!dir.join("A").exists());
+    assert!(!dir.join("B").join("A").exists());
+    assert_eq!(
+        fs::read(dir.join("C").join("A").join("item.txt")).unwrap(),
+        b"dependent"
+    );
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn file_ops_shutdown_skips_cancelled_queue() {
+    let dir = tmp("shutdown-cancelled-queue");
+    let source = dir.join("source.txt");
+    fs::write(&source, b"must stay untouched").unwrap();
+    let destination = dir.join("out");
+    let cancel = Arc::new(AtomicBool::new(true));
+    let (jobs_tx, jobs_rx) = channel();
+    let (events_tx, events_rx) = channel::<OpEvent>();
+    let (_replies_tx, replies_rx) = channel();
+    let worker = spawn(jobs_rx, replies_rx, events_tx, test_ops_platform());
+    jobs_tx
+        .send(OpJob {
+            id: 1,
+            kind: OpKind::Copy {
+                sources: vec![source.clone()],
+                dest: destination.clone(),
+            },
+            cancel,
+        })
+        .unwrap();
+    drop(jobs_tx);
+
+    assert!(matches!(
+        events_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+        OpEvent::Cancelled { id: 1 }
+    ));
+    worker.join().unwrap();
+    assert_eq!(fs::read(source).unwrap(), b"must stay untouched");
+    assert!(!destination.exists());
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn error_skip_counts_failed() {
     let dir = tmp("eskip");
     let (rtx, rrx) = channel();
