@@ -1,6 +1,7 @@
 mod args_pipe;
 mod clipboard;
 mod context_menu;
+mod dir_watch;
 mod drives;
 mod entry_details;
 mod file_ops;
@@ -18,6 +19,7 @@ mod zip;
 pub use args_pipe::{listen as pipe_listen, send as pipe_send};
 pub use clipboard::{get_clipboard_files, get_clipboard_text, set_clipboard_files};
 pub use context_menu::{install_context_menu, uninstall_context_menu};
+pub use dir_watch::spawn_dir_watch;
 pub use drives::{drives, is_local_drive};
 pub use entry_details::read_entry_details;
 pub use file_ops::replace_file;

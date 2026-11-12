@@ -195,6 +195,16 @@ pub struct Settings {
     /// Сколько последних папок держать в памяти, чтобы не читать их с диска снова.
     #[serde(default = "default_dir_cache_entries")]
     pub dir_cache_entries: usize,
+    /// Следить за внешней правкой открытой папки. Выключено — только кнопка «Обновить».
+    #[serde(default = "default_true")]
+    pub dir_watch_enabled: bool,
+    /// Пауза, после которой пачка внешних изменений становится одним чтением папки.
+    #[serde(default = "default_dir_watch_debounce_ms")]
+    pub dir_watch_debounce_ms: u64,
+}
+
+fn default_dir_watch_debounce_ms() -> u64 {
+    crate::core::dir_watch::default_dir_watch_debounce_ms()
 }
 
 fn default_dir_cache_entries() -> usize {
@@ -235,6 +245,8 @@ impl Default for Settings {
             secure_trash_allow_fallback: false,
             secure_trash_folders: Vec::new(),
             dir_cache_entries: default_dir_cache_entries(),
+            dir_watch_enabled: true,
+            dir_watch_debounce_ms: default_dir_watch_debounce_ms(),
         }
     }
 }

@@ -188,6 +188,12 @@ pub struct FileManagerApp {
     thumbnail_cache: HashMap<ThumbnailKey, egui::TextureHandle>,
     /// Лёгкие списки уже открытых папок. Эскизы и дерево сюда не входят.
     pub(crate) dir_cache: crate::core::dir_cache::DirCache,
+    dir_watch_tx: Sender<crate::core::dir_watch::DirWatchCommand>,
+    dir_watch_rx: Receiver<crate::core::dir_watch::WatchNote>,
+    dir_watch_target: Option<PathBuf>,
+    dir_watch_debounce: crate::core::dir_watch::WatchDebounce,
+    dir_watch_deadline: Option<Instant>,
+    dir_watch_manual: bool,
     thumbnail_order: VecDeque<ThumbnailKey>,
     thumbnail_failed: HashSet<ThumbnailKey>,
     zip_generation: u64,
@@ -235,6 +241,8 @@ impl FileManagerApp {
         initial_select: Option<String>,
     ) -> Self {
         let (msg_tx, msg_rx) = channel();
+        let (dir_watch_notes_tx, dir_watch_rx) = channel();
+        let dir_watch_tx = crate::platform::spawn_dir_watch(dir_watch_notes_tx);
         let (tree_req, tree_req_rx) = channel::<PathBuf>();
         let (disk_usage_tx, disk_usage_rx) = channel::<Vec<PathBuf>>();
         let (wsl_req, wsl_req_rx) = channel::<()>();
@@ -423,6 +431,12 @@ impl FileManagerApp {
             thumbnail_visible: HashSet::new(),
             thumbnail_cache: HashMap::new(),
             dir_cache: crate::core::dir_cache::DirCache::new(dir_cache_entries),
+            dir_watch_tx,
+            dir_watch_rx,
+            dir_watch_target: None,
+            dir_watch_debounce: crate::core::dir_watch::WatchDebounce::default(),
+            dir_watch_deadline: None,
+            dir_watch_manual: false,
             thumbnail_order: VecDeque::new(),
             thumbnail_failed: HashSet::new(),
             zip_generation: 0,
@@ -886,6 +900,10 @@ impl FileManagerApp {
                 ui.label(self.t(status).to_owned());
             } else {
                 ui.label(format!("{}: {}", self.t("status.items"), tab.entries.len()));
+                if self.dir_watch_manual {
+                    ui.separator();
+                    ui.label(self.t("watch.unavailable").to_owned());
+                }
                 if !tab.selection.is_empty() {
                     ui.separator();
                     ui.label(format!(
@@ -1070,6 +1088,7 @@ impl eframe::App for FileManagerApp {
         }
         self.drain_messages(&ctx);
         self.sync_entry_details(&ctx);
+        self.sync_dir_watch(&ctx);
         self.schedule_disk_usage_refresh(&ctx);
         self.drain_ops_events(&ctx);
         self.handle_keys(&ctx);

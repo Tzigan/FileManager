@@ -128,7 +128,8 @@ pub use self::windows::{
     install_context_menu, launch_updater, notify_already_running, open_recycle_bin, open_terminal,
     pick_folder, pipe_listen, pipe_send, prepare_update_archive, read_entry_details,
     read_zip_dir_cancellable, recycle_bin, replace_file, search_zip, set_attributes,
-    set_clipboard_files, shell_open, signal_update_started, uninstall_context_menu, volume_id,
+    set_clipboard_files, shell_open, signal_update_started, spawn_dir_watch,
+    uninstall_context_menu, volume_id,
 };
 
 #[cfg(windows)]
@@ -423,6 +424,22 @@ mod stubs {
     pub fn volume_id(_path: &std::path::Path) -> Option<String> {
         None
     }
+    pub fn spawn_dir_watch(
+        events: std::sync::mpsc::Sender<crate::core::dir_watch::WatchNote>,
+    ) -> std::sync::mpsc::Sender<crate::core::dir_watch::DirWatchCommand> {
+        let (commands_tx, commands_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            while let Ok(command) = commands_rx.recv() {
+                if let crate::core::dir_watch::DirWatchCommand::Watch(path) = command {
+                    let _ = events.send(crate::core::dir_watch::WatchNote {
+                        path,
+                        signal: crate::core::dir_watch::WatchSignal::Unavailable,
+                    });
+                }
+            }
+        });
+        commands_tx
+    }
 }
 
 #[cfg(not(windows))]
@@ -432,7 +449,7 @@ pub use stubs::{
     free_space, get_clipboard_files, get_clipboard_text, install_context_menu, launch_updater,
     notify_already_running, open_recycle_bin, open_terminal, pick_folder, pipe_listen, pipe_send,
     prepare_update_archive, read_entry_details, read_zip_dir_cancellable, recycle_bin,
-    replace_file, search_zip, set_attributes, set_clipboard_files, shell_open,
+    replace_file, search_zip,     set_attributes, set_clipboard_files, shell_open, spawn_dir_watch,
     signal_update_started, uninstall_context_menu, volume_id,
 };
 

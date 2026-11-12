@@ -894,4 +894,16 @@ mod tests {
         assert_eq!(selection, BTreeSet::from([SelectionKey::from_entry(&kept)]));
         assert_ne!(kept.name, kept.path.display().to_string());
     }
+
+    #[test]
+    fn notify_does_not_break_selection_keys() {
+        let kept = entry(1);
+        let gone = entry(2);
+        let mut selection = BTreeSet::new();
+        selection.insert(SelectionKey::from_entry(&kept));
+        selection.insert(SelectionKey::from_entry(&gone));
+        retain_existing_selection(&mut selection, &[kept.clone()]);
+        assert!(selection.contains(&SelectionKey::from_entry(&kept)));
+        assert!(!selection.contains(&SelectionKey::from_entry(&gone)));
+    }
 }
