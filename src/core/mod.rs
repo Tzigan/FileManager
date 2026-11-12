@@ -1,5 +1,6 @@
 pub mod cli;
 pub mod dir_cache;
+pub mod dir_watch;
 pub mod entry_details;
 pub mod format;
 pub mod fs;

@@ -28,6 +28,7 @@
   "about.title": "About",
   "status.ready": "Ready",
   "status.loading": "Loading folder…",
+  "watch.unavailable": "Changes made outside this folder are not watched. Refresh the list manually.",
   "status.items": "Items",
   "status.selected": "selected",
   "search.hint": "Search names in this folder",

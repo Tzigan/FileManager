@@ -30,6 +30,7 @@
   "about.title": "О программе",
   "status.ready": "Готово",
   "status.loading": "Чтение папки…",
+  "watch.unavailable": "Изменения этой папки снаружи не отслеживаются. Обновите список вручную.",
   "status.items": "Элементов",
   "status.selected": "выбрано",
   "search.hint": "Поиск имён в этой папке",

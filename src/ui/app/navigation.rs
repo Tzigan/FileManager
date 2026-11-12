@@ -301,6 +301,72 @@ impl FileManagerApp {
         }
     }
 
+    /// Внешнее изменение папки: тот же сброс кэша, что у файловых операций, затем полное чтение.
+    pub(crate) fn apply_external_dir_change(&mut self, path: &Path, ctx: &egui::Context) {
+        self.dir_cache.invalidate_dir(path);
+        let active = self.active;
+        let same = self.tabs.get(active).is_some_and(|tab| {
+            tab.path == path && !tab.secure_trash && tab.archive_prefix.is_none()
+        });
+        if same {
+            self.reload_listing(active, ctx, false);
+        }
+    }
+
+    pub(super) fn sync_dir_watch(&mut self, ctx: &egui::Context) {
+        while let Ok(note) = self.dir_watch_rx.try_recv() {
+            if self.dir_watch_target.as_ref() != Some(&note.path) {
+                continue;
+            }
+            use crate::core::dir_watch::WatchReaction;
+            match self.dir_watch_debounce.note(note.signal) {
+                WatchReaction::ManualOnly => self.dir_watch_manual = true,
+                WatchReaction::Coalesce => {
+                    let pause = Duration::from_millis(self.store.settings.dir_watch_debounce_ms);
+                    self.dir_watch_deadline = Some(Instant::now() + pause);
+                    ctx.request_repaint_after(pause);
+                }
+                WatchReaction::Reload { .. } => {}
+            }
+        }
+        let desired = if self.store.settings.dir_watch_enabled {
+            self.watched_folder()
+        } else {
+            None
+        };
+        if self.dir_watch_target != desired {
+            self.dir_watch_target = desired.clone();
+            self.dir_watch_manual = false;
+            self.dir_watch_deadline = None;
+            self.dir_watch_debounce = crate::core::dir_watch::WatchDebounce::default();
+            let command = match desired {
+                Some(path) => crate::core::dir_watch::DirWatchCommand::Watch(path),
+                None => crate::core::dir_watch::DirWatchCommand::Stop,
+            };
+            let _ = self.dir_watch_tx.send(command);
+        }
+        if self.dir_watch_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            self.dir_watch_deadline = None;
+            if let Some(crate::core::dir_watch::WatchReaction::Reload { .. }) =
+                self.dir_watch_debounce.flush()
+            {
+                if let Some(path) = self.dir_watch_target.clone() {
+                    self.apply_external_dir_change(&path, ctx);
+                }
+            }
+        }
+    }
+
+    fn watched_folder(&self) -> Option<PathBuf> {
+        let tab = self.tabs.get(self.active)?;
+        crate::core::dir_watch::watch_applies(
+            tab.secure_trash,
+            tab.archive_prefix.is_some(),
+            crate::platform::is_wsl_path(&tab.path),
+        )
+        .then(|| tab.path.clone())
+    }
+
     pub(crate) fn refresh(&mut self, ctx: &egui::Context) {
         self.refresh_wsl_distributions();
         if let Some(path) = self.tabs.get(self.active).map(|tab| tab.path.clone()) {
