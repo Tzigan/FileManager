@@ -149,6 +149,48 @@ pub(super) fn check_cancel(cancel: Option<&AtomicBool>) -> io::Result<()> {
     }
 }
 
+pub(super) fn publish_staged_path(
+    staged: &Path,
+    destination: &Path,
+    cancel: Option<&AtomicBool>,
+    publish: impl FnOnce(&Path, &Path) -> io::Result<()>,
+) -> io::Result<PathBuf> {
+    check_cancel(cancel)?;
+    if let Some(parent) = destination
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::metadata(parent)?;
+    }
+    // После проверки доступности родителя синхронное перемещение является commit-границей.
+    publish(staged, destination)?;
+    Ok(destination.to_path_buf())
+}
+
+pub(super) fn cleanup_stage_dir(stage: &Path) {
+    if let Some(parent) = stage
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        && let Err(error) = fs::metadata(parent)
+    {
+        tracing::warn!(
+            path = %stage.display(),
+            error = %error,
+            "том недоступен; временные ZIP-данные оставлены для последующей очистки"
+        );
+        return;
+    }
+    if let Err(error) = fs::remove_dir_all(stage)
+        && error.kind() != io::ErrorKind::NotFound
+    {
+        tracing::warn!(
+            path = %stage.display(),
+            error = %error,
+            "не удалось удалить временные данные ZIP"
+        );
+    }
+}
+
 pub(super) fn normalize_member(raw: &str) -> io::Result<Option<ArchiveMember>> {
     let mut path = raw;
     while let Some(rest) = path.strip_prefix("./") {

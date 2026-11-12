@@ -22,6 +22,7 @@ mod tests {
     use std::fs::{self, OpenOptions};
     use std::io::{self, Read, Write};
     use std::path::{Path, PathBuf};
+    use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -140,9 +141,11 @@ mod tests {
         );
         assert!(!root.join("cancelled.zip").exists());
 
-        let archive =
-            create_zip_archive(std::slice::from_ref(&source), &create_options(&root, "archive"))
-                .unwrap();
+        let archive = create_zip_archive(
+            std::slice::from_ref(&source),
+            &create_options(&root, "archive"),
+        )
+        .unwrap();
         let destination = root.join("out");
         fs::create_dir(&destination).unwrap();
         assert_eq!(
@@ -159,6 +162,165 @@ mod tests {
         );
         assert!(!destination.join("archive").exists());
         assert!(!destination.join("source.txt").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn zip_publish_on_removed_drive_does_not_hang_worker() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let root = temp_dir();
+        let stage = root.join(".filemanager-zip-stage-test");
+        fs::create_dir(&stage).unwrap();
+        let staged = stage.join("staged.zip");
+        fs::write(&staged, b"complete archive").unwrap();
+        let unavailable_parent = root.join("removed-drive");
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_publish = Arc::clone(&attempts);
+        let staged_task = staged.clone();
+        let parent_task = unavailable_parent.clone();
+        let (events_tx, _events_rx) = mpsc::channel();
+        let pool = crate::core::bg_ops::BgOpPool::new(1, events_tx, || {});
+        let (result_tx, result_rx) = mpsc::channel();
+
+        // Отсутствующий родитель детерминированно имитирует недоступный том без его извлечения.
+        pool.submit(crate::core::bg_ops::BgOpKind::ZipCreate, move |cancel| {
+            let result = move_zip_to_unique_name_with(
+                &staged_task,
+                &parent_task,
+                "archive",
+                Some(&cancel),
+                |source, destination| {
+                    attempts_publish.fetch_add(1, Ordering::Relaxed);
+                    move_file_no_replace(source, destination)
+                },
+            );
+            let _ = result_tx.send(result.map_err(|error| error.kind()));
+        })
+        .unwrap();
+
+        assert_eq!(
+            result_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            Err(io::ErrorKind::NotFound)
+        );
+        drop(pool);
+        assert_eq!(attempts.load(Ordering::Relaxed), 0);
+        assert!(staged.exists());
+        cleanup_stage_dir(&stage);
+        assert!(!stage.exists());
+        assert!(!unavailable_parent.join("archive.zip").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn shutdown_does_not_block_on_impossible_zip_publish() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let root = temp_dir();
+        let stage = root.join(".filemanager-zip-stage-shutdown");
+        fs::create_dir(&stage).unwrap();
+        let staged = stage.join("staged.zip");
+        fs::write(&staged, b"complete archive").unwrap();
+        let destination = root.join("archive.zip");
+        let (events_tx, _events_rx) = mpsc::channel();
+        let mut pool = crate::core::bg_ops::BgOpPool::new(1, events_tx, || {});
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (result_tx, result_rx) = mpsc::channel();
+        let staged_task = staged.clone();
+        let destination_task = destination.clone();
+
+        // Имитируем уже начатый системный вызов, который после запроса shutdown возвращает ошибку носителя.
+        pool.submit(crate::core::bg_ops::BgOpKind::ZipCreate, move |cancel| {
+            let result = publish_staged_path(
+                &staged_task,
+                &destination_task,
+                Some(&cancel),
+                |source, target| {
+                    let _ = entered_tx.send(());
+                    let _ = release_rx.recv();
+                    let _ = (source, target);
+                    Err(io::Error::new(
+                        io::ErrorKind::NotFound,
+                        "destination volume was removed during publication",
+                    ))
+                },
+            );
+            let _ = result_tx.send(result.map_err(|error| error.kind()));
+        })
+        .unwrap();
+
+        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        pool.request_shutdown();
+        release_tx.send(()).unwrap();
+        assert_eq!(
+            result_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            Err(io::ErrorKind::NotFound)
+        );
+        pool.join_workers();
+        assert!(staged.exists());
+        cleanup_stage_dir(&stage);
+        assert!(!stage.exists());
+        assert!(!destination.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cancel_running_zip_publish_conflict_handled() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let root = temp_dir();
+        let stage = root.join(".filemanager-zip-stage-cancel");
+        fs::create_dir(&stage).unwrap();
+        let staged = stage.join("staged.zip");
+        let destination = root.join("archive.zip");
+        fs::write(&staged, b"complete archive").unwrap();
+        let (events_tx, _events_rx) = mpsc::channel();
+        let pool = crate::core::bg_ops::BgOpPool::new(1, events_tx, || {});
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (result_tx, result_rx) = mpsc::channel();
+        let staged_task = staged.clone();
+        let destination_task = destination.clone();
+
+        // Отмена после входа в publisher не прерывает commit: он завершается целиком или возвращает ошибку.
+        let task = pool
+            .submit(crate::core::bg_ops::BgOpKind::ZipCreate, move |cancel| {
+                let result = publish_staged_path(
+                    &staged_task,
+                    &destination_task,
+                    Some(&cancel),
+                    |source, target| {
+                        let _ = entered_tx.send(());
+                        let _ = release_rx.recv();
+                        fs::rename(source, target)
+                    },
+                );
+                let _ = result_tx.send(result);
+            })
+            .unwrap();
+
+        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(
+            pool.cancel(task),
+            crate::core::bg_ops::BgOpCancelOutcome::Running
+        );
+        release_tx.send(()).unwrap();
+        assert_eq!(
+            result_rx
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap()
+                .unwrap(),
+            destination
+        );
+        drop(pool);
+        assert_eq!(fs::read(destination).unwrap(), b"complete archive");
+        cleanup_stage_dir(&stage);
+        assert!(!stage.exists());
         fs::remove_dir_all(root).unwrap();
     }
 

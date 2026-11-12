@@ -522,6 +522,61 @@ mod tests {
     }
 
     #[test]
+    fn app_shutdown_with_pending_bg_ops_and_file_ops_still_hold() {
+        let (mut pool, _events) = pool(1);
+        let (started_tx, started_rx) = mpsc::channel();
+        let pool_stopped = Arc::new(AtomicBool::new(false));
+        let pool_stopped_task = Arc::clone(&pool_stopped);
+        pool.submit(BgOpKind::ZipCreate, move |cancel| {
+            let _ = started_tx.send(());
+            while !cancel.load(Ordering::Relaxed) {
+                thread::yield_now();
+            }
+            pool_stopped_task.store(true, Ordering::Relaxed);
+        })
+        .unwrap();
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+
+        let dir = std::env::temp_dir().join(format!("fm-bg-shutdown-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let output = dir.join("must-not-be-created.txt");
+        let cancel = Arc::new(AtomicBool::new(true));
+        let (jobs_tx, jobs_rx) = mpsc::channel();
+        let (replies_tx, replies_rx) = mpsc::channel();
+        let (ops_events_tx, ops_events_rx) = mpsc::channel();
+        let ops_worker = crate::core::ops::spawn(
+            jobs_rx,
+            replies_rx,
+            ops_events_tx,
+            crate::platform::ops_platform(),
+        );
+        jobs_tx
+            .send(crate::core::ops::OpJob {
+                id: 41,
+                kind: crate::core::ops::OpKind::CreateFile {
+                    path: output.clone(),
+                },
+                cancel,
+            })
+            .unwrap();
+
+        pool.request_shutdown();
+        drop(jobs_tx);
+        drop(replies_tx);
+        ops_worker.join().unwrap();
+        pool.join_workers();
+
+        assert!(pool_stopped.load(Ordering::Relaxed));
+        assert!(!output.exists());
+        assert!(matches!(
+            ops_events_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            crate::core::ops::OpEvent::Cancelled { id: 41 }
+        ));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn critical_flows_not_blocked_by_pool() {
         let (pool, _events) = pool(1);
         let (release_tx, release_rx) = mpsc::channel();

@@ -103,6 +103,7 @@ impl FileManagerApp {
             Ok(None) => {}
             Ok(Some(destination)) => self
                 .spawn_zip_extraction(
+                    destination.clone(),
                     move |cancel| run_zip_extract(&archive, &destination, &plan, cancel),
                     ctx,
                 ),
@@ -122,6 +123,7 @@ impl FileManagerApp {
             .unwrap_or(Path::new("."))
             .to_path_buf();
         self.spawn_zip_extraction(
+            destination.clone(),
             move |cancel| {
                 crate::platform::extract_zip_file_cancellable(
                     &archive,
@@ -142,6 +144,7 @@ impl FileManagerApp {
             .unwrap_or(Path::new("."))
             .to_path_buf();
         self.spawn_zip_extraction(
+            destination.clone(),
             move |cancel| {
                 crate::platform::extract_zip_folder_cancellable(
                     &archive,
@@ -166,6 +169,7 @@ impl FileManagerApp {
             .unwrap_or(Path::new("."))
             .to_path_buf();
         self.spawn_zip_extraction(
+            destination.clone(),
             move |cancel| {
                 crate::platform::extract_zip_all_cancellable(&archive, &destination, cancel)
             },
@@ -175,6 +179,7 @@ impl FileManagerApp {
 
     fn spawn_zip_extraction(
         &mut self,
+        destination: PathBuf,
         extraction: impl FnOnce(&AtomicBool) -> std::io::Result<PathBuf> + Send + 'static,
         ctx: &egui::Context,
     ) {
@@ -188,13 +193,18 @@ impl FileManagerApp {
         let generation = self.zip_generation;
         let tx = self.msg_tx.clone();
         let ctx = ctx.clone();
+        let message_destination = destination;
         self.zip_cancel_requested = false;
         self.zip_queued = true;
         match self.bg_ops_pool.submit(
             crate::core::bg_ops::BgOpKind::ZipExtract,
             move |cancel| {
                 let result = extraction(&cancel);
-                let _ = tx.send(WorkerMsg::ZipExtracted { generation, result });
+                let _ = tx.send(WorkerMsg::ZipExtracted {
+                    generation,
+                    destination: message_destination,
+                    result,
+                });
                 ctx.request_repaint();
             },
         ) {
@@ -296,6 +306,9 @@ impl FileManagerApp {
     }
 
     pub(super) fn zip_error_text(&self, error: &std::io::Error) -> String {
+        if error.to_string().starts_with("partial ZIP publication:") {
+            return self.t("zip.error_partial_publish").to_owned();
+        }
         if error
             .raw_os_error()
             .is_some_and(|code| code == 32 || code == 33)
@@ -863,29 +876,77 @@ fn run_zip_extract(
                 }
                 // До первой перемены имени результат целиком остаётся во временной папке.
                 check_zip_cancel(cancel)?;
-                // Публикацию не прерываем посередине, чтобы отмена не оставила набор частично видимым.
-                for (staged, output) in &outputs {
-                    if output.exists() {
-                        return Err(std::io::Error::new(
-                            std::io::ErrorKind::AlreadyExists,
-                            "destination already exists",
-                        ));
-                    }
-                    if let Some(parent) = output.parent() {
-                        std::fs::create_dir_all(parent)?;
-                    }
-                    std::fs::rename(staged, output)?;
-                }
+                // Публикацию не прерываем по токену отмены; ошибку после первого перемещения помечаем отдельно.
+                publish_staged_outputs_with(&outputs, |source, target| {
+                    std::fs::rename(source, target)
+                })?;
                 if outputs.len() == 1 {
                     Ok(outputs[0].1.clone())
                 } else {
                     Ok(destination.to_path_buf())
                 }
             })();
-            let _ = std::fs::remove_dir_all(&stage);
+            cleanup_zip_extract_stage(&stage);
             result
         }
     }
+}
+
+fn cleanup_zip_extract_stage(stage: &Path) {
+    if let Some(parent) = stage
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        && let Err(error) = std::fs::metadata(parent)
+    {
+        tracing::warn!(
+            path = %stage.display(),
+            error = %error,
+            "том недоступен; временные данные извлечения ZIP оставлены для последующей очистки"
+        );
+        return;
+    }
+    if let Err(error) = std::fs::remove_dir_all(stage)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!(
+            path = %stage.display(),
+            error = %error,
+            "не удалось удалить временный каталог выбранных элементов ZIP"
+        );
+    }
+}
+
+fn publish_staged_outputs_with(
+    outputs: &[(PathBuf, PathBuf)],
+    mut publish: impl FnMut(&Path, &Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    let mut published_any = false;
+    for (staged, output) in outputs {
+        let result = (|| {
+            if output.exists() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    "destination already exists",
+                ));
+            }
+            if let Some(parent) = output.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            publish(staged, output)
+        })();
+        if let Err(error) = result {
+            return if published_any {
+                Err(std::io::Error::new(
+                    error.kind(),
+                    format!("partial ZIP publication: {error}"),
+                ))
+            } else {
+                Err(error)
+            };
+        }
+        published_any = true;
+    }
+    Ok(())
 }
 
 fn check_zip_cancel(cancel: &AtomicBool) -> std::io::Result<()> {
@@ -1120,4 +1181,43 @@ mod zip_dialog_tests {
         );
         std::fs::remove_dir_all(root).unwrap();
     }
+
+    #[test]
+    fn zip_multi_member_publish_failure_reports_partial_output() {
+        let root = temp_dir();
+        let stage = root.join("stage");
+        let destination = root.join("destination");
+        std::fs::create_dir(&stage).unwrap();
+        std::fs::create_dir(&destination).unwrap();
+        let staged_first = stage.join("first.txt");
+        let staged_second = stage.join("second.txt");
+        let output_first = destination.join("first.txt");
+        let output_second = destination.join("second.txt");
+        std::fs::write(&staged_first, b"first").unwrap();
+        std::fs::write(&staged_second, b"second").unwrap();
+        let outputs = vec![
+            (staged_first, output_first.clone()),
+            (staged_second, output_second.clone()),
+        ];
+        let mut attempts = 0;
+
+        let error = publish_staged_outputs_with(&outputs, |source, target| {
+            attempts += 1;
+            if attempts == 2 {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "destination volume was removed",
+                ))
+            } else {
+                std::fs::rename(source, target)
+            }
+        })
+        .unwrap_err();
+
+        assert!(error.to_string().starts_with("partial ZIP publication:"));
+        assert_eq!(std::fs::read(output_first).unwrap(), b"first");
+        assert!(!output_second.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
 }

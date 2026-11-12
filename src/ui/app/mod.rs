@@ -83,6 +83,7 @@ pub(crate) enum WorkerMsg {
     /// Завершилось извлечение элемента из ZIP.
     ZipExtracted {
         generation: u64,
+        destination: PathBuf,
         result: std::io::Result<PathBuf>,
     },
     /// Завершилось создание ZIP-архива.
@@ -809,10 +810,7 @@ impl FileManagerApp {
                     generation,
                     result,
                 } => {
-                    let Some(tab) = self
-                        .tabs
-                        .iter()
-                        .position(|tab| tab.id == tab_id && tab.search.generation == generation)
+                    let Some(tab) = search::search_result_tab_index(&self.tabs, tab_id, generation)
                     else {
                         continue;
                     };
@@ -922,7 +920,11 @@ impl FileManagerApp {
                         }
                     }
                 }
-                WorkerMsg::ZipExtracted { generation, result } => {
+                WorkerMsg::ZipExtracted {
+                    generation,
+                    destination,
+                    result,
+                } => {
                     if generation != self.zip_generation {
                         continue;
                     }
@@ -931,10 +933,10 @@ impl FileManagerApp {
                     self.zip_task_id = None;
                     self.zip_queued = false;
                     self.zip_cancel_requested = false;
+                    // Ошибка могла произойти после публикации части выбранных элементов.
+                    self.dir_cache.invalidate_dir(&destination);
                     self.zip_message = Some(match result {
                         Ok(path) => {
-                            // Извлечённый файл лежит в обычной папке, её список больше не актуален.
-                            self.dir_cache.invalidate_dir(&path);
                             format!("{}: {}", self.t("zip.extracted"), path.display())
                         }
                         Err(error) => self.zip_error_text(&error),

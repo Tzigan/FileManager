@@ -3,6 +3,11 @@
 use super::*;
 use crate::core::search as core_search;
 
+pub(super) fn search_result_tab_index(tabs: &[Tab], tab_id: u64, generation: u64) -> Option<usize> {
+    tabs.iter()
+        .position(|tab| tab.id == tab_id && tab.search.generation == generation)
+}
+
 impl FileManagerApp {
     fn schedule_search(&mut self) {
         let tab_id = self.tabs[self.active].id;
@@ -229,5 +234,51 @@ impl FileManagerApp {
                 self.tabs[self.active].search.debounce_at = Some(std::time::Instant::now());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    #[test]
+    fn search_cancel_generation_still_safe_in_pool() {
+        let (events_tx, _events_rx) = mpsc::channel();
+        let pool = crate::core::bg_ops::BgOpPool::new(1, events_tx, || {});
+        let mut tabs = vec![Tab::new(PathBuf::from(r"C:\search"))];
+        tabs[0].search.generation = 7;
+        let tab_id = tabs[0].id;
+        let cancel = Arc::clone(&tabs[0].search.cancel);
+        let (started_tx, started_rx) = mpsc::channel();
+        let (result_tx, result_rx) = mpsc::channel();
+        let task_id = pool
+            .submit_with_cancel(
+                crate::core::bg_ops::BgOpKind::Search,
+                cancel,
+                move |cancel| {
+                    let _ = started_tx.send(());
+                    while !cancel.load(Ordering::Relaxed) {
+                        thread::yield_now();
+                    }
+                    let _ = result_tx.send((tab_id, 7));
+                },
+            )
+            .unwrap();
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+
+        tabs[0].search.generation = 8;
+        assert_eq!(
+            pool.cancel(task_id),
+            crate::core::bg_ops::BgOpCancelOutcome::Running
+        );
+        let (result_tab, result_generation) =
+            result_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(
+            search_result_tab_index(&tabs, result_tab, result_generation),
+            None
+        );
+        assert_eq!(search_result_tab_index(&tabs, tab_id, 8), Some(0));
     }
 }

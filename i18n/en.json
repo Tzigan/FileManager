@@ -120,6 +120,7 @@
   "zip.error_exists": "An item with that name already exists.",
   "zip.error_space": "There is not enough disk space to extract the archive.",
   "zip.error_busy": "A file is busy or cannot be accessed.",
+  "zip.error_partial_publish": "ZIP extraction stopped while publishing. Some selected items may already exist in the destination; its cache was invalidated.",
   "zip.error": "The archive could not be extracted.",
   "toolbar.up": "Up",
   "toolbar.back": "Back",
