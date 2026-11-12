@@ -199,11 +199,13 @@ impl FileManagerApp {
             kind,
             cancel: Arc::new(AtomicBool::new(false)),
         };
-        let _ = self.ops_tx.send(OpJob {
-            id,
-            kind: job.kind,
-            cancel: job.cancel.clone(),
-        });
+        if let Some(ops_tx) = &self.ops_tx {
+            let _ = ops_tx.send(OpJob {
+                id,
+                kind: job.kind,
+                cancel: job.cancel.clone(),
+            });
+        }
         self.ops_ui.jobs.push(JobUi {
             id,
             label: String::new(),
@@ -355,6 +357,11 @@ impl FileManagerApp {
                         .push(format!("{}: {}", path.display(), message));
                     self.ops_ui.error_q = Some((id, path, message, retryable));
                 }
+                OpEvent::Cancelled { id } => {
+                    if let Some(pos) = self.ops_ui.jobs.iter().position(|job| job.id == id) {
+                        self.ops_ui.jobs.remove(pos);
+                    }
+                }
                 OpEvent::Done { id, failed } => {
                     let touched = self
                         .ops_ui
@@ -381,11 +388,15 @@ impl FileManagerApp {
     }
 
     pub(crate) fn reply_conflict(&self, id: u64, action: ConflictAction) {
-        let _ = self.op_reply.send(OpReply::Conflict { id, action });
+        if let Some(reply_tx) = &self.op_reply {
+            let _ = reply_tx.send(OpReply::Conflict { id, action });
+        }
     }
 
     pub(crate) fn reply_error(&self, id: u64, action: ErrorAction) {
-        let _ = self.op_reply.send(OpReply::Error { id, action });
+        if let Some(reply_tx) = &self.op_reply {
+            let _ = reply_tx.send(OpReply::Error { id, action });
+        }
     }
 
     // ------------------------------------------------------------------

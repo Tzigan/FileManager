@@ -39,6 +39,11 @@ fn update_install_respects_auto_restart_and_busy_work() {
 }
 
 #[test]
+fn thumbnails_channel_limit_not_lost() {
+    assert_eq!(super::THUMBNAIL_QUEUE_CAPACITY, 24);
+}
+
+#[test]
 fn dropped_paths_collects() {
     let files: Vec<egui::DroppedFileHandle> = vec![
         std::sync::Arc::new(MockDrop(PathBuf::from("C:\\a.txt"))),

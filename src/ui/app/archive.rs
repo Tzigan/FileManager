@@ -4,6 +4,9 @@ use super::*;
 use crate::platform::{
     ZipCompressionLevel, ZipCompressionMethod, ZipCreateOptions, ZipExistingBehavior,
 };
+use std::sync::atomic::AtomicU64;
+
+static NEXT_ZIP_EXTRACT_STAGE_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone)]
 pub(super) struct ZipCreateDialog {
@@ -99,7 +102,10 @@ impl FileManagerApp {
         match crate::platform::pick_folder(&title, initial_dir) {
             Ok(None) => {}
             Ok(Some(destination)) => self
-                .spawn_zip_extraction(move || run_zip_extract(&archive, &destination, &plan), ctx),
+                .spawn_zip_extraction(
+                    move |cancel| run_zip_extract(&archive, &destination, &plan, cancel),
+                    ctx,
+                ),
             Err(error) => {
                 self.zip_creating = false;
                 self.zip_message = Some(self.zip_error_text(&error));
@@ -116,7 +122,14 @@ impl FileManagerApp {
             .unwrap_or(Path::new("."))
             .to_path_buf();
         self.spawn_zip_extraction(
-            move || crate::platform::extract_zip_file(&archive, &member, &destination),
+            move |cancel| {
+                crate::platform::extract_zip_file_cancellable(
+                    &archive,
+                    &member,
+                    &destination,
+                    cancel,
+                )
+            },
             ctx,
         );
     }
@@ -129,7 +142,14 @@ impl FileManagerApp {
             .unwrap_or(Path::new("."))
             .to_path_buf();
         self.spawn_zip_extraction(
-            move || crate::platform::extract_zip_folder(&archive, &folder, &destination),
+            move |cancel| {
+                crate::platform::extract_zip_folder_cancellable(
+                    &archive,
+                    &folder,
+                    &destination,
+                    cancel,
+                )
+            },
             ctx,
         );
     }
@@ -146,14 +166,16 @@ impl FileManagerApp {
             .unwrap_or(Path::new("."))
             .to_path_buf();
         self.spawn_zip_extraction(
-            move || crate::platform::extract_zip_all(&archive, &destination),
+            move |cancel| {
+                crate::platform::extract_zip_all_cancellable(&archive, &destination, cancel)
+            },
             ctx,
         );
     }
 
     fn spawn_zip_extraction(
         &mut self,
-        extraction: impl FnOnce() -> std::io::Result<PathBuf> + Send + 'static,
+        extraction: impl FnOnce(&AtomicBool) -> std::io::Result<PathBuf> + Send + 'static,
         ctx: &egui::Context,
     ) {
         if self.zip_busy {
@@ -166,11 +188,34 @@ impl FileManagerApp {
         let generation = self.zip_generation;
         let tx = self.msg_tx.clone();
         let ctx = ctx.clone();
-        thread::spawn(move || {
-            let result = extraction();
-            let _ = tx.send(WorkerMsg::ZipExtracted { generation, result });
-            ctx.request_repaint();
-        });
+        self.zip_cancel_requested = false;
+        self.zip_queued = true;
+        match self.bg_ops_pool.submit(
+            crate::core::bg_ops::BgOpKind::ZipExtract,
+            move |cancel| {
+                let result = extraction(&cancel);
+                let _ = tx.send(WorkerMsg::ZipExtracted { generation, result });
+                ctx.request_repaint();
+            },
+        ) {
+            Ok(id) => {
+                self.zip_task_id = Some(id);
+                self.bg_op_ui.insert(
+                    id,
+                    super::BgOpUiTask {
+                        kind: super::BgOpUiKind::Zip { generation },
+                        queued: true,
+                    },
+                );
+            }
+            Err(_) => {
+                self.zip_busy = false;
+                self.zip_queued = false;
+                self.zip_task_id = None;
+                self.zip_cancel_requested = false;
+                self.zip_message = Some(self.t("background_ops.failed").to_owned());
+            }
+        }
     }
 
     fn spawn_zip_creation(
@@ -191,15 +236,63 @@ impl FileManagerApp {
         let message_destination = options.destination.clone();
         let repaint_ctx = ctx.clone();
         ctx.request_repaint();
-        thread::spawn(move || {
-            let result = crate::platform::create_zip_archive(&sources, &options);
-            let _ = tx.send(WorkerMsg::ZipCreated {
-                generation,
-                destination: message_destination,
-                result,
-            });
-            repaint_ctx.request_repaint();
-        });
+        self.zip_cancel_requested = false;
+        self.zip_queued = true;
+        match self.bg_ops_pool.submit(
+            crate::core::bg_ops::BgOpKind::ZipCreate,
+            move |cancel| {
+                let result =
+                    crate::platform::create_zip_archive_cancellable(&sources, &options, &cancel);
+                let _ = tx.send(WorkerMsg::ZipCreated {
+                    generation,
+                    destination: message_destination,
+                    result,
+                });
+                repaint_ctx.request_repaint();
+            },
+        ) {
+            Ok(id) => {
+                self.zip_task_id = Some(id);
+                self.bg_op_ui.insert(
+                    id,
+                    super::BgOpUiTask {
+                        kind: super::BgOpUiKind::Zip { generation },
+                        queued: true,
+                    },
+                );
+            }
+            Err(_) => {
+                self.zip_busy = false;
+                self.zip_creating = false;
+                self.zip_queued = false;
+                self.zip_task_id = None;
+                self.zip_cancel_requested = false;
+                self.zip_message = Some(self.t("background_ops.failed").to_owned());
+            }
+        }
+    }
+
+    pub(super) fn cancel_zip_operation(&mut self, ctx: &egui::Context) {
+        let Some(id) = self.zip_task_id else {
+            return;
+        };
+        match self.bg_ops_pool.cancel(id) {
+            crate::core::bg_ops::BgOpCancelOutcome::Queued => {
+                self.bg_op_ui.remove(&id);
+                self.zip_generation = self.zip_generation.wrapping_add(1);
+                self.zip_task_id = None;
+                self.zip_busy = false;
+                self.zip_creating = false;
+                self.zip_queued = false;
+                self.zip_cancel_requested = false;
+                self.zip_message = Some(self.t("background_ops.cancelled").to_owned());
+            }
+            crate::core::bg_ops::BgOpCancelOutcome::Running => {
+                self.zip_cancel_requested = true;
+            }
+            crate::core::bg_ops::BgOpCancelOutcome::NotFound => {}
+        }
+        ctx.request_repaint();
     }
 
     pub(super) fn zip_error_text(&self, error: &std::io::Error) -> String {
@@ -210,6 +303,7 @@ impl FileManagerApp {
             return self.t("zip.error_busy").to_owned();
         }
         match error.kind() {
+            std::io::ErrorKind::Interrupted => self.t("background_ops.cancelled").to_owned(),
             std::io::ErrorKind::PermissionDenied => self.t("error.access_denied").to_owned(),
             std::io::ErrorKind::FileTooLarge => self.t("zip.error_too_large").to_owned(),
             std::io::ErrorKind::Unsupported => self.t("zip.error_zip64_unsupported").to_owned(),
@@ -259,6 +353,7 @@ impl FileManagerApp {
             return self.t("zip.error_busy").to_owned();
         }
         match error.kind() {
+            std::io::ErrorKind::Interrupted => self.t("background_ops.cancelled").to_owned(),
             std::io::ErrorKind::PermissionDenied => self.t("error.access_denied").to_owned(),
             std::io::ErrorKind::FileTooLarge => self.t("zip.error_too_large").to_owned(),
             std::io::ErrorKind::Unsupported => self.t("zip.create_error").to_owned(),
@@ -371,6 +466,9 @@ impl FileManagerApp {
                 "zip.extracting"
             })
             .to_owned();
+        let queued_label = self.t("background_ops.queued").to_owned();
+        let cancelling_label = self.t("background_ops.cancelling").to_owned();
+        let cancel_task_label = self.t("background_ops.cancel").to_owned();
         let close_label = self.t("common.close").to_owned();
         let name_label = self.t("zip.options.name").to_owned();
         let name_hint = self.t("zip.options.name_hint").to_owned();
@@ -399,6 +497,7 @@ impl FileManagerApp {
         let message = self.zip_message.clone();
         let mut open = true;
         let mut close_requested = false;
+        let mut cancel_task = false;
         let mut action = ZipDialogAction::None;
         let mut window = egui::Window::new(title)
             .collapsible(false)
@@ -585,8 +684,20 @@ impl FileManagerApp {
                 }
             } else if is_busy {
                 ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label(&busy_label);
+                    if self.zip_cancel_requested {
+                        ui.label(&cancelling_label);
+                    } else if self.zip_queued {
+                        ui.label(&queued_label);
+                        ui.label(&busy_label);
+                    } else {
+                        ui.spinner();
+                        ui.label(&busy_label);
+                    }
+                    if !self.zip_cancel_requested
+                        && ui.button(&cancel_task_label).clicked()
+                    {
+                        cancel_task = true;
+                    }
                 });
             } else if let Some(message) = &message {
                 ui.label(message);
@@ -596,6 +707,9 @@ impl FileManagerApp {
             }
         });
 
+        if cancel_task {
+            self.cancel_zip_operation(ctx);
+        }
         if options_open {
             if !open {
                 return;
@@ -696,7 +810,9 @@ fn run_zip_extract(
     archive: &Path,
     destination: &Path,
     plan: &ZipExtractTarget,
+    cancel: &AtomicBool,
 ) -> std::io::Result<PathBuf> {
+    check_zip_cancel(cancel)?;
     if !destination.is_dir() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
@@ -712,7 +828,7 @@ fn run_zip_extract(
                     "destination already exists",
                 ));
             }
-            crate::platform::extract_zip_all(archive, destination)
+            crate::platform::extract_zip_all_cancellable(archive, destination, cancel)
         }
         ZipExtractTarget::Members(members) => {
             for (member, is_dir) in members {
@@ -723,21 +839,83 @@ fn run_zip_extract(
                     ));
                 }
             }
-            let mut last = destination.to_path_buf();
-            for (member, is_dir) in members {
-                last = if *is_dir {
-                    crate::platform::extract_zip_folder(archive, member, destination)?
+            if members.is_empty() {
+                return Ok(destination.to_path_buf());
+            }
+            let stage = create_zip_extract_stage(destination)?;
+            let result = (|| {
+                let mut outputs = Vec::with_capacity(members.len());
+                for (member, is_dir) in members {
+                    check_zip_cancel(cancel)?;
+                    let staged = if *is_dir {
+                        crate::platform::extract_zip_folder_cancellable(
+                            archive, member, &stage, cancel,
+                        )?
+                    } else {
+                        crate::platform::extract_zip_file_cancellable(
+                            archive, member, &stage, cancel,
+                        )?
+                    };
+                    outputs.push((
+                        staged,
+                        zip_member_destination(destination, member, *is_dir),
+                    ));
+                }
+                // До первой перемены имени результат целиком остаётся во временной папке.
+                check_zip_cancel(cancel)?;
+                // Публикацию не прерываем посередине, чтобы отмена не оставила набор частично видимым.
+                for (staged, output) in &outputs {
+                    if output.exists() {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::AlreadyExists,
+                            "destination already exists",
+                        ));
+                    }
+                    if let Some(parent) = output.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    std::fs::rename(staged, output)?;
+                }
+                if outputs.len() == 1 {
+                    Ok(outputs[0].1.clone())
                 } else {
-                    crate::platform::extract_zip_file(archive, member, destination)?
-                };
-            }
-            if members.len() == 1 {
-                Ok(last)
-            } else {
-                Ok(destination.to_path_buf())
-            }
+                    Ok(destination.to_path_buf())
+                }
+            })();
+            let _ = std::fs::remove_dir_all(&stage);
+            result
         }
     }
+}
+
+fn check_zip_cancel(cancel: &AtomicBool) -> std::io::Result<()> {
+    if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "ZIP operation cancelled",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn create_zip_extract_stage(destination: &Path) -> std::io::Result<PathBuf> {
+    for _ in 0..16 {
+        let id = NEXT_ZIP_EXTRACT_STAGE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let stage = destination.join(format!(
+            ".filemanager-extract-stage-{}-{id}",
+            std::process::id()
+        ));
+        match std::fs::create_dir(&stage) {
+            Ok(()) => return Ok(stage),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "could not create a temporary extraction folder",
+    ))
 }
 
 /// Папка, с которой открыть диалог: текущий путь, если это папка, иначе её родитель.

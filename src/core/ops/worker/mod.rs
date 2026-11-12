@@ -36,6 +36,11 @@ pub fn spawn(
                 skip_all: false,
                 failed: 0,
             };
+            // Отменённая в FIFO-очереди операция не должна успеть изменить диск.
+            if job.cancel.load(Ordering::Relaxed) {
+                let _ = events_tx.send(OpEvent::Cancelled { id: job.id });
+                continue;
+            }
             w.run(&job);
             let _ = events_tx.send(OpEvent::Done {
                 id: job.id,
@@ -61,6 +66,9 @@ fn test_ops_platform() -> OpsPlatform {
 
 impl<'a> Worker<'a> {
     fn run(&mut self, job: &OpJob) {
+        if self.cancelled(job) {
+            return;
+        }
         let _ = match &job.kind {
             OpKind::Copy { sources, dest } => self.copy_many(job, sources, dest, false),
             OpKind::Move { sources, dest } => self.copy_many(job, sources, dest, true),

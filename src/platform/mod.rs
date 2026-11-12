@@ -123,14 +123,18 @@ mod windows;
 #[cfg(windows)]
 pub use self::windows::{
     AcquireResult, SingleInstanceGuard, acquire_single_instance, apply_stored_attributes,
-    create_zip_archive, decode_image, disk_usage, drives, extract_zip_all, extract_zip_file,
-    extract_zip_folder, format_local_time, free_space, get_clipboard_files, get_clipboard_text,
-    install_context_menu, launch_updater, notify_already_running, open_recycle_bin, open_terminal,
-    pick_folder, pipe_listen, pipe_send, prepare_update_archive, read_entry_details,
-    read_zip_dir_cancellable, recycle_bin, replace_file, search_zip, set_attributes,
-    set_clipboard_files, shell_open, signal_update_started, spawn_dir_watch,
-    uninstall_context_menu, volume_id,
+    create_zip_archive_cancellable, decode_image, disk_usage, drives, extract_zip_all_cancellable,
+    extract_zip_file_cancellable, extract_zip_folder_cancellable, format_local_time, free_space,
+    get_clipboard_files, get_clipboard_text, install_context_menu, launch_updater,
+    notify_already_running, open_recycle_bin, open_terminal, pick_folder, pipe_listen, pipe_send,
+    prepare_update_archive, read_entry_details, read_zip_dir_cancellable, recycle_bin, replace_file,
+    search_zip, set_attributes, set_clipboard_files, shell_open, signal_update_started,
+    spawn_dir_watch, uninstall_context_menu, volume_id,
 };
+
+#[cfg(windows)]
+#[allow(unused_imports)]
+pub use self::windows::{create_zip_archive, extract_zip_all, extract_zip_file, extract_zip_folder};
 
 #[cfg(windows)]
 pub use self::windows::{
@@ -314,6 +318,14 @@ mod stubs {
             "ZIP extraction is supported only on Windows",
         ))
     }
+    pub fn extract_zip_file_cancellable(
+        archive: &std::path::Path,
+        member: &str,
+        destination: &std::path::Path,
+        _cancel: &std::sync::atomic::AtomicBool,
+    ) -> std::io::Result<std::path::PathBuf> {
+        extract_zip_file(archive, member, destination)
+    }
     pub fn extract_zip_folder(
         _archive: &std::path::Path,
         _folder: &str,
@@ -324,6 +336,14 @@ mod stubs {
             "ZIP extraction is supported only on Windows",
         ))
     }
+    pub fn extract_zip_folder_cancellable(
+        archive: &std::path::Path,
+        folder: &str,
+        destination: &std::path::Path,
+        _cancel: &std::sync::atomic::AtomicBool,
+    ) -> std::io::Result<std::path::PathBuf> {
+        extract_zip_folder(archive, folder, destination)
+    }
     pub fn extract_zip_all(
         _archive: &std::path::Path,
         _destination: &std::path::Path,
@@ -333,6 +353,13 @@ mod stubs {
             "ZIP extraction is supported only on Windows",
         ))
     }
+    pub fn extract_zip_all_cancellable(
+        archive: &std::path::Path,
+        destination: &std::path::Path,
+        _cancel: &std::sync::atomic::AtomicBool,
+    ) -> std::io::Result<std::path::PathBuf> {
+        extract_zip_all(archive, destination)
+    }
     pub fn create_zip_archive(
         _sources: &[std::path::PathBuf],
         _options: &super::ZipCreateOptions,
@@ -341,6 +368,13 @@ mod stubs {
             std::io::ErrorKind::Unsupported,
             "ZIP creation is supported only on Windows",
         ))
+    }
+    pub fn create_zip_archive_cancellable(
+        sources: &[std::path::PathBuf],
+        options: &super::ZipCreateOptions,
+        _cancel: &std::sync::atomic::AtomicBool,
+    ) -> std::io::Result<std::path::PathBuf> {
+        create_zip_archive(sources, options)
     }
     pub fn recycle_bin(paths: &[std::path::PathBuf]) -> std::io::Result<()> {
         for p in paths {
@@ -446,13 +480,15 @@ mod stubs {
 
 #[cfg(not(windows))]
 pub use stubs::{
-    AcquireResult, SingleInstanceGuard, acquire_single_instance, create_zip_archive, decode_image,
-    disk_usage, drives, extract_zip_all, extract_zip_file, extract_zip_folder, format_local_time,
-    free_space, get_clipboard_files, get_clipboard_text, install_context_menu, launch_updater,
-    notify_already_running, open_recycle_bin, open_terminal, pick_folder, pipe_listen, pipe_send,
-    prepare_update_archive, read_entry_details, read_zip_dir_cancellable, recycle_bin,
-    replace_file, search_zip,     set_attributes, set_clipboard_files, shell_open, spawn_dir_watch,
-    signal_update_started, uninstall_context_menu, volume_id,
+    AcquireResult, SingleInstanceGuard, acquire_single_instance, create_zip_archive,
+    create_zip_archive_cancellable, decode_image, disk_usage, drives, extract_zip_all,
+    extract_zip_all_cancellable, extract_zip_file, extract_zip_file_cancellable, extract_zip_folder,
+    extract_zip_folder_cancellable, format_local_time, free_space, get_clipboard_files,
+    get_clipboard_text, install_context_menu, launch_updater, notify_already_running,
+    open_recycle_bin, open_terminal, pick_folder, pipe_listen, pipe_send, prepare_update_archive,
+    read_entry_details, read_zip_dir_cancellable, recycle_bin, replace_file, search_zip,
+    set_attributes, set_clipboard_files, shell_open, signal_update_started, spawn_dir_watch,
+    uninstall_context_menu, volume_id,
 };
 
 #[cfg(not(windows))]

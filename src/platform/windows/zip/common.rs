@@ -30,10 +30,6 @@ pub(super) struct ArchiveMember {
     pub(super) is_dir: bool,
 }
 
-pub(super) fn list_members(archive: &Path) -> io::Result<Vec<ArchiveMember>> {
-    list_members_with_cancel(archive, None)
-}
-
 pub(super) fn list_members_with_cancel(
     archive: &Path,
     cancel: Option<&AtomicBool>,
@@ -101,7 +97,10 @@ pub(super) fn list_members_with_cancel(
     })?;
     let mut seen = HashSet::new();
     let mut members = Vec::new();
-    for raw in listing.lines() {
+    for (index, raw) in listing.lines().enumerate() {
+        if index % 256 == 0 {
+            check_cancel(cancel)?;
+        }
         if let Some(member) = normalize_member(raw)? {
             if !seen.insert(member.path.clone()) {
                 return Err(io::Error::new(
@@ -136,6 +135,17 @@ pub(super) fn normalize_prefix(prefix: &str) -> io::Result<String> {
         normalize_member(prefix)?
             .map(|member| member.path)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid archive folder"))
+    }
+}
+
+pub(super) fn check_cancel(cancel: Option<&AtomicBool>) -> io::Result<()> {
+    if cancel.is_some_and(|cancel| cancel.load(Ordering::Relaxed)) {
+        Err(io::Error::new(
+            io::ErrorKind::Interrupted,
+            "ZIP operation cancelled",
+        ))
+    } else {
+        Ok(())
     }
 }
 
@@ -282,12 +292,14 @@ pub(super) fn join_member(root: &Path, member: &str) -> io::Result<PathBuf> {
     Ok(path)
 }
 
-pub(super) fn extract_member_to(
+pub(super) fn extract_member_to_cancellable(
     archive: &Path,
     member: &str,
     destination: &Path,
     total: &mut u64,
+    cancel: Option<&AtomicBool>,
 ) -> io::Result<()> {
+    check_cancel(cancel)?;
     let mut output = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -310,11 +322,12 @@ pub(super) fn extract_member_to(
                 "archive extractor did not return file data",
             ));
         };
-        if let Err(error) = copy_with_limit(
+        if let Err(error) = copy_with_limit_cancellable(
             &mut stdout,
             &mut output,
             total,
             "archive expands beyond the extraction limit",
+            cancel,
         ) {
             drop(stdout);
             let _ = child.kill();
@@ -339,14 +352,16 @@ pub(super) fn extract_member_to(
     result
 }
 
-pub(super) fn copy_with_limit(
+pub(super) fn copy_with_limit_cancellable(
     reader: &mut impl Read,
     writer: &mut impl Write,
     total: &mut u64,
     limit_error: &'static str,
+    cancel: Option<&AtomicBool>,
 ) -> io::Result<()> {
     let mut buffer = [0u8; COPY_BUFFER_SIZE];
     loop {
+        check_cancel(cancel)?;
         let count = reader.read(&mut buffer)?;
         if count == 0 {
             return Ok(());
@@ -359,4 +374,3 @@ pub(super) fn copy_with_limit(
         *total = next;
     }
 }
-

@@ -43,6 +43,8 @@ use crate::ui::tabs::{ListStatus, Tab};
 use crate::ui::tree::TreeState;
 
 const DISK_USAGE_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
+/// Канал эскизов остаётся отдельным от пула тяжёлых независимых операций.
+pub(crate) const THUMBNAIL_QUEUE_CAPACITY: usize = 24;
 
 /// Results produced by background worker threads.
 pub(crate) enum WorkerMsg {
@@ -142,6 +144,17 @@ struct PendingDirWatchReload {
     deadline: Instant,
 }
 
+#[derive(Clone, Copy)]
+enum BgOpUiKind {
+    Search { tab_id: u64, generation: u64 },
+    Zip { generation: u64 },
+}
+
+struct BgOpUiTask {
+    kind: BgOpUiKind,
+    queued: bool,
+}
+
 pub struct FileManagerApp {
     pub(crate) store: SettingsStore,
     pub(crate) i18n: I18n,
@@ -203,11 +216,18 @@ pub struct FileManagerApp {
     dir_watch_debounce: crate::core::dir_watch::WatchDebounce,
     dir_watch_deadline: Option<PendingDirWatchReload>,
     dir_watch_manual: bool,
+    /// Только поиск и ZIP; чтение списков, DetailsWatch, watcher и invalidate_dir вне пула.
+    bg_ops_pool: crate::core::bg_ops::BgOpPool,
+    bg_ops_events_rx: Receiver<crate::core::bg_ops::BgOpEvent>,
+    bg_op_ui: HashMap<u64, BgOpUiTask>,
     thumbnail_order: VecDeque<ThumbnailKey>,
     thumbnail_failed: HashSet<ThumbnailKey>,
     zip_generation: u64,
     zip_busy: bool,
     zip_creating: bool,
+    zip_task_id: Option<u64>,
+    zip_queued: bool,
+    zip_cancel_requested: bool,
     zip_message: Option<String>,
     zip_create_dialog: Option<archive::ZipCreateDialog>,
     disk_usage_tx: Sender<Vec<PathBuf>>,
@@ -235,9 +255,10 @@ pub struct FileManagerApp {
 
     // File-operation queue (v0.4).
     pub(crate) ops_ui: OpsUi,
-    pub(crate) ops_tx: Sender<OpJob>,
+    pub(crate) ops_tx: Option<Sender<OpJob>>,
     pub(crate) ops_evt: Receiver<OpEvent>,
-    pub(crate) op_reply: Sender<OpReply>,
+    pub(crate) op_reply: Option<Sender<OpReply>>,
+    ops_worker: Option<std::thread::JoinHandle<()>>,
 }
 
 impl FileManagerApp {
@@ -250,6 +271,13 @@ impl FileManagerApp {
         initial_select: Option<String>,
     ) -> Self {
         let (msg_tx, msg_rx) = channel();
+        let (bg_ops_events_tx, bg_ops_events_rx) = channel();
+        let repaint_ctx = cc.egui_ctx.clone();
+        let bg_ops_pool = crate::core::bg_ops::BgOpPool::new(
+            store.settings.max_concurrent_bg_ops,
+            bg_ops_events_tx,
+            move || repaint_ctx.request_repaint(),
+        );
         let (dir_watch_notes_tx, dir_watch_rx) = channel();
         let dir_watch_tx = crate::platform::spawn_dir_watch(dir_watch_notes_tx);
         let (tree_req, tree_req_rx) = channel::<PathBuf>();
@@ -258,13 +286,15 @@ impl FileManagerApp {
         let (ops_tx, jobs_rx) = channel::<OpJob>();
         let (op_reply, reply_rx) = channel::<OpReply>();
         let (events_tx, ops_evt) = channel::<OpEvent>();
-        ops::spawn(
+        // Файловые операции остаются одним FIFO-worker ради зависимых перемещений.
+        let ops_worker = ops::spawn(
             jobs_rx,
             reply_rx,
             events_tx,
             crate::platform::ops_platform(),
         );
-        let (thumbnail_tx, thumbnail_rx) = sync_channel::<ThumbnailRequest>(24);
+        let (thumbnail_tx, thumbnail_rx) =
+            sync_channel::<ThumbnailRequest>(THUMBNAIL_QUEUE_CAPACITY);
         {
             let msg_tx = msg_tx.clone();
             let ctx = cc.egui_ctx.clone();
@@ -449,11 +479,17 @@ impl FileManagerApp {
             dir_watch_debounce: crate::core::dir_watch::WatchDebounce::default(),
             dir_watch_deadline: None,
             dir_watch_manual: false,
+            bg_ops_pool,
+            bg_ops_events_rx,
+            bg_op_ui: HashMap::new(),
             thumbnail_order: VecDeque::new(),
             thumbnail_failed: HashSet::new(),
             zip_generation: 0,
             zip_busy: false,
             zip_creating: false,
+            zip_task_id: None,
+            zip_queued: false,
+            zip_cancel_requested: false,
             zip_message: None,
             zip_create_dialog: None,
             disk_usage_tx,
@@ -481,9 +517,10 @@ impl FileManagerApp {
             msg_rx,
             tree_req,
             ops_ui: OpsUi::default(),
-            ops_tx,
+            ops_tx: Some(ops_tx),
             ops_evt,
-            op_reply,
+            op_reply: Some(op_reply),
+            ops_worker: Some(ops_worker),
         };
         // CLI path (Explorer "Open in FileManager") wins over restored tabs.
         if let Some(p) = initial_path {
@@ -574,6 +611,126 @@ impl FileManagerApp {
     // ------------------------------------------------------------------
     // Messages and input
     // ------------------------------------------------------------------
+
+    pub(super) fn cancel_search_bg_ops(&mut self, tab_id: u64) {
+        let ids: Vec<_> = self
+            .bg_op_ui
+            .iter()
+            .filter_map(|(&id, task)| {
+                match task.kind {
+                    BgOpUiKind::Search {
+                        tab_id: owner,
+                        generation,
+                    } if owner == tab_id => Some((id, generation)),
+                    _ => None,
+                }
+            })
+            .collect();
+        for (id, generation) in ids {
+            let _ = self.bg_ops_pool.cancel(id);
+            self.bg_op_ui.remove(&id);
+            if let Some(tab) = self
+                .tabs
+                .iter_mut()
+                .find(|tab| tab.id == tab_id && tab.search.generation == generation)
+            {
+                tab.search.running = false;
+            }
+        }
+    }
+
+    fn search_bg_op_queued(&self, tab_id: u64, generation: u64) -> bool {
+        self.bg_op_ui.values().any(|task| {
+            task.queued
+                && matches!(
+                    task.kind,
+                    BgOpUiKind::Search {
+                        tab_id: owner,
+                        generation: task_generation
+                    } if owner == tab_id && task_generation == generation
+                )
+        })
+    }
+
+    fn drain_bg_op_events(&mut self) {
+        self.bg_ops_pool.prune_cancelled();
+        while let Ok(event) = self.bg_ops_events_rx.try_recv() {
+            match event {
+                crate::core::bg_ops::BgOpEvent::Started { id, kind } => {
+                    let Some(task) = self.bg_op_ui.get_mut(&id) else {
+                        continue;
+                    };
+                    task.queued = false;
+                    match (task.kind, kind) {
+                        (
+                            BgOpUiKind::Search { tab_id, generation },
+                            crate::core::bg_ops::BgOpKind::Search,
+                        ) => {
+                            if let Some(tab) = self.tabs.iter_mut().find(|tab| {
+                                tab.id == tab_id && tab.search.generation == generation
+                            }) {
+                                tab.search.running = true;
+                            } else {
+                                let _ = self.bg_ops_pool.cancel(id);
+                            }
+                        }
+                        (
+                            BgOpUiKind::Zip { generation },
+                            crate::core::bg_ops::BgOpKind::ZipCreate
+                            | crate::core::bg_ops::BgOpKind::ZipExtract,
+                        ) if self.zip_generation == generation => {
+                            self.zip_queued = false;
+                        }
+                        _ => {}
+                    }
+                }
+                crate::core::bg_ops::BgOpEvent::Finished {
+                    id,
+                    kind,
+                    panicked,
+                } => {
+                    let Some(task) = self.bg_op_ui.remove(&id) else {
+                        continue;
+                    };
+                    match (task.kind, kind) {
+                        (
+                            BgOpUiKind::Search { tab_id, generation },
+                            crate::core::bg_ops::BgOpKind::Search,
+                        ) => {
+                            let failure_message =
+                                panicked.then(|| self.t("background_ops.failed").to_owned());
+                            if let Some(tab) = self.tabs.iter_mut().find(|tab| {
+                                tab.id == tab_id && tab.search.generation == generation
+                            }) {
+                                tab.search.running = false;
+                                if let Some(message) = failure_message {
+                                    tab.search.results_active = false;
+                                    tab.search.validation_error = Some(message);
+                                    tab.status = ListStatus::Ready;
+                                }
+                            }
+                        }
+                        (
+                            BgOpUiKind::Zip { generation },
+                            crate::core::bg_ops::BgOpKind::ZipCreate
+                            | crate::core::bg_ops::BgOpKind::ZipExtract,
+                        ) if self.zip_generation == generation => {
+                            self.zip_task_id = None;
+                            self.zip_queued = false;
+                            if panicked {
+                                self.zip_busy = false;
+                                self.zip_creating = false;
+                                self.zip_cancel_requested = false;
+                                self.zip_message =
+                                    Some(self.t("background_ops.failed").to_owned());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
 
     fn drain_messages(&mut self, ctx: &egui::Context) {
         while let Ok(msg) = self.msg_rx.try_recv() {
@@ -771,6 +928,9 @@ impl FileManagerApp {
                     }
                     self.zip_busy = false;
                     self.zip_creating = false;
+                    self.zip_task_id = None;
+                    self.zip_queued = false;
+                    self.zip_cancel_requested = false;
                     self.zip_message = Some(match result {
                         Ok(path) => {
                             // Извлечённый файл лежит в обычной папке, её список больше не актуален.
@@ -809,15 +969,19 @@ impl FileManagerApp {
                         continue;
                     }
                     self.zip_busy = false;
-                    // Новый архив появляется в папке назначения. Кэш этой папки надо сбросить до перечитывания.
-                    self.dir_cache.invalidate_dir(&destination);
-                    if result.is_ok()
-                        && let Some(index) = self
+                    self.zip_task_id = None;
+                    self.zip_queued = false;
+                    self.zip_cancel_requested = false;
+                    if result.is_ok() {
+                        // Новый архив появляется в папке назначения; сброс выполняется до перечитывания.
+                        self.dir_cache.invalidate_dir(&destination);
+                        if let Some(index) = self
                             .tabs
                             .iter()
                             .position(|tab| tab.path == destination && tab.archive_prefix.is_none())
-                    {
-                        self.navigate_fresh(index, ctx);
+                        {
+                            self.navigate_fresh(index, ctx);
+                        }
                     }
                     self.zip_message = Some(match result {
                         Ok(path) => {
@@ -912,9 +1076,12 @@ impl FileManagerApp {
 
     pub(super) fn show_active_tab_status(&self, ui: &mut egui::Ui) {
         let tab = &self.tabs[self.active];
+        let search_queued = self.search_bg_op_queued(tab.id, tab.search.generation);
         ui.horizontal(|ui| {
             if tab.status == ListStatus::Loading {
-                let status = if tab.search.running || tab.search.debounce_at.is_some() {
+                let status = if search_queued {
+                    "background_ops.queued"
+                } else if tab.search.running || tab.search.debounce_at.is_some() {
                     "search.searching"
                 } else {
                     "status.loading"
@@ -943,13 +1110,14 @@ impl FileManagerApp {
     }
 
     pub(super) fn show_active_file_content(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
-        let (error, empty, loading, searching, no_results) = {
+        let (error, empty, loading, searching, queued, no_results) = {
             let tab = &self.tabs[self.active];
             (
                 tab.error.clone(),
                 tab.entries.is_empty(),
                 tab.status == ListStatus::Loading,
                 tab.search.running || tab.search.debounce_at.is_some(),
+                self.search_bg_op_queued(tab.id, tab.search.generation),
                 tab.search.results_active,
             )
         };
@@ -968,8 +1136,12 @@ impl FileManagerApp {
             ui.vertical_centered(|ui| {
                 ui.add_space(style::SPACE_EMPTY_STATE);
                 if loading {
-                    ui.spinner();
-                    let status = if searching {
+                    if !queued {
+                        ui.spinner();
+                    }
+                    let status = if queued {
+                        "background_ops.queued"
+                    } else if searching {
                         "search.searching"
                     } else {
                         "status.loading"
@@ -1108,6 +1280,7 @@ impl eframe::App for FileManagerApp {
                 tracing::warn!("failed to signal successful update startup: {e}");
             }
         }
+        self.drain_bg_op_events();
         self.drain_messages(&ctx);
         self.sync_entry_details(&ctx);
         self.sync_dir_watch(&ctx);
@@ -1167,6 +1340,44 @@ impl eframe::App for FileManagerApp {
         {
             ctx.request_repaint_after(std::time::Duration::from_millis(150));
         }
+    }
+}
+
+impl Drop for FileManagerApp {
+    fn drop(&mut self) {
+        self.bg_ops_pool.request_shutdown();
+        // Навигация остаётся вне пула, но получает штатные флаги отмены при закрытии окна.
+        for tab in &self.tabs {
+            tab.cancel.store(true, Ordering::Relaxed);
+            tab.search.cancel.store(true, Ordering::Relaxed);
+        }
+        let _ = self
+            .dir_watch_tx
+            .send(crate::core::dir_watch::DirWatchCommand::Stop);
+        // Сначала отменяем текущую и ожидающие операции, не нарушая их FIFO-порядок.
+        for job in &self.ops_ui.jobs {
+            job.cancel.store(true, Ordering::Relaxed);
+        }
+        if let Some(reply_tx) = &self.op_reply {
+            if let Some((id, _, _)) = self.ops_ui.conflict.as_ref() {
+                let _ = reply_tx.send(OpReply::Conflict {
+                    id: *id,
+                    action: crate::core::ops::ConflictAction::Cancel,
+                });
+            }
+            if let Some((id, _, _, _)) = self.ops_ui.error_q.as_ref() {
+                let _ = reply_tx.send(OpReply::Error {
+                    id: *id,
+                    action: crate::core::ops::ErrorAction::Cancel,
+                });
+            }
+        }
+        self.op_reply.take();
+        self.ops_tx.take();
+        if let Some(worker) = self.ops_worker.take() {
+            let _ = worker.join();
+        }
+        self.bg_ops_pool.join_workers();
     }
 }
 

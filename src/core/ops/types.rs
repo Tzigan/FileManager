@@ -126,6 +126,8 @@ pub enum OpEvent {
         id: u64,
         failed: usize,
     },
+    /// Операцию отменили до запуска, поэтому диск и кэш не менялись.
+    Cancelled { id: u64 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
