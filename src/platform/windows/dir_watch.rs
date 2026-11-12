@@ -7,12 +7,14 @@
 use std::path::{Path, PathBuf};
 
 use ::windows::Win32::Foundation::{
-    CloseHandle, ERROR_NOTIFY_ENUM_DIR, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    CloseHandle, ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND, ERROR_NOTIFY_ENUM_DIR,
+    ERROR_PATH_NOT_FOUND, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use ::windows::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OVERLAPPED, FILE_LIST_DIRECTORY,
     FILE_NOTIFY_CHANGE_DIR_NAME, FILE_NOTIFY_CHANGE_FILE_NAME, FILE_NOTIFY_CHANGE_LAST_WRITE,
-    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, ReadDirectoryChangesW,
+    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_STANDARD_INFO, FileStandardInfo,
+    GetFileInformationByHandleEx, OPEN_EXISTING, ReadDirectoryChangesW,
 };
 use ::windows::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 use ::windows::Win32::System::Threading::{CreateEventW, ResetEvent, WaitForSingleObject};
@@ -92,7 +94,7 @@ impl DirWatchSlot {
                 // Отложенное чтение — это не ошибка, дескриптор уже ждёт событие.
                 let code = error.code().0 as u32;
                 if code != 997 {
-                    return Ok(Some(signal_for_error(code)));
+                    return Ok(Some(signal_for_error(code, &self.path, self.directory)));
                 }
             }
             self.armed = true;
@@ -111,7 +113,11 @@ impl DirWatchSlot {
         let _ = unsafe { ResetEvent(self.event) };
         self.armed = false;
         if let Err(error) = finished {
-            return Ok(Some(signal_for_error(error.code().0 as u32)));
+            return Ok(Some(signal_for_error(
+                error.code().0 as u32,
+                &self.path,
+                self.directory,
+            )));
         }
         Ok(Some(signal_for_buffer(&self.buffer, transferred)))
     }
@@ -138,16 +144,22 @@ pub fn spawn_dir_watch(events: Sender<WatchNote>) -> Sender<DirWatchCommand> {
 
 fn coordinate(commands: Receiver<DirWatchCommand>, events: Sender<WatchNote>) {
     let mut slot: Option<DirWatchSlot> = None;
+    let mut generation = 0;
     loop {
         match commands.recv_timeout(Duration::from_millis(POLL_MS as u64)) {
             Ok(DirWatchCommand::Stop) => slot = None,
-            Ok(DirWatchCommand::Watch(path)) => {
+            Ok(DirWatchCommand::Watch {
+                path,
+                generation: watch_generation,
+            }) => {
+                generation = watch_generation;
                 if slot.as_ref().is_none_or(|current| current.path() != path) {
                     slot = match DirWatchSlot::open(&path) {
                         Ok(opened) => Some(opened),
                         Err(_) => {
                             let _ = events.send(WatchNote {
                                 path,
+                                generation,
                                 signal: WatchSignal::Unavailable,
                             });
                             None
@@ -163,9 +175,10 @@ fn coordinate(commands: Receiver<DirWatchCommand>, events: Sender<WatchNote>) {
         if let Some(current) = slot.as_mut() {
             match current.poll() {
                 Ok(Some(signal)) => {
-                    stop_watch = matches!(signal, WatchSignal::Unavailable);
+                    stop_watch = should_stop_watch(signal);
                     let _ = events.send(WatchNote {
                         path: current.path().to_path_buf(),
+                        generation,
                         signal,
                     });
                 }
@@ -182,18 +195,59 @@ fn coordinate(commands: Receiver<DirWatchCommand>, events: Sender<WatchNote>) {
         if let Some(path) = failed {
             let _ = events.send(WatchNote {
                 path,
+                generation,
                 signal: WatchSignal::Unavailable,
             });
         }
     }
 }
 
-fn signal_for_error(code: u32) -> WatchSignal {
+fn should_stop_watch(signal: WatchSignal) -> bool {
+    matches!(
+        signal,
+        WatchSignal::Unavailable | WatchSignal::DirectoryRemoved
+    )
+}
+
+fn signal_for_error(code: u32, path: &Path, handle: HANDLE) -> WatchSignal {
+    let may_indicate_removal = code == ERROR_ACCESS_DENIED.0
+        || code == ERROR_FILE_NOT_FOUND.0
+        || code == ERROR_PATH_NOT_FOUND.0;
+    let directory_gone = may_indicate_removal && directory_is_gone(path, handle);
+    classify_watch_error(code, directory_gone)
+}
+
+fn classify_watch_error(code: u32, directory_gone: bool) -> WatchSignal {
     if code == ERROR_NOTIFY_ENUM_DIR.0 {
         WatchSignal::Overflow
+    } else if directory_gone {
+        WatchSignal::DirectoryRemoved
     } else {
         WatchSignal::Unavailable
     }
+}
+
+fn directory_is_gone(path: &Path, handle: HANDLE) -> bool {
+    if matches!(path.try_exists(), Ok(false))
+        && path
+            .parent()
+            .is_some_and(|parent| matches!(parent.try_exists(), Ok(true)))
+    {
+        return true;
+    }
+
+    // При удалении Windows может оставить путь видимым, пока открыт дескриптор.
+    let mut info: FILE_STANDARD_INFO = unsafe { std::mem::zeroed() };
+    unsafe {
+        GetFileInformationByHandleEx(
+            handle,
+            FileStandardInfo,
+            (&mut info as *mut FILE_STANDARD_INFO).cast(),
+            std::mem::size_of::<FILE_STANDARD_INFO>() as u32,
+        )
+    }
+    .is_ok()
+        && info.DeletePending
 }
 
 /// Пустой или обрезанный буфер нельзя разбирать по именам: часть событий уже нет.
@@ -241,6 +295,13 @@ mod tests {
     }
 
     #[test]
+    fn notify_truncated_record_handled() {
+        let mut buffer = [0u8; 32];
+        buffer[8..12].copy_from_slice(&40u32.to_le_bytes());
+        assert_eq!(signal_for_buffer(&buffer, 16), WatchSignal::Overflow);
+    }
+
+    #[test]
     fn notify_complete_record_is_a_change_not_a_name_apply() {
         let mut buffer = [0u8; 32];
         buffer[8..12].copy_from_slice(&4u32.to_le_bytes());
@@ -259,9 +320,29 @@ mod tests {
         std::fs::create_dir_all(&second).unwrap();
         let opened = DirWatchSlot::open(&first).unwrap();
         drop(opened);
+        std::fs::remove_dir(&first).unwrap();
         let retargeted = DirWatchSlot::open(&second).unwrap();
         assert_eq!(retargeted.path(), second.as_path());
         drop(retargeted);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn notify_access_denied_for_delete_pending_directory_is_directory_removed() {
+        assert_eq!(
+            classify_watch_error(ERROR_ACCESS_DENIED.0, true),
+            WatchSignal::DirectoryRemoved
+        );
+        assert_eq!(
+            classify_watch_error(ERROR_ACCESS_DENIED.0, false),
+            WatchSignal::Unavailable
+        );
+        assert_eq!(
+            classify_watch_error(ERROR_PATH_NOT_FOUND.0, false),
+            WatchSignal::Unavailable
+        );
+        assert!(should_stop_watch(WatchSignal::DirectoryRemoved));
+        assert!(should_stop_watch(WatchSignal::Unavailable));
+        assert!(!should_stop_watch(WatchSignal::Changed));
     }
 }

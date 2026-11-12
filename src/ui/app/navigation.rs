@@ -314,45 +314,123 @@ impl FileManagerApp {
     }
 
     pub(super) fn sync_dir_watch(&mut self, ctx: &egui::Context) {
-        while let Ok(note) = self.dir_watch_rx.try_recv() {
-            if self.dir_watch_target.as_ref() != Some(&note.path) {
-                continue;
-            }
-            use crate::core::dir_watch::WatchReaction;
-            match self.dir_watch_debounce.note(note.signal) {
-                WatchReaction::ManualOnly => self.dir_watch_manual = true,
-                WatchReaction::Coalesce => {
-                    let pause = Duration::from_millis(self.store.settings.dir_watch_debounce_ms);
-                    self.dir_watch_deadline = Some(Instant::now() + pause);
-                    ctx.request_repaint_after(pause);
-                }
-                WatchReaction::Reload { .. } => {}
-            }
-        }
+        let active_tab_id = self.tabs.get(self.active).map(|tab| tab.id);
+        let activated = self
+            .dir_watch_active_tab_id
+            .is_some_and(|previous| Some(previous) != active_tab_id);
+        self.dir_watch_active_tab_id = active_tab_id;
+
         let desired = if self.store.settings.dir_watch_enabled {
             self.watched_folder()
         } else {
             None
         };
-        if self.dir_watch_target != desired {
+        let desired_tab_id = desired.as_ref().and(active_tab_id);
+        if self.dir_watch_target != desired || self.dir_watch_tab_id != desired_tab_id {
+            self.dir_watch_generation = self.dir_watch_generation.wrapping_add(1);
             self.dir_watch_target = desired.clone();
+            self.dir_watch_tab_id = desired_tab_id;
             self.dir_watch_manual = false;
             self.dir_watch_deadline = None;
-            self.dir_watch_debounce = crate::core::dir_watch::WatchDebounce::default();
+            self.dir_watch_debounce.reset();
             let command = match desired {
-                Some(path) => crate::core::dir_watch::DirWatchCommand::Watch(path),
+                Some(path) => crate::core::dir_watch::DirWatchCommand::Watch {
+                    path,
+                    generation: self.dir_watch_generation,
+                },
                 None => crate::core::dir_watch::DirWatchCommand::Stop,
             };
             let _ = self.dir_watch_tx.send(command);
         }
-        if self.dir_watch_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-            self.dir_watch_deadline = None;
-            if let Some(crate::core::dir_watch::WatchReaction::Reload { .. }) =
-                self.dir_watch_debounce.flush()
+
+        if let Some(tab) = self.tabs.get(self.active)
+            && crate::core::dir_watch::should_reload_on_activation(
+                activated,
+                tab.secure_trash,
+                tab.archive_prefix.is_some(),
+                crate::platform::is_wsl_path(&tab.path),
+            )
+        {
+            let path = tab.path.clone();
+            let saved_selection = (!tab.search.has_criteria()).then(|| {
+                (
+                    tab.selection.clone(),
+                    tab.anchor.clone(),
+                    tab.cursor,
+                )
+            });
+            self.dir_cache.invalidate_dir(&path);
+            self.reload_listing(self.active, ctx, false);
+            if let Some((selection, anchor, cursor)) = saved_selection {
+                // Автообновление при возврате сохраняет выбор по устойчивым ключам.
+                let tab = &mut self.tabs[self.active];
+                tab.selection = selection;
+                tab.anchor = anchor;
+                tab.cursor = cursor.min(tab.entries.len().saturating_sub(1));
+            }
+        }
+
+        while let Ok(note) = self.dir_watch_rx.try_recv() {
+            if note.generation != self.dir_watch_generation
+                || self.dir_watch_target.as_ref() != Some(&note.path)
             {
-                if let Some(path) = self.dir_watch_target.clone() {
-                    self.apply_external_dir_change(&path, ctx);
+                continue;
+            }
+            use crate::core::dir_watch::{WatchReaction, WatchSignal};
+            if note.signal == WatchSignal::DirectoryRemoved {
+                self.dir_watch_manual = true;
+            }
+            let pause = Duration::from_millis(self.store.settings.dir_watch_debounce_ms);
+            let event_time = Instant::now();
+            match self
+                .dir_watch_debounce
+                .note_at(note.signal, event_time, pause)
+            {
+                WatchReaction::ManualOnly => {
+                    self.dir_watch_manual = true;
+                    self.dir_watch_deadline = None;
                 }
+                WatchReaction::Coalesce => {
+                    if let (Some(path), Some(tab_id)) =
+                        (self.dir_watch_target.clone(), self.dir_watch_tab_id)
+                    {
+                        self.dir_watch_deadline = Some(PendingDirWatchReload {
+                            token: crate::core::dir_watch::WatchReloadToken {
+                                path,
+                                tab_id,
+                                generation: self.dir_watch_generation,
+                            },
+                            deadline: event_time + pause,
+                        });
+                    }
+                    ctx.request_repaint_after(pause);
+                }
+                WatchReaction::Reload { .. } => {}
+            }
+        }
+
+        let now = Instant::now();
+        if self
+            .dir_watch_deadline
+            .as_ref()
+            .is_some_and(|pending| now >= pending.deadline)
+        {
+            let pending = self.dir_watch_deadline.take().unwrap();
+            let active_tab = self.tabs.get(self.active);
+            let current = pending.token.is_current(
+                self.dir_watch_generation,
+                self.dir_watch_tab_id,
+                self.dir_watch_target.as_deref(),
+                active_tab.map(|tab| tab.id),
+                active_tab.map(|tab| tab.path.as_path()),
+            );
+            if current
+                && let Some(crate::core::dir_watch::WatchReaction::Reload { .. }) =
+                    self.dir_watch_debounce.flush_if_due(now)
+            {
+                self.apply_external_dir_change(&pending.token.path, ctx);
+            } else if !current {
+                self.dir_watch_debounce.reset();
             }
         }
     }
@@ -369,6 +447,18 @@ impl FileManagerApp {
 
     pub(crate) fn refresh(&mut self, ctx: &egui::Context) {
         self.refresh_wsl_distributions();
+        if self.dir_watch_manual {
+            // Ручное обновление заодно повторно открывает остановившийся watcher.
+            self.dir_watch_generation = self.dir_watch_generation.wrapping_add(1);
+            self.dir_watch_target = None;
+            self.dir_watch_tab_id = None;
+            self.dir_watch_deadline = None;
+            self.dir_watch_debounce.reset();
+            self.dir_watch_manual = false;
+            let _ = self
+                .dir_watch_tx
+                .send(crate::core::dir_watch::DirWatchCommand::Stop);
+        }
         if let Some(path) = self.tabs.get(self.active).map(|tab| tab.path.clone()) {
             self.dir_cache.invalidate_dir(&path);
         }

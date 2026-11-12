@@ -430,9 +430,11 @@ mod stubs {
         let (commands_tx, commands_rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             while let Ok(command) = commands_rx.recv() {
-                if let crate::core::dir_watch::DirWatchCommand::Watch(path) = command {
+                if let crate::core::dir_watch::DirWatchCommand::Watch { path, generation } = command
+                {
                     let _ = events.send(crate::core::dir_watch::WatchNote {
                         path,
+                        generation,
                         signal: crate::core::dir_watch::WatchSignal::Unavailable,
                     });
                 }
