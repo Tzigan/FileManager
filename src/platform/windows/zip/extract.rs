@@ -98,7 +98,14 @@ fn extract_zip_folder_inner(
         ));
     }
     let output = join_member(destination, &folder)?;
-    extract_tree(archive, &members, Some(&folder), destination, &output, cancel)
+    extract_tree(
+        archive,
+        &members,
+        Some(&folder),
+        destination,
+        &output,
+        cancel,
+    )
 }
 
 #[allow(dead_code)]
@@ -221,11 +228,10 @@ pub(super) fn extract_tree(
             }
         }
         check_cancel(cancel)?;
-        move_directory_no_replace(&stage, output)?;
-        Ok(output.to_path_buf())
+        publish_staged_path(&stage, output, cancel, move_directory_no_replace)
     })();
     if result.is_err() {
-        let _ = fs::remove_dir_all(&stage);
+        cleanup_stage_dir(&stage);
     }
     result
 }

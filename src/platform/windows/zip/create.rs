@@ -6,7 +6,9 @@ use std::io::{self, Seek, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
-use crate::platform::{ZipCompressionLevel, ZipCompressionMethod, ZipCreateOptions, ZipExistingBehavior};
+use crate::platform::{
+    ZipCompressionLevel, ZipCompressionMethod, ZipCreateOptions, ZipExistingBehavior,
+};
 use zip::CompressionMethod;
 use zip::write::{SimpleFileOptions, ZipWriter};
 
@@ -146,21 +148,19 @@ fn create_zip_archive_inner(
         check_cancel(cancel)?;
         match options.existing_behavior {
             ZipExistingBehavior::AddSuffix => {
-                move_zip_to_unique_name(&staged_archive, &destination, archive_stem)
+                move_zip_to_unique_name(&staged_archive, &destination, archive_stem, cancel)
             }
             ZipExistingBehavior::Replace => {
                 let target = destination.join(&archive_filename);
-                move_file_replace(&staged_archive, &target)?;
-                Ok(target)
+                publish_staged_path(&staged_archive, &target, cancel, move_file_replace)
             }
             ZipExistingBehavior::Ask => {
                 let target = destination.join(&archive_filename);
-                move_file_no_replace(&staged_archive, &target)?;
-                Ok(target)
+                publish_staged_path(&staged_archive, &target, cancel, move_file_no_replace)
             }
         }
     })();
-    let _ = fs::remove_dir_all(&stage);
+    cleanup_stage_dir(&stage);
     result.and_then(|path| {
         let name = path.file_name().ok_or_else(|| {
             io::Error::new(
@@ -378,6 +378,17 @@ pub(super) fn move_zip_to_unique_name(
     staged_archive: &Path,
     parent: &Path,
     stem: &str,
+    cancel: Option<&AtomicBool>,
+) -> io::Result<PathBuf> {
+    move_zip_to_unique_name_with(staged_archive, parent, stem, cancel, move_file_no_replace)
+}
+
+pub(super) fn move_zip_to_unique_name_with(
+    staged_archive: &Path,
+    parent: &Path,
+    stem: &str,
+    cancel: Option<&AtomicBool>,
+    mut publish: impl FnMut(&Path, &Path) -> io::Result<()>,
 ) -> io::Result<PathBuf> {
     for suffix in 1..=MAX_ARCHIVE_NAME_ATTEMPTS {
         let filename = if suffix == 1 {
@@ -386,8 +397,10 @@ pub(super) fn move_zip_to_unique_name(
             format!("{stem} ({suffix}).zip")
         };
         let destination = parent.join(filename);
-        match move_file_no_replace(staged_archive, &destination) {
-            Ok(()) => return Ok(destination),
+        match publish_staged_path(staged_archive, &destination, cancel, |source, target| {
+            publish(source, target)
+        }) {
+            Ok(path) => return Ok(path),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(error),
         }
