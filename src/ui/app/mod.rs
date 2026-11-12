@@ -136,6 +136,12 @@ struct ThumbnailRequest {
     cancel: Arc<AtomicBool>,
 }
 
+/// Отложенный reload привязан к пути, вкладке и поколению watcher-а.
+struct PendingDirWatchReload {
+    token: crate::core::dir_watch::WatchReloadToken,
+    deadline: Instant,
+}
+
 pub struct FileManagerApp {
     pub(crate) store: SettingsStore,
     pub(crate) i18n: I18n,
@@ -191,8 +197,11 @@ pub struct FileManagerApp {
     dir_watch_tx: Sender<crate::core::dir_watch::DirWatchCommand>,
     dir_watch_rx: Receiver<crate::core::dir_watch::WatchNote>,
     dir_watch_target: Option<PathBuf>,
+    dir_watch_tab_id: Option<u64>,
+    dir_watch_generation: u64,
+    dir_watch_active_tab_id: Option<u64>,
     dir_watch_debounce: crate::core::dir_watch::WatchDebounce,
-    dir_watch_deadline: Option<Instant>,
+    dir_watch_deadline: Option<PendingDirWatchReload>,
     dir_watch_manual: bool,
     thumbnail_order: VecDeque<ThumbnailKey>,
     thumbnail_failed: HashSet<ThumbnailKey>,
@@ -434,6 +443,9 @@ impl FileManagerApp {
             dir_watch_tx,
             dir_watch_rx,
             dir_watch_target: None,
+            dir_watch_tab_id: None,
+            dir_watch_generation: 0,
+            dir_watch_active_tab_id: None,
             dir_watch_debounce: crate::core::dir_watch::WatchDebounce::default(),
             dir_watch_deadline: None,
             dir_watch_manual: false,
@@ -596,6 +608,14 @@ impl FileManagerApp {
                             fs::sort_entries_by(&mut entries, sort_key, sort_desc);
                             let t = &mut self.tabs[tab];
                             t.entries = entries;
+                            super::tabs::retain_existing_selection(&mut t.selection, &t.entries);
+                            let anchor_is_stale = t.anchor.as_ref().is_some_and(|anchor| {
+                                !t.entries.iter().any(|entry| anchor.matches(entry))
+                            });
+                            if anchor_is_stale {
+                                t.anchor = None;
+                            }
+                            t.cursor = t.cursor.min(t.entries.len().saturating_sub(1));
                             t.status = ListStatus::Ready;
                             if let Some(name) = pending_name {
                                 if let Some(i) = t.entries.iter().position(|e| e.name == name) {
@@ -620,6 +640,8 @@ impl FileManagerApp {
                             };
                             let t = &mut self.tabs[tab];
                             t.entries.clear();
+                            t.clear_selection();
+                            t.cursor = 0;
                             t.status = ListStatus::Ready;
                             t.error = Some(text);
                         }
