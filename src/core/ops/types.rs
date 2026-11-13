@@ -120,6 +120,7 @@ pub enum OpEvent {
         id: u64,
         path: PathBuf,
         message: String,
+        kind: io::ErrorKind,
         retryable: bool,
     },
     Done {

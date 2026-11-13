@@ -117,10 +117,19 @@ impl<'a> Worker<'a> {
 
     fn ask_error(&mut self, job: &OpJob, path: &Path, e: &io::Error) -> ErrorAction {
         let retryable = is_retryable(e);
+        tracing::debug!(
+            operation_id = job.id,
+            path = %path.display(),
+            error_kind = ?e.kind(),
+            raw_os_error = ?e.raw_os_error(),
+            error = %e,
+            "file operation failed"
+        );
         let _ = self.events.send(OpEvent::AskError {
             id: job.id,
             path: path.to_path_buf(),
             message: e.to_string(),
+            kind: e.kind(),
             retryable,
         });
         loop {

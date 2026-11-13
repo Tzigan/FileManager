@@ -167,6 +167,14 @@ impl FileManagerApp {
         }
     }
 
+    pub(super) fn trash_error_line(
+        &self,
+        item: &str,
+        error: &secure_trash::TrashError,
+    ) -> String {
+        format!("{item}: {}", self.t(error.message_key()))
+    }
+
     fn start_secure_trash(&mut self, paths: Vec<PathBuf>) {
         let hash_max = self.store.settings.secure_trash_hash_max_bytes;
         let allow_fallback = self.store.settings.secure_trash_allow_fallback;
@@ -185,7 +193,12 @@ impl FileManagerApp {
                     storage_root: None,
                 };
                 if let Err(error) = secure_trash::move_to_trash(&path, &options) {
-                    errors.push(format!("{}: {}", path.display(), error));
+                    tracing::debug!(
+                        path = %path.display(),
+                        error = %error,
+                        "secure trash move failed"
+                    );
+                    errors.push((path, error));
                 }
             }
             let _ = tx.send(WorkerMsg::SecureTrashFinished {
@@ -332,13 +345,22 @@ impl FileManagerApp {
                 let mut errors = Vec::new();
                 for item in chosen {
                     if let Err(error) = secure_trash::purge(&item) {
-                        errors.push(format!("{}: {error}", item.original_name));
+                        tracing::debug!(
+                            item = %item.original_name,
+                            error = %error,
+                            "secure trash purge failed"
+                        );
+                        errors.push((item.original_name.clone(), error));
                     }
                 }
                 self.trash_notice = Some(if errors.is_empty() {
                     self.t("trash.purged").to_owned()
                 } else {
-                    errors.join("\n")
+                    errors
+                        .iter()
+                        .map(|(name, error)| self.trash_error_line(name, error))
+                        .collect::<Vec<_>>()
+                        .join("\n")
                 });
                 self.reload_open_trash_tabs();
             }
@@ -369,10 +391,17 @@ impl FileManagerApp {
             }
             if decision == 1 {
                 let errors = secure_trash::empty_trash(&self.trash_volumes());
+                for (name, error) in &errors {
+                    tracing::debug!(item = %name, error = %error, "secure trash purge failed");
+                }
                 self.trash_notice = Some(if errors.is_empty() {
                     self.t("trash.emptied").to_owned()
                 } else {
-                    errors.join("\n")
+                    errors
+                        .iter()
+                        .map(|(name, error)| self.trash_error_line(name, error))
+                        .collect::<Vec<_>>()
+                        .join("\n")
                 });
                 self.reload_open_trash_tabs();
             }
@@ -445,8 +474,13 @@ impl FileManagerApp {
                     break;
                 }
                 Err(error) => {
+                    tracing::debug!(
+                        path = %record.original_path,
+                        error = %error,
+                        "secure trash restore failed"
+                    );
                     self.trash_notice =
-                        Some(format!("{} ({})", self.t(error.message_key()), error));
+                        Some(self.trash_error_line(&record.original_name, &error));
                 }
             }
         }

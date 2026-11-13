@@ -74,8 +74,7 @@ impl FileManagerApp {
             if ui.button(self.t("ctx.open_terminal").to_owned()).clicked() {
                 let path = self.tabs[self.active].path.clone();
                 if let Err(e) = crate::platform::open_terminal(&path) {
-                    tracing::error!(path = %path.display(), "failed to launch terminal: {e}");
-                    self.ops_ui.journal.push(format!("open terminal: {e}"));
+                    self.record_io_error(Some(&path), &e);
                 }
                 ui.close();
             }

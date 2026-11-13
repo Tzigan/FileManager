@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -39,6 +40,36 @@ pub(super) fn clipboard_target(
     } else {
         ClipboardTarget::Text
     }
+}
+
+pub(crate) fn operation_error_key(kind: ErrorKind) -> &'static str {
+    match kind {
+        ErrorKind::PermissionDenied => "error.operation.access_denied",
+        ErrorKind::NotFound => "error.operation.not_found",
+        ErrorKind::AlreadyExists => "error.operation.exists",
+        ErrorKind::StorageFull => "error.operation.storage_full",
+        ErrorKind::WouldBlock | ErrorKind::TimedOut => "error.operation.busy",
+        ErrorKind::InvalidInput | ErrorKind::InvalidData => "error.operation.invalid",
+        ErrorKind::NotADirectory => "error.operation.not_directory",
+        ErrorKind::IsADirectory => "error.operation.is_directory",
+        ErrorKind::DirectoryNotEmpty => "error.operation.directory_not_empty",
+        ErrorKind::FileTooLarge => "error.operation.too_large",
+        ErrorKind::Unsupported => "error.operation.unsupported",
+        ErrorKind::Interrupted => "background_ops.cancelled",
+        _ => "error.operation.failed",
+    }
+}
+
+fn user_facing_operation_error(
+    path: &Path,
+    kind: ErrorKind,
+    translate: impl FnOnce(&str) -> String,
+) -> String {
+    format!(
+        "{}\n{}",
+        path.display(),
+        translate(operation_error_key(kind))
+    )
 }
 
 fn paths_for_selection(
@@ -184,7 +215,7 @@ pub struct OpsUi {
     pub delete_confirm: Option<(Vec<PathBuf>, bool)>, // (paths, recycle)
     pub delete_ask: Option<Vec<PathBuf>>,
     pub conflict: Option<(u64, PathBuf, PathBuf)>,
-    pub error_q: Option<(u64, PathBuf, String, bool)>,
+    pub error_q: Option<(u64, PathBuf, ErrorKind, bool)>,
     pub show_journal: bool,
     pub journal: Vec<String>,
 }
@@ -239,7 +270,7 @@ impl FileManagerApp {
         let paths = self.selected_paths();
         if !paths.is_empty() {
             if let Err(e) = crate::platform::set_clipboard_files(&paths) {
-                tracing::warn!(error = %e, count = paths.len(), "failed to publish file clipboard data");
+                tracing::debug!(error = %e, count = paths.len(), "failed to publish file clipboard data");
             }
             tracing::info!(count = paths.len(), "files copied to internal clipboard");
             self.ops_ui.clipboard = Some(Clipboard { paths, cut: false });
@@ -252,7 +283,7 @@ impl FileManagerApp {
         let paths = self.selected_paths();
         if !paths.is_empty() {
             if let Err(e) = crate::platform::set_clipboard_files(&paths) {
-                tracing::warn!(error = %e, count = paths.len(), "failed to publish file clipboard data");
+                tracing::debug!(error = %e, count = paths.len(), "failed to publish file clipboard data");
             }
             self.ops_ui.clipboard = Some(Clipboard { paths, cut: true });
         }
@@ -350,12 +381,21 @@ impl FileManagerApp {
                     id,
                     path,
                     message,
+                    kind,
                     retryable,
                 } => {
+                    #[cfg(debug_assertions)]
                     self.ops_ui
                         .journal
-                        .push(format!("{}: {}", path.display(), message));
-                    self.ops_ui.error_q = Some((id, path, message, retryable));
+                        .push(format!("{} [{kind:?}]: {message}", path.display()));
+                    #[cfg(not(debug_assertions))]
+                    {
+                        let user_message = self.operation_error_message(kind);
+                        self.ops_ui
+                            .journal
+                            .push(format!("{}: {user_message}", path.display()));
+                    }
+                    self.ops_ui.error_q = Some((id, path, kind, retryable));
                 }
                 OpEvent::Cancelled { id } => {
                     if let Some(pos) = self.ops_ui.jobs.iter().position(|job| job.id == id) {
@@ -635,11 +675,11 @@ impl FileManagerApp {
     }
 
     fn error_dialog(&mut self, ctx: &egui::Context) {
-        let Some((id, path, message, _retryable)) = self.ops_ui.error_q.clone() else {
+        let Some((id, path, kind, _retryable)) = self.ops_ui.error_q.clone() else {
             return;
         };
         let title = self.t("err.title").to_owned();
-        let msg = format!("{}\n{}", path.display(), message);
+        let msg = user_facing_operation_error(&path, kind, |key| self.t(key).to_owned());
         let mut action = None;
         egui::Window::new(title)
             .collapsible(false)
@@ -663,6 +703,39 @@ impl FileManagerApp {
             self.reply_error(id, act);
             self.ops_ui.error_q = None;
         }
+    }
+
+    pub(crate) fn operation_error_message(&self, kind: ErrorKind) -> String {
+        self.t(operation_error_key(kind)).to_owned()
+    }
+
+    pub(crate) fn record_io_error(&mut self, path: Option<&Path>, error: &std::io::Error) {
+        let user_message = self.operation_error_message(error.kind());
+        if let Some(path) = path {
+            tracing::debug!(
+                path = %path.display(),
+                error_kind = ?error.kind(),
+                raw_os_error = ?error.raw_os_error(),
+                error = %error,
+                "file operation failed"
+            );
+        } else {
+            tracing::debug!(
+                error_kind = ?error.kind(),
+                raw_os_error = ?error.raw_os_error(),
+                error = %error,
+                "application operation failed"
+            );
+        }
+        let line = if let Some(path) = path {
+            format!("{}: {user_message}", path.display())
+        } else {
+            user_message
+        };
+        #[cfg(debug_assertions)]
+        let line = format!("{line}\n{:?}: {error}", error.kind());
+        self.ops_ui.journal.push(line);
+        self.ops_ui.show_journal = true;
     }
 
     fn journal_window(&mut self, ctx: &egui::Context) {
@@ -865,5 +938,50 @@ mod tests {
             rename_operation(from.clone(), " new name.txt "),
             Some(OpKind::Rename { from: old, to }) if old == from && to == PathBuf::from("C:\\data\\new name.txt")
         ));
+    }
+
+    #[test]
+    fn user_facing_error_has_no_raw_io_error_or_stacktrace() {
+        let path = Path::new(r"C:\data\file.txt");
+        let error = std::io::Error::other("HRESULT 0x80070005\nstack trace: private detail");
+        let shown = user_facing_operation_error(path, error.kind(), |key| match key {
+            "error.operation.failed" => "Operation could not be completed.".to_owned(),
+            _ => key.to_owned(),
+        });
+        assert!(shown.contains(path.to_string_lossy().as_ref()));
+        assert!(shown.contains("Operation could not be completed."));
+        assert!(!shown.contains(&error.to_string()));
+        assert!(!shown.contains("HRESULT"));
+        assert!(!shown.contains("stack trace"));
+    }
+
+    #[test]
+    fn operation_error_keys_are_localized_in_both_languages() {
+        let keys = [
+            operation_error_key(std::io::ErrorKind::PermissionDenied),
+            operation_error_key(std::io::ErrorKind::NotFound),
+            operation_error_key(std::io::ErrorKind::AlreadyExists),
+            operation_error_key(std::io::ErrorKind::StorageFull),
+            operation_error_key(std::io::ErrorKind::WouldBlock),
+            operation_error_key(std::io::ErrorKind::InvalidInput),
+            operation_error_key(std::io::ErrorKind::NotADirectory),
+            operation_error_key(std::io::ErrorKind::IsADirectory),
+            operation_error_key(std::io::ErrorKind::DirectoryNotEmpty),
+            operation_error_key(std::io::ErrorKind::FileTooLarge),
+            operation_error_key(std::io::ErrorKind::Unsupported),
+            operation_error_key(std::io::ErrorKind::Other),
+            "settings.load_invalid",
+            "settings.load_failed",
+            "settings.save_failed",
+        ];
+        for json in [
+            include_str!("../../i18n/en.json"),
+            include_str!("../../i18n/ru.json"),
+        ] {
+            let labels: serde_json::Value = serde_json::from_str(json).unwrap();
+            for key in keys {
+                assert!(labels.get(key).is_some(), "missing localized key {key}");
+            }
+        }
     }
 }
