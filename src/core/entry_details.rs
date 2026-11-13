@@ -215,6 +215,19 @@ mod tests {
         );
     }
 
+    #[test]
+    fn zip_and_trash_do_not_start_heavy_details_request() {
+        let target = Path::new(r"C:\docs\book.zip");
+        assert_eq!(
+            heavy_details_path(Some(target), true, false, Some(target), false),
+            None
+        );
+        assert_eq!(
+            heavy_details_path(Some(target), false, true, Some(target), false),
+            None
+        );
+    }
+
     fn known_owner(name: &str) -> EntryDetails {
         EntryDetails {
             owner: Detail::Known(name.to_owned()),

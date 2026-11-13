@@ -89,20 +89,27 @@ fn security_summary(path: &Path) -> (Detail<String>, Detail<AccessList>) {
         return (Detail::Unavailable, Detail::Unavailable);
     }
     let owner_name = account_name(owner);
-    let access = if dacl.is_null() {
-        Detail::Known(AccessList::Null)
+    let entries = if dacl.is_null() {
+        0
     } else {
-        let entries = unsafe { (*dacl).AceCount };
-        Detail::Known(if entries == 0 {
-            AccessList::Empty
-        } else {
-            AccessList::Present { entries }
-        })
+        unsafe { (*dacl).AceCount }
     };
+    let access = access_list_from_dacl(dacl.is_null(), entries);
     unsafe {
         let _ = LocalFree(Some(HLOCAL(descriptor.0)));
     }
     (owner_name, access)
+}
+
+/// Читаем число из целого дескриптора ACL, не перечисляя ACE и SID по частям.
+fn access_list_from_dacl(is_null: bool, entries: u16) -> Detail<AccessList> {
+    if is_null {
+        Detail::Known(AccessList::Null)
+    } else if entries == 0 {
+        Detail::Known(AccessList::Empty)
+    } else {
+        Detail::Known(AccessList::Present { entries })
+    }
 }
 
 fn account_name(sid: PSID) -> Detail<String> {
@@ -260,5 +267,24 @@ mod tests {
         }
         assert!(matches!(details.access, Detail::Known(_)));
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn acl_partial_read_shows_status_not_silent_partial() {
+        // Имена ACE не разрешаются: AceCount относится ко всему ACL, а ошибка владельца отделена.
+        let access = access_list_from_dacl(false, 3);
+        let owner = Detail::<String>::Unavailable;
+        assert_eq!(
+            access,
+            Detail::Known(AccessList::Present { entries: 3 })
+        );
+        assert_eq!(
+            crate::core::entry_details::detail_text(&owner, "недоступно", Clone::clone),
+            "недоступно"
+        );
+        assert_eq!(
+            access_list_from_dacl(true, 0),
+            Detail::Known(AccessList::Null)
+        );
     }
 }
