@@ -4,6 +4,7 @@
 //! размер на диске берётся у файловой системы, владелец и список доступа —
 //! из дескриптора безопасности.
 
+use std::os::windows::fs::MetadataExt;
 use std::path::Path;
 
 use ::windows::Win32::Foundation::{ERROR_SUCCESS, GetLastError, HLOCAL, LocalFree};
@@ -15,7 +16,7 @@ use ::windows::Win32::Security::{
 use ::windows::Win32::Storage::FileSystem::GetCompressedFileSizeW;
 use ::windows::core::{HSTRING, PCWSTR, PWSTR};
 
-use crate::core::entry_details::{AccessList, Detail, EntryDetails};
+use crate::core::entry_details::{AccessList, Detail, EntryDetails, ExtraFileAttributes};
 
 /// Имя и домен, которые ещё помещаются в обычную учётную запись.
 /// Более длинный ответ не обрезаем, а помечаем недоступным.
@@ -28,10 +29,17 @@ pub fn read_entry_details(path: &Path) -> EntryDetails {
         Ok(metadata) => metadata,
         Err(_) => return EntryDetails::unavailable(),
     };
+    let raw_attributes = metadata.file_attributes();
+    let extra_attributes = ExtraFileAttributes {
+        archive: raw_attributes & 0x20 != 0,
+        compressed: raw_attributes & 0x800 != 0,
+        encrypted: raw_attributes & 0x4000 != 0,
+        reparse_point: raw_attributes & 0x400 != 0,
+    };
     // symlink_metadata не идёт по ссылке. Если это сама ссылка, дальнейшие
     // вызовы открыли бы цель и приписали бы её числа этой ссылке.
-    if metadata.file_type().is_symlink() {
-        return EntryDetails::for_symlink();
+    if metadata.file_type().is_symlink() || extra_attributes.reparse_point {
+        return EntryDetails::for_symlink(extra_attributes);
     }
     let (owner, access) = security_summary(path);
     EntryDetails {
@@ -43,6 +51,7 @@ pub fn read_entry_details(path: &Path) -> EntryDetails {
             .unwrap_or(Detail::Unavailable),
         owner,
         access,
+        extra_attributes: Detail::Known(extra_attributes),
     }
 }
 
@@ -210,6 +219,16 @@ mod tests {
                 .status()
                 .is_ok_and(|status| status.success());
         assert!(linked, "нужна точка соединения или ссылка");
+        let listed_link = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .find(|entry| entry.file_name() == "Alias")
+            .unwrap();
+        let listed_link = crate::core::fs::map_entry(&listed_link).unwrap();
+        assert!(
+            listed_link.is_symlink,
+            "ссылка или точка соединения должна отличаться от целевой папки"
+        );
         let details = read_entry_details(&link);
         assert_eq!(details.size_on_disk, Detail::Unavailable);
         assert_eq!(details.owner, Detail::Unavailable);

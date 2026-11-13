@@ -687,6 +687,9 @@ impl FileManagerApp {
     }
 
     fn entry_details_subject(&self) -> Option<PathBuf> {
+        if self.props_multi_target.is_some() {
+            return None;
+        }
         let tab = self.tabs.get(self.active);
         let selected = tab.and_then(|tab| {
             if tab.selection.len() != 1 {
@@ -710,31 +713,68 @@ impl FileManagerApp {
         if tab.archive_prefix.is_some() {
             return;
         }
-        let selected = if tab.selection.len() == 1 {
-            tab.selection
-                .iter()
-                .next()
-                .and_then(|key| tab.entries.iter().find(|entry| key.matches(entry)))
+        let selected: Vec<_> = tab
+            .selection
+            .iter()
+            .filter_map(|key| tab.entries.iter().find(|entry| key.matches(entry)).cloned())
+            .collect();
+        if tab.selection.len() > 1 && selected.len() > 1 {
+            self.props_target = None;
+            self.props_multi_target = Some(selected);
         } else {
-            tab.entries.get(tab.cursor)
-        };
-        if let Some(e) = selected {
-            self.props_target = Some(e.path.clone());
+            let selected = if tab.selection.len() == 1 {
+                selected.into_iter().next()
+            } else {
+                tab.entries.get(tab.cursor).cloned()
+            };
+            if let Some(entry) = selected {
+                self.props_target = Some(entry.path.clone());
+                self.props_multi_target = None;
+            }
         }
     }
 
     pub(super) fn props_window(&mut self, ctx: &egui::Context) {
-        let Some(target) = self.props_target.clone() else {
+        let target = self.props_target.clone();
+        let multi_entries = self.props_multi_target.clone();
+        if target.is_none() && multi_entries.is_none() {
             return;
-        };
+        }
         let title = self.t("props.title").to_owned();
+        let entry = target.as_ref().and_then(|target| {
+            self.tabs[self.active]
+                .entries
+                .iter()
+                .find(|entry| entry.path == *target)
+                .cloned()
+        });
+        let allow_details = !self.tabs[self.active].secure_trash
+            && self.tabs[self.active].archive_prefix.is_none()
+            && entry
+                .as_ref()
+                .is_none_or(|entry| entry.archive_member.is_none());
+        let rows = if let Some(entries) = &multi_entries {
+            let entries: Vec<_> = entries.iter().collect();
+            self.multi_property_lines(&entries, entries.len())
+        } else if let Some(target) = &target {
+            entry.as_ref().map_or_else(
+                || self.missing_property_lines(target, allow_details),
+                |entry| self.single_property_lines(entry, allow_details),
+            )
+        } else {
+            Vec::new()
+        };
         let mut dirty = false;
         let mut apply = None;
         let viewport_id = egui::ViewportId::from_hash_of("filemanager-properties");
+        // TODO: системное окно свойств Windows требует отдельной безопасной shell-интеграции.
         let builder = floating_dialog_viewport(
             ctx,
             title,
-            egui::vec2(560.0, 360.0),
+            egui::vec2(
+                crate::ui::PROPERTIES_WINDOW_DEFAULT_WIDTH,
+                crate::ui::PROPERTIES_WINDOW_DEFAULT_HEIGHT,
+            ),
             self.props_viewport_placed,
         );
         let mut close_requested = false;
@@ -746,82 +786,40 @@ impl FileManagerApp {
                 return;
             }
             egui::CentralPanel::default().show(viewport_ui, |ui| {
-                let entry = self.tabs[self.active]
-                    .entries
-                    .iter()
-                    .find(|e| e.path == target)
-                    .cloned();
-                let name = entry.as_ref().map(|e| e.name.clone()).unwrap_or_else(|| {
-                    target
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| target.display().to_string())
-                });
-                ui.heading(&name);
-                ui.label(format!("{}: {}", self.t("props.path"), target.display()));
-                if let Some(e) = &entry {
-                    let ty = if e.is_dir {
-                        self.t("type.folder").to_owned()
-                    } else {
-                        match &e.extension {
-                            Some(x) => format!("{} {}", x.to_uppercase(), self.t("type.file")),
-                            None => self.t("type.file").to_owned(),
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    self.render_property_lines(ui, &rows);
+                    if let Some(e) = &entry {
+                        ui.separator();
+                        let mut ro = e.readonly;
+                        let mut hi = e.hidden;
+                        if ui
+                            .checkbox(&mut ro, self.t("props.readonly").to_owned())
+                            .changed()
+                        {
+                            dirty = true;
                         }
-                    };
-                    ui.label(format!("{}: {ty}", self.t("col.type")));
-                    if let Some(s) = e.size {
-                        ui.label(format!(
-                            "{}: {}",
-                            self.t("col.size"),
-                            crate::core::format::format_size(s)
-                        ));
+                        if ui
+                            .checkbox(&mut hi, self.t("props.hidden").to_owned())
+                            .changed()
+                        {
+                            dirty = true;
+                        }
+                        if dirty {
+                            apply = Some((ro, hi));
+                        }
                     }
-                    if let Some(m) = e.modified {
-                        ui.label(format!(
-                            "{}: {}",
-                            self.t("col.modified"),
-                            crate::platform::format_local_time(m, self.i18n.language())
-                        ));
-                    }
-                    if let Some(c) = e.created {
-                        ui.label(format!(
-                            "{}: {}",
-                            self.t("props.created"),
-                            crate::platform::format_local_time(c, self.i18n.language())
-                        ));
-                    }
-                    for (label, value) in self.heavy_detail_lines(&target) {
-                        ui.label(format!("{label}: {value}"));
-                    }
-                    ui.separator();
-                    let mut ro = e.readonly;
-                    let mut hi = e.hidden;
-                    if ui
-                        .checkbox(&mut ro, self.t("props.readonly").to_owned())
-                        .changed()
-                    {
-                        dirty = true;
-                    }
-                    if ui
-                        .checkbox(&mut hi, self.t("props.hidden").to_owned())
-                        .changed()
-                    {
-                        dirty = true;
-                    }
-                    if dirty {
-                        apply = Some((ro, hi));
-                    }
-                }
+                });
             });
         });
         self.props_viewport_placed = !close_requested;
-        if let Some((ro, hi)) = apply {
-            if crate::platform::set_attributes(&target, ro, hi).is_ok() {
+        if let (Some((ro, hi)), Some(target)) = (apply, target.as_ref()) {
+            if crate::platform::set_attributes(target, ro, hi).is_ok() {
                 self.refresh(ctx);
             }
         }
         if close_requested {
             self.props_target = None;
+            self.props_multi_target = None;
         }
     }
 }
