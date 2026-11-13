@@ -1,4 +1,6 @@
-use ::windows::core::{w, HSTRING, PCWSTR};
+use ::windows::core::{w, PCWSTR};
+#[cfg(any(test, not(debug_assertions)))]
+use ::windows::core::HSTRING;
 use ::windows::Win32::Foundation::{
     CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE, WIN32_ERROR,
 };
@@ -6,6 +8,8 @@ use ::windows::Win32::System::Threading::{CreateMutexW, ReleaseMutex};
 use ::windows::Win32::UI::WindowsAndMessaging::{
     MessageBoxW, MESSAGEBOX_RESULT, MESSAGEBOX_STYLE, MB_ICONINFORMATION, MB_OK,
 };
+#[cfg(not(debug_assertions))]
+use ::windows::Win32::UI::WindowsAndMessaging::MB_ICONERROR;
 
 const MUTEX_NAME: ::windows::core::PCWSTR = w!("Local\\FileManager.SingleInstance");
 
@@ -67,6 +71,20 @@ pub fn notify_already_running() {
             w!("FileManager is already running."),
             w!("FileManager"),
             MESSAGEBOX_STYLE(MB_OK.0 | MB_ICONINFORMATION.0),
+        );
+    }
+}
+
+#[cfg(not(debug_assertions))]
+pub fn notify_panic(title: &str, message: &str) {
+    let title = HSTRING::from(title);
+    let message = HSTRING::from(message);
+    unsafe {
+        let _: MESSAGEBOX_RESULT = MessageBoxW(
+            None,
+            &message,
+            &title,
+            MESSAGEBOX_STYLE(MB_OK.0 | MB_ICONERROR.0),
         );
     }
 }

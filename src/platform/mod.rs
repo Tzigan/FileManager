@@ -126,11 +126,15 @@ pub use self::windows::{
     create_zip_archive_cancellable, decode_image, disk_usage, drives, extract_zip_all_cancellable,
     extract_zip_file_cancellable, extract_zip_folder_cancellable, format_local_time, free_space,
     get_clipboard_files, get_clipboard_text, install_context_menu, launch_updater,
-    notify_already_running, open_recycle_bin, open_terminal, pick_folder, pipe_listen, pipe_send,
+    notify_already_running, open_recycle_bin, open_terminal, pick_folder, pipe_listen,
+    pipe_send,
     prepare_update_archive, read_entry_details, read_zip_dir_cancellable, recycle_bin, replace_file,
     search_zip, set_attributes, set_clipboard_files, shell_open, signal_update_started,
     spawn_dir_watch, uninstall_context_menu, volume_id,
 };
+
+#[cfg(all(windows, not(debug_assertions)))]
+pub use self::windows::notify_panic;
 
 #[cfg(windows)]
 #[allow(unused_imports)]

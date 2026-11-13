@@ -149,6 +149,13 @@ impl TrashError {
             Self::Io(_) => "trash.err.io",
         }
     }
+
+    pub fn io_error(&self) -> Option<&io::Error> {
+        match self {
+            Self::Io(error) => Some(error),
+            _ => None,
+        }
+    }
 }
 
 impl std::fmt::Display for TrashError {
@@ -423,11 +430,15 @@ pub fn removal_totals(records: &[TrashRecord]) -> (usize, u64) {
     )
 }
 
-pub fn empty_trash(volumes: &[PathBuf]) -> Vec<(String, TrashError)> {
+pub fn empty_trash(volumes: &[PathBuf]) -> Vec<(PathBuf, String, TrashError)> {
     let mut errors = Vec::new();
     for record in list_trash(volumes) {
         if let Err(error) = purge(&record) {
-            errors.push((record.original_name, error));
+            errors.push((
+                PathBuf::from(record.original_path),
+                record.original_name,
+                error,
+            ));
         }
     }
     errors
@@ -744,6 +755,32 @@ mod tests {
         let error = TrashError::Io(io::Error::other("raw os error 5"));
         assert_eq!(error.message_key(), "trash.err.io");
         assert!(error.to_string().contains("raw os error 5"));
+    }
+
+    #[test]
+    fn all_trash_error_variants_have_localized_message_key_in_ru_and_en() {
+        let errors = [
+            TrashError::DamagedMetadata,
+            TrashError::VolumeUnavailable,
+            TrashError::PathEscape,
+            TrashError::SpecialFile,
+            TrashError::Conflict,
+            TrashError::Io(io::Error::other("diagnostic only")),
+        ];
+        for json in [
+            include_str!("../../i18n/en.json"),
+            include_str!("../../i18n/ru.json"),
+        ] {
+            let labels: serde_json::Value = serde_json::from_str(json).unwrap();
+            for error in &errors {
+                let message = labels
+                    .get(error.message_key())
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_else(|| panic!("missing localized key {}", error.message_key()));
+                assert!(!message.is_empty());
+                assert_ne!(message, error.message_key());
+            }
+        }
     }
 
     fn scratch() -> PathBuf {

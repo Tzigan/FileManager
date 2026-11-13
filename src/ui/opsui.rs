@@ -384,6 +384,8 @@ impl FileManagerApp {
                     kind,
                     retryable,
                 } => {
+                    #[cfg(not(debug_assertions))]
+                    let _ = message;
                     #[cfg(debug_assertions)]
                     self.ops_ui
                         .journal
@@ -711,22 +713,7 @@ impl FileManagerApp {
 
     pub(crate) fn record_io_error(&mut self, path: Option<&Path>, error: &std::io::Error) {
         let user_message = self.operation_error_message(error.kind());
-        if let Some(path) = path {
-            tracing::debug!(
-                path = %path.display(),
-                error_kind = ?error.kind(),
-                raw_os_error = ?error.raw_os_error(),
-                error = %error,
-                "file operation failed"
-            );
-        } else {
-            tracing::debug!(
-                error_kind = ?error.kind(),
-                raw_os_error = ?error.raw_os_error(),
-                error = %error,
-                "application operation failed"
-            );
-        }
+        crate::core::logging::log_io_error("UI operation", None, path, error);
         let line = if let Some(path) = path {
             format!("{}: {user_message}", path.display())
         } else {
@@ -956,6 +943,20 @@ mod tests {
     }
 
     #[test]
+    fn uncovered_error_kind_falls_back_to_neutral_text_not_raw_code() {
+        let path = Path::new(r"C:\data\unknown.txt");
+        let error = std::io::Error::from_raw_os_error(0x5A17);
+        assert_eq!(operation_error_key(error.kind()), "error.operation.failed");
+        let shown = user_facing_operation_error(path, error.kind(), |_| {
+            "The operation could not be completed.".to_owned()
+        });
+        assert!(shown.contains(path.to_string_lossy().as_ref()));
+        assert!(shown.contains("The operation could not be completed."));
+        assert!(!shown.contains("0x5A17"));
+        assert!(!shown.contains(&error.to_string()));
+    }
+
+    #[test]
     fn operation_error_keys_are_localized_in_both_languages() {
         let keys = [
             operation_error_key(std::io::ErrorKind::PermissionDenied),
@@ -970,6 +971,8 @@ mod tests {
             operation_error_key(std::io::ErrorKind::FileTooLarge),
             operation_error_key(std::io::ErrorKind::Unsupported),
             operation_error_key(std::io::ErrorKind::Other),
+            "error.panic.title",
+            "error.panic.message",
             "settings.load_invalid",
             "settings.load_failed",
             "settings.save_failed",

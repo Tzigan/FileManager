@@ -32,6 +32,8 @@ pub use shell::{
 pub use single_instance::{
     AcquireResult, SingleInstanceGuard, acquire_single_instance, notify_already_running,
 };
+#[cfg(not(debug_assertions))]
+pub use single_instance::notify_panic;
 pub use space::{disk_usage, free_space, volume_id};
 pub(crate) use tab_drag::{
     TabDragPreviewWindow, cursor_screen_position, escape_key_down, left_mouse_button_down,

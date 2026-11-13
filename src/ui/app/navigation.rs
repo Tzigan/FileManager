@@ -217,7 +217,15 @@ impl FileManagerApp {
                     tracing::info!(tab_id, generation, "folder listing cancelled")
                 }
                 Err(ReadDirError::Io(error)) => {
-                    tracing::debug!(tab_id, generation, error = %error, "folder listing failed")
+                    tracing::info!(
+                        tab_id,
+                        generation,
+                        path = %path.display(),
+                        error_kind = ?error.kind(),
+                        raw_os_error = ?error.raw_os_error(),
+                        error = %error,
+                        "folder listing failed"
+                    )
                 }
             }
             let _ = tx.send(WorkerMsg::Listing {

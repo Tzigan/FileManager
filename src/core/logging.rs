@@ -1,30 +1,87 @@
 use std::path::Path;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Once;
 
+use crate::core::i18n::Language;
+#[cfg(any(not(debug_assertions), test))]
+use crate::core::i18n::I18n;
+
 static PANIC_LOG_HOOK: Once = Once::new();
+static PANIC_LANGUAGE: AtomicU8 = AtomicU8::new(0);
 
 fn install_panic_log_hook() {
     PANIC_LOG_HOOK.call_once(|| {
         let default_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
-            #[cfg(debug_assertions)]
             tracing::error!(
                 panic = %info,
                 backtrace = %std::backtrace::Backtrace::force_capture(),
                 "application panic"
             );
-            #[cfg(not(debug_assertions))]
-            tracing::error!("application panic");
+            #[cfg(all(windows, not(debug_assertions)))]
+            {
+                let (title, message) = panic_user_message(panic_language());
+                crate::platform::notify_panic(&title, &message);
+            }
             default_hook(info);
         }));
     });
 }
 
-fn configured_max_level() -> tracing::Level {
-    if cfg!(debug_assertions) {
-        tracing::Level::DEBUG
+pub fn set_panic_language(language: Language) {
+    PANIC_LANGUAGE.store(
+        u8::from(language == Language::En),
+        Ordering::Relaxed,
+    );
+}
+
+#[cfg(all(windows, not(debug_assertions)))]
+fn panic_language() -> Language {
+    if PANIC_LANGUAGE.load(Ordering::Relaxed) == 1 {
+        Language::En
     } else {
-        tracing::Level::INFO
+        Language::Ru
+    }
+}
+
+#[cfg(any(not(debug_assertions), test))]
+fn panic_user_message(language: Language) -> (String, String) {
+    let i18n = I18n::new(language);
+    (
+        i18n.t("error.panic.title").to_owned(),
+        i18n.t("error.panic.message").to_owned(),
+    )
+}
+
+fn configured_max_level() -> tracing::Level {
+    tracing::Level::INFO
+}
+
+pub fn log_io_error(
+    context: &str,
+    operation_id: Option<u64>,
+    path: Option<&Path>,
+    error: &std::io::Error,
+) {
+    if let Some(path) = path {
+        tracing::info!(
+            context = %context,
+            operation_id = ?operation_id,
+            path = %path.display(),
+            error_kind = ?error.kind(),
+            raw_os_error = ?error.raw_os_error(),
+            error = %error,
+            "I/O operation failed"
+        );
+    } else {
+        tracing::info!(
+            context = %context,
+            operation_id = ?operation_id,
+            error_kind = ?error.kind(),
+            raw_os_error = ?error.raw_os_error(),
+            error = %error,
+            "I/O operation failed"
+        );
     }
 }
 
@@ -54,13 +111,76 @@ mod tests {
     use super::*;
 
     #[test]
-    fn diagnostics_logged_under_debug_flag_not_noisy_in_release() {
-        let expected = if cfg!(debug_assertions) {
-            tracing::Level::DEBUG
-        } else {
-            tracing::Level::INFO
-        };
-        assert_eq!(configured_max_level(), expected);
+    fn file_log_keeps_info_level_diagnostics_enabled() {
+        assert_eq!(configured_max_level(), tracing::Level::INFO);
+        let (title, message) = panic_user_message(Language::En);
+        assert!(!title.is_empty());
+        assert!(!message.is_empty());
+        assert!(!message.contains("backtrace"));
+        assert!(!message.contains("HRESULT"));
+    }
+
+    #[test]
+    fn release_log_contains_error_kind_path_and_context() {
+        use std::io::Write;
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone)]
+        struct Buffer(Arc<Mutex<Vec<u8>>>);
+
+        struct BufferWriter(Arc<Mutex<Vec<u8>>>);
+
+        impl Write for BufferWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Buffer {
+            type Writer = BufferWriter;
+
+            fn make_writer(&'a self) -> Self::Writer {
+                BufferWriter(Arc::clone(&self.0))
+            }
+        }
+
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_max_level(configured_max_level())
+            .with_writer(Buffer(Arc::clone(&output)))
+            .finish();
+        let path = Path::new(r"C:\data\locked.txt");
+        let error = std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "access denied",
+        );
+        tracing::subscriber::with_default(subscriber, || {
+            log_io_error("copy destination", Some(17), Some(path), &error);
+        });
+        let output = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        assert!(output.contains("INFO"));
+        assert!(output.contains("copy destination"));
+        assert!(output.contains("Some(17)"));
+        assert!(output.contains(&path.display().to_string()));
+        assert!(output.contains("PermissionDenied"));
+        assert!(output.contains("access denied"));
+    }
+
+    #[test]
+    fn release_panic_shows_neutral_user_message_not_stacktrace_or_empty() {
+        for language in [Language::Ru, Language::En] {
+            let (title, message) = panic_user_message(language);
+            assert!(!title.trim().is_empty());
+            assert!(!message.trim().is_empty());
+            assert!(!message.to_lowercase().contains("stack"));
+            assert!(!message.contains("0x"));
+        }
     }
 
     #[test]

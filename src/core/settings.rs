@@ -291,7 +291,7 @@ impl SettingsStore {
                     s
                 }
                 Err(e) => {
-                    tracing::debug!(path = %path.display(), error = %e, "settings parse failed, using defaults");
+                    tracing::info!(path = %path.display(), error = %e, "settings parse failed, using defaults");
                     load_issue = Some(SettingsLoadIssue::Invalid);
                     Settings::default()
                 }
@@ -301,7 +301,7 @@ impl SettingsStore {
                 Settings::default()
             }
             Err(e) => {
-                tracing::debug!(path = %path.display(), error = %e, "settings read failed, using defaults");
+                crate::core::logging::log_io_error("settings read", None, Some(&path), &e);
                 load_issue = Some(SettingsLoadIssue::Unreadable);
                 Settings::default()
             }
@@ -369,6 +369,39 @@ mod tests {
         assert_eq!(store.load_issue, Some(SettingsLoadIssue::Invalid));
         assert_eq!(store.settings.language, Language::default());
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn settings_load_failure_message_mentions_user_data_not_loaded() {
+        let keys = [
+            SettingsLoadIssue::Invalid.message_key(),
+            SettingsLoadIssue::Unreadable.message_key(),
+        ];
+        for json in [
+            include_str!("../../i18n/en.json"),
+            include_str!("../../i18n/ru.json"),
+        ] {
+            let labels: serde_json::Value = serde_json::from_str(json).unwrap();
+            for key in keys {
+                let message = labels.get(key).and_then(|value| value.as_str()).unwrap();
+                assert!(
+                    message.contains("bookmarks") || message.contains("закладки"),
+                    "{key} must say bookmarks were not loaded"
+                );
+                assert!(
+                    message.contains("tabs") || message.contains("вкладки"),
+                    "{key} must say tabs were not loaded"
+                );
+                assert!(
+                    message.contains("protected-folder") || message.contains("защищённой корзины"),
+                    "{key} must say protected-folder rules were not loaded"
+                );
+                assert!(
+                    message.contains("not loaded") || message.contains("не загружены"),
+                    "{key} must explain that saved user data was not loaded"
+                );
+            }
+        }
     }
 
     #[test]
