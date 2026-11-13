@@ -428,7 +428,6 @@ impl FileManagerApp {
     }
 
     fn apply_settings_reset(&mut self, ctx: &egui::Context) {
-        self.sync_tabs_to_settings();
         let previous = self.store.settings.clone();
         let load_issue = self.store.load_issue;
         let settings_file_exists = self.dirs.config_dir.join("settings.json").is_file();
@@ -459,7 +458,6 @@ impl FileManagerApp {
         self.sync_dir_watch(ctx);
 
         if self.persist_checked().is_ok() {
-            self.store.load_issue = None;
             self.settings_reset_status = Some(self.t(if restart_required {
                 "settings.reset_done_restart"
             } else {
