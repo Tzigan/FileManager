@@ -183,6 +183,7 @@ pub struct FileManagerApp {
     update_status: Option<String>,
     /// Ошибка обновления, показываемая в окне «О программе».
     update_err: Option<String>,
+    log_export_status: Option<String>,
     /// Когда отдать установку updater и закрыть корневое окно.
     update_restart_at: Option<Instant>,
     /// Автоперезапуск выключен: ждём кнопку, процесс не завершаем.
@@ -457,6 +458,7 @@ impl FileManagerApp {
             update_ready: None,
             update_status: None,
             update_err: None,
+            log_export_status: None,
             update_restart_at: None,
             update_restart_offer: false,
             tab_drag_state: tab_drag_preview::TabDragState::Idle,

@@ -6,6 +6,11 @@ use crate::core::i18n::Language;
 #[cfg(any(not(debug_assertions), test))]
 use crate::core::i18n::I18n;
 
+pub const LOG_FILE_PREFIX: &str = "filemanager.log";
+/// Одного старого файла достаточно как запаса: дневной rollover удаляет его,
+/// пока окно экспорта читает последние четырнадцать файлов.
+pub const LOG_RETAINED_FILES: usize = 15;
+
 static PANIC_LOG_HOOK: Once = Once::new();
 static PANIC_LANGUAGE: AtomicU8 = AtomicU8::new(0);
 
@@ -89,8 +94,23 @@ pub fn log_io_error(
 ///
 /// The returned guard must be kept alive for the duration of the process,
 /// otherwise buffered log records may be lost on exit.
-pub fn init(log_dir: &Path) -> tracing_appender::non_blocking::WorkerGuard {
-    let file_appender = tracing_appender::rolling::daily(log_dir, "filemanager.log");
+pub fn file_appender(
+    log_dir: &Path,
+) -> Result<
+    tracing_appender::rolling::RollingFileAppender,
+    tracing_appender::rolling::InitError,
+> {
+    tracing_appender::rolling::Builder::new()
+        .rotation(tracing_appender::rolling::Rotation::DAILY)
+        .filename_prefix(LOG_FILE_PREFIX)
+        .max_log_files(LOG_RETAINED_FILES)
+        .build(log_dir)
+}
+
+pub fn init(
+    log_dir: &Path,
+) -> Result<tracing_appender::non_blocking::WorkerGuard, tracing_appender::rolling::InitError> {
+    let file_appender = file_appender(log_dir)?;
     let (writer, guard) = tracing_appender::non_blocking(file_appender);
 
     tracing_subscriber::fmt()
@@ -102,7 +122,7 @@ pub fn init(log_dir: &Path) -> tracing_appender::non_blocking::WorkerGuard {
         .ok();
 
     install_panic_log_hook();
-    guard
+    Ok(guard)
 }
 
 
@@ -186,7 +206,7 @@ mod tests {
     #[test]
     fn log_file_created() {
         let dir = std::env::temp_dir().join(format!("fm_log_{}", std::process::id()));
-        let _g = init(&dir);
+        let _g = init(&dir).unwrap();
         tracing::info!("test log entry");
         std::thread::sleep(std::time::Duration::from_millis(300));
         let files: Vec<_> = std::fs::read_dir(&dir).unwrap().collect();
@@ -197,7 +217,7 @@ mod tests {
     #[test]
     fn init_is_idempotent() {
         let dir = std::env::temp_dir().join(format!("fm_log2_{}", std::process::id()));
-        let _g1 = init(&dir);
-        let _g2 = init(&dir); // second call must not panic
+        let _g1 = init(&dir).unwrap();
+        let _g2 = init(&dir).unwrap(); // second call must not panic
     }
 }

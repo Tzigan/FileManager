@@ -14,7 +14,8 @@ use platform::AcquireResult;
 fn main() -> anyhow::Result<()> {
     let dirs = core::paths::discover().context("failed to resolve app directories")?;
     std::fs::create_dir_all(&dirs.log_dir)?;
-    let _log_guard = core::logging::init(&dirs.log_dir);
+    let _log_guard = core::logging::init(&dirs.log_dir)
+        .context("failed to initialize rolling file logging")?;
 
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),

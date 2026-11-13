@@ -110,4 +110,58 @@ mod tests {
         let third = acquire_named_instance(PCWSTR(name.as_ptr())).unwrap();
         assert!(matches!(&third, AcquireResult::Acquired(_)));
     }
+
+    #[test]
+    fn single_instance_lock_does_not_block_export() {
+        let mutex_name = HSTRING::from(format!(
+            "Local\\FileManager.LogExport.{}.{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let AcquireResult::Acquired(_guard) =
+            acquire_named_instance(PCWSTR(mutex_name.as_ptr())).unwrap()
+        else {
+            panic!("test mutex must be acquired");
+        };
+
+        let root = std::env::temp_dir().join(format!(
+            "fm-single-instance-export-{}",
+            std::process::id()
+        ));
+        let log_dir = root.join("logs");
+        let output_dir = root.join("export");
+        std::fs::create_dir_all(&log_dir).unwrap();
+        std::fs::create_dir_all(&output_dir).unwrap();
+        std::fs::write(
+            log_dir.join("filemanager.log.2026-11-13"),
+            "single-instance export marker\n",
+        )
+        .unwrap();
+        let labels = crate::core::log_export::ExportLabels {
+            title: "diagnostics".to_owned(),
+            version: "Version".to_owned(),
+            exported_at: "Exported at".to_owned(),
+            scope: "file logs".to_owned(),
+            journal_note: "memory journal excluded".to_owned(),
+        };
+
+        let export = crate::core::log_export::export_logs(
+            &log_dir,
+            &output_dir,
+            env!("CARGO_PKG_VERSION"),
+            "2026-11-13 12:00",
+            &labels,
+        )
+        .unwrap();
+
+        assert!(
+            std::fs::read_to_string(export)
+                .unwrap()
+                .contains("single-instance export marker")
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
 }

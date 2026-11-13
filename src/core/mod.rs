@@ -8,6 +8,7 @@ pub mod fs;
 pub mod history;
 pub mod i18n;
 pub mod known_folders;
+pub mod log_export;
 pub mod logging;
 pub mod ops;
 pub mod paths;
