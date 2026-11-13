@@ -127,7 +127,7 @@ pub use self::windows::{
     extract_zip_file_cancellable, extract_zip_folder_cancellable, format_local_time, free_space,
     get_clipboard_files, get_clipboard_text, install_context_menu, launch_updater,
     notify_already_running, open_recycle_bin, open_terminal, pick_folder, pipe_listen,
-    pipe_send,
+    pipe_send, publish_file_no_replace,
     prepare_update_archive, read_entry_details, read_zip_dir_cancellable, recycle_bin, replace_file,
     search_zip, set_attributes, set_clipboard_files, shell_open, signal_update_started,
     spawn_dir_watch, uninstall_context_menu, volume_id,
@@ -428,6 +428,13 @@ mod stubs {
             "folder selection is supported only on Windows",
         ))
     }
+    pub fn publish_file_no_replace(
+        source: &std::path::Path,
+        destination: &std::path::Path,
+    ) -> std::io::Result<()> {
+        std::fs::hard_link(source, destination)?;
+        std::fs::remove_file(source)
+    }
     pub fn open_terminal(_p: &std::path::Path) -> std::io::Result<()> {
         Ok(())
     }
@@ -490,8 +497,9 @@ pub use stubs::{
     extract_zip_folder_cancellable, format_local_time, free_space, get_clipboard_files,
     get_clipboard_text, install_context_menu, launch_updater, notify_already_running,
     open_recycle_bin, open_terminal, pick_folder, pipe_listen, pipe_send, prepare_update_archive,
-    read_entry_details, read_zip_dir_cancellable, recycle_bin, replace_file, search_zip,
-    set_attributes, set_clipboard_files, shell_open, signal_update_started, spawn_dir_watch,
+    publish_file_no_replace, read_entry_details, read_zip_dir_cancellable, recycle_bin,
+    replace_file, search_zip, set_attributes, set_clipboard_files, shell_open,
+    signal_update_started, spawn_dir_watch,
     uninstall_context_menu, volume_id,
 };
 
