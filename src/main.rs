@@ -31,6 +31,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     let store = core::settings::SettingsStore::load(&dirs.config_dir);
+    core::logging::set_panic_language(store.settings.language);
 
     // Single instance: a second launch forwards its path over a named pipe
     // instead of showing a dialog. Disabled in settings → every launch opens a window.

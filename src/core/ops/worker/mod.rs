@@ -117,13 +117,11 @@ impl<'a> Worker<'a> {
 
     fn ask_error(&mut self, job: &OpJob, path: &Path, e: &io::Error) -> ErrorAction {
         let retryable = is_retryable(e);
-        tracing::debug!(
-            operation_id = job.id,
-            path = %path.display(),
-            error_kind = ?e.kind(),
-            raw_os_error = ?e.raw_os_error(),
-            error = %e,
-            "file operation failed"
+        crate::core::logging::log_io_error(
+            "file operation",
+            Some(job.id),
+            Some(path),
+            e,
         );
         let _ = self.events.send(OpEvent::AskError {
             id: job.id,

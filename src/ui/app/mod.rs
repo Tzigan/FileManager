@@ -568,15 +568,20 @@ impl FileManagerApp {
     fn set_language(&mut self, lang: Language) {
         self.store.settings.language = lang;
         self.i18n.set_language(lang);
+        crate::core::logging::set_panic_language(lang);
         self.persist();
     }
 
     pub(crate) fn persist(&mut self) {
         if let Err(e) = self.store.save() {
             let path = self.dirs.config_dir.join("settings.json");
-            tracing::debug!(
+            let error_kind = e
+                .downcast_ref::<std::io::Error>()
+                .map(std::io::Error::kind);
+            tracing::info!(
                 path = %path.display(),
-                error = %e,
+                error_kind = ?error_kind,
+                error = %format!("{e:#}"),
                 "settings save failed"
             );
             self.ops_ui.journal.push(self.t("settings.save_failed").to_owned());
@@ -803,11 +808,6 @@ impl FileManagerApp {
                         }
                         Err(ReadDirError::Cancelled) => {}
                         Err(ReadDirError::Io(e)) => {
-                            tracing::debug!(
-                                path = %self.tabs[tab].path.display(),
-                                error = %e,
-                                "read_dir failed"
-                            );
                             let text = if self.tabs[tab].archive_prefix.is_some() {
                                 self.zip_error_text(&e)
                             } else if crate::platform::is_wsl_path(&self.tabs[tab].path) {

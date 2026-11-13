@@ -9,6 +9,20 @@ use crate::core::settings::route_delete;
 
 use super::*;
 
+fn log_trash_error(context: &str, path: &Path, error: &secure_trash::TrashError) {
+    if let Some(io_error) = error.io_error() {
+        crate::core::logging::log_io_error(context, None, Some(path), io_error);
+    } else {
+        tracing::info!(
+            context = %context,
+            path = %path.display(),
+            error_kind = ?error,
+            error = %error,
+            "secure trash operation failed"
+        );
+    }
+}
+
 impl FileManagerApp {
     pub(crate) fn dispatch_recycle(&mut self, paths: Vec<PathBuf>) {
         let route = route_delete(
@@ -193,11 +207,7 @@ impl FileManagerApp {
                     storage_root: None,
                 };
                 if let Err(error) = secure_trash::move_to_trash(&path, &options) {
-                    tracing::debug!(
-                        path = %path.display(),
-                        error = %error,
-                        "secure trash move failed"
-                    );
+                    log_trash_error("secure trash move", &path, &error);
                     errors.push((path, error));
                 }
             }
@@ -345,10 +355,10 @@ impl FileManagerApp {
                 let mut errors = Vec::new();
                 for item in chosen {
                     if let Err(error) = secure_trash::purge(&item) {
-                        tracing::debug!(
-                            item = %item.original_name,
-                            error = %error,
-                            "secure trash purge failed"
+                        log_trash_error(
+                            "secure trash purge",
+                            Path::new(&item.original_path),
+                            &error,
                         );
                         errors.push((item.original_name.clone(), error));
                     }
@@ -391,15 +401,15 @@ impl FileManagerApp {
             }
             if decision == 1 {
                 let errors = secure_trash::empty_trash(&self.trash_volumes());
-                for (name, error) in &errors {
-                    tracing::debug!(item = %name, error = %error, "secure trash purge failed");
+                for (path, _, error) in &errors {
+                    log_trash_error("secure trash purge", path, error);
                 }
                 self.trash_notice = Some(if errors.is_empty() {
                     self.t("trash.emptied").to_owned()
                 } else {
                     errors
                         .iter()
-                        .map(|(name, error)| self.trash_error_line(name, error))
+                        .map(|(_, name, error)| self.trash_error_line(name, error))
                         .collect::<Vec<_>>()
                         .join("\n")
                 });
@@ -474,10 +484,10 @@ impl FileManagerApp {
                     break;
                 }
                 Err(error) => {
-                    tracing::debug!(
-                        path = %record.original_path,
-                        error = %error,
-                        "secure trash restore failed"
+                    log_trash_error(
+                        "secure trash restore",
+                        Path::new(&record.original_path),
+                        &error,
                     );
                     self.trash_notice =
                         Some(self.trash_error_line(&record.original_name, &error));
