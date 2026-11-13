@@ -4,7 +4,9 @@ use anyhow::Context;
 
 use super::*;
 
-fn log_export_error_key(error: &crate::core::log_export::LogExportError) -> &'static str {
+pub(super) fn log_export_error_key(
+    error: &crate::core::log_export::LogExportError,
+) -> &'static str {
     match error {
         crate::core::log_export::LogExportError::NoLogFiles => "logs.export_no_logs",
         crate::core::log_export::LogExportError::Io { source, .. } => {
@@ -103,7 +105,13 @@ impl FileManagerApp {
                 ));
                 ui.horizontal(|ui| {
                     ui.label(format!("{}: {}", log_label, self.dirs.log_dir.display()));
-                    if ui.button(export_label.clone()).clicked() {
+                    if ui
+                        .add_enabled(
+                            !self.log_export_busy,
+                            egui::Button::new(export_label.clone()),
+                        )
+                        .clicked()
+                    {
                         export_requested = true;
                     }
                 });
@@ -183,12 +191,12 @@ impl FileManagerApp {
             self.show_about = false;
         }
         if export_requested {
-            self.export_logs_from_about();
+            self.export_logs_from_about(ctx);
             ctx.request_repaint();
         }
     }
 
-    fn export_logs_from_about(&mut self) {
+    fn export_logs_from_about(&mut self, ctx: &egui::Context) {
         let picker_title = self.t("logs.export_folder").to_owned();
         let destination = match crate::platform::pick_folder(
             &picker_title,
@@ -215,33 +223,42 @@ impl FileManagerApp {
                 .t("logs.export_scope")
                 .replace("{days}", &crate::core::log_export::LOG_EXPORT_WINDOW_FILES.to_string()),
             journal_note: self.t("logs.export_journal_excluded").to_owned(),
+            freshness_note: String::new(),
+            skipped_logs_note: self.t("logs.export_skipped_header").to_owned(),
         };
+        let freshness_confirmed_note = self.t("logs.export_freshness_confirmed").to_owned();
+        let freshness_pending_note = self.t("logs.export_pending_note").to_owned();
         let exported_at = crate::platform::format_local_time(
             std::time::SystemTime::now(),
             self.i18n.language(),
         );
-        match crate::core::log_export::export_logs(
-            &self.dirs.log_dir,
-            &destination,
-            env!("CARGO_PKG_VERSION"),
-            &exported_at,
-            &labels,
-        ) {
-            Ok(path) => {
-                self.log_export_status = Some(format!(
-                    "{}: {}",
-                    self.t("logs.export_done"),
-                    path.display()
-                ));
-            }
-            Err(error) => {
-                let failure = self.t(log_export_error_key(&error)).to_owned();
-                self.log_export_status = Some(format!("{}: {failure}", self.t("logs.export_failed")));
-                if let crate::core::log_export::LogExportError::Io { path, source } = error {
-                    self.record_io_error(Some(&path), &source);
-                }
-            }
-        }
+        let log_dir = self.dirs.log_dir.clone();
+        let msg_tx = self.msg_tx.clone();
+        let ctx = ctx.clone();
+        self.log_export_busy = true;
+        self.log_export_status = Some(self.t("logs.exporting").to_owned());
+        thread::spawn(move || {
+            let freshness_confirmed = crate::core::log_export::wait_for_log_flush(
+                &log_dir,
+                crate::core::log_export::LOG_EXPORT_FLUSH_TIMEOUT,
+            );
+            let mut labels = labels;
+            labels.freshness_note = if freshness_confirmed {
+                freshness_confirmed_note
+            } else {
+                freshness_pending_note
+            };
+            let result = crate::core::log_export::export_logs(
+                &log_dir,
+                &destination,
+                env!("CARGO_PKG_VERSION"),
+                &exported_at,
+                &labels,
+            )
+            .map(|exported| (exported, freshness_confirmed));
+            let _ = msg_tx.send(WorkerMsg::LogExportFinished { result });
+            ctx.request_repaint();
+        });
     }
 
     pub(super) fn settings_window(&mut self, ctx: &egui::Context) {
@@ -1082,6 +1099,7 @@ mod tests {
         let error = crate::core::log_export::LogExportError::Io {
             path: PathBuf::from(r"C:\export\file.txt"),
             source: std::io::Error::other("HRESULT 0x80070005\nstack trace: internal detail"),
+            incomplete_path: None,
         };
         let key = log_export_error_key(&error);
         let text = crate::core::i18n::I18n::new(crate::core::i18n::Language::En)
@@ -1114,6 +1132,16 @@ mod tests {
             assert!(hint.contains(path_word));
             assert!(hint.contains(journal_word));
             assert!(hint.contains(privacy_word));
+            for key in [
+                "logs.exporting",
+                "logs.export_freshness_confirmed",
+                "logs.export_pending_note",
+                "logs.export_skipped_header",
+                "logs.export_skipped_note",
+                "logs.export_temp_left",
+            ] {
+                assert!(labels[key].as_str().is_some(), "missing localized key {key}");
+            }
         }
     }
 
@@ -1124,5 +1152,21 @@ mod tests {
         assert!(dialogs.contains("ViewportId::from_hash_of(\"filemanager-about\")"));
         assert!(dialogs.contains("self.export_logs_from_about()"));
         assert!(!toolbar.contains("logs.export"));
+    }
+
+    #[test]
+    fn export_runs_off_ui_thread_or_returns_immediately_with_status() {
+        let source = include_str!("dialogs.rs");
+        let start = source.find("fn export_logs_from_about").unwrap();
+        let tail = &source[start..];
+        let end = tail.find("\n    pub(super) fn settings_window").unwrap();
+        let handler = &tail[..end];
+        assert!(handler.contains("self.log_export_status = Some(self.t(\"logs.exporting\")"));
+        assert!(handler.contains("thread::spawn"));
+        assert!(
+            handler.find("thread::spawn").unwrap()
+                < handler.find("crate::core::log_export::export_logs").unwrap()
+        );
+        assert!(handler.contains("WorkerMsg::LogExportFinished"));
     }
 }

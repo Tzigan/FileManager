@@ -146,6 +146,8 @@ mod tests {
             exported_at: "Exported at".to_owned(),
             scope: "file logs".to_owned(),
             journal_note: "memory journal excluded".to_owned(),
+            freshness_note: "flush confirmed".to_owned(),
+            skipped_logs_note: "skipped logs".to_owned(),
         };
 
         let export = crate::core::log_export::export_logs(
@@ -158,7 +160,7 @@ mod tests {
         .unwrap();
 
         assert!(
-            std::fs::read_to_string(export)
+            std::fs::read_to_string(export.path)
                 .unwrap()
                 .contains("single-instance export marker")
         );

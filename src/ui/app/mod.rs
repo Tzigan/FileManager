@@ -119,6 +119,13 @@ pub(crate) enum WorkerMsg {
         errors: Vec<(PathBuf, crate::core::secure_trash::TrashError)>,
         paths: Vec<PathBuf>,
     },
+    /// Завершился отдельный локальный экспорт логов.
+    LogExportFinished {
+        result: Result<
+            (crate::core::log_export::ExportedLog, bool),
+            crate::core::log_export::LogExportError,
+        >,
+    },
     /// Тяжёлые свойства одного объекта. Поколение отбрасывает ответ для уже другого выбора.
     EntryDetails {
         generation: u64,
@@ -184,6 +191,7 @@ pub struct FileManagerApp {
     /// Ошибка обновления, показываемая в окне «О программе».
     update_err: Option<String>,
     log_export_status: Option<String>,
+    log_export_busy: bool,
     /// Когда отдать установку updater и закрыть корневое окно.
     update_restart_at: Option<Instant>,
     /// Автоперезапуск выключен: ждём кнопку, процесс не завершаем.
@@ -459,6 +467,7 @@ impl FileManagerApp {
             update_status: None,
             update_err: None,
             log_export_status: None,
+            log_export_busy: false,
             update_restart_at: None,
             update_restart_offer: false,
             tab_drag_state: tab_drag_preview::TabDragState::Idle,
@@ -1040,6 +1049,60 @@ impl FileManagerApp {
                         .retain(|path| !crate::platform::is_wsl_path(path));
                 }
                 WorkerMsg::OpenPath(path) => self.open_path_in_new_tab(path, ctx),
+                WorkerMsg::LogExportFinished { result } => {
+                    self.log_export_busy = false;
+                    match result {
+                        Ok((exported, freshness_confirmed)) => {
+                            let mut status = format!(
+                                "{}: {}",
+                                self.t("logs.export_done"),
+                                exported.path.display()
+                            );
+                            if !freshness_confirmed {
+                                status.push_str("\n");
+                                status.push_str(self.t("logs.export_pending_note"));
+                            }
+                            if !exported.skipped_files.is_empty() {
+                                status.push_str("\n");
+                                status.push_str(
+                                    &self
+                                        .t("logs.export_skipped_note")
+                                        .replace("{count}", &exported.skipped_files.len().to_string()),
+                                );
+                            }
+                            self.log_export_status = Some(status);
+                        }
+                        Err(crate::core::log_export::LogExportError::NoLogFiles) => {
+                            self.log_export_status =
+                                Some(self.t("logs.export_no_logs").to_owned());
+                        }
+                        Err(error) => {
+                            let mut status = format!(
+                                "{}: {}",
+                                self.t("logs.export_failed"),
+                                self.t(dialogs::log_export_error_key(&error))
+                            );
+                            if let crate::core::log_export::LogExportError::Io {
+                                path,
+                                source,
+                                incomplete_path,
+                            } = error
+                            {
+                                self.record_io_error(Some(&path), &source);
+                                if let Some(incomplete_path) = incomplete_path {
+                                    status.push_str("\n");
+                                    status.push_str(
+                                        &self
+                                            .t("logs.export_temp_left")
+                                            .replace("{path}", &incomplete_path.display().to_string()),
+                                    );
+                                }
+                            }
+                            self.log_export_status = Some(status);
+                        }
+                    }
+                    ctx.request_repaint();
+                }
                 WorkerMsg::UpdateFound { manifest } => {
                     self.update_busy = false;
                     self.update_total = manifest.size;

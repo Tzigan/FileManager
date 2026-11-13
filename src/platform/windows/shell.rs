@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use ::windows::Win32::System::Com::{
     CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree,
 };
+use ::windows::Win32::Storage::FileSystem::MoveFileW;
 use ::windows::Win32::UI::Shell::{
     FOS_FORCEFILESYSTEM, FOS_PATHMUSTEXIST, FOS_PICKFOLDERS, FileOpenDialog, IFileOpenDialog,
     IShellItem, SHCreateItemFromParsingName, SIGDN_FILESYSPATH, ShellExecuteW,
@@ -53,6 +54,13 @@ pub fn pick_folder(title: &str, initial_dir: Option<&Path>) -> io::Result<Option
         }
         Ok(Some(path))
     }
+}
+
+/// Перемещает temp-файл без замены уже существующего результата.
+pub fn publish_file_no_replace(source: &Path, destination: &Path) -> io::Result<()> {
+    let source = HSTRING::from(source.as_os_str());
+    let destination = HSTRING::from(destination.as_os_str());
+    unsafe { MoveFileW(&source, &destination).map_err(com_error) }
 }
 
 fn is_dialog_cancel(error: &windows::core::Error) -> bool {
