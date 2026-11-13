@@ -21,6 +21,15 @@ pub enum AccessList {
     Present { entries: u16 },
 }
 
+/// Дополнительные атрибуты Windows, полученные без раскрытия ссылки.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ExtraFileAttributes {
+    pub archive: bool,
+    pub compressed: bool,
+    pub encrypted: bool,
+    pub reparse_point: bool,
+}
+
 /// Тяжёлые сведения об одном объекте. Список файлов их не хранит.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EntryDetails {
@@ -30,6 +39,7 @@ pub struct EntryDetails {
     pub accessed: Detail<SystemTime>,
     pub owner: Detail<String>,
     pub access: Detail<AccessList>,
+    pub extra_attributes: Detail<ExtraFileAttributes>,
 }
 
 impl EntryDetails {
@@ -40,12 +50,16 @@ impl EntryDetails {
             accessed: Detail::Unavailable,
             owner: Detail::Unavailable,
             access: Detail::Unavailable,
+            extra_attributes: Detail::Unavailable,
         }
     }
 
     /// Ссылку не раскрываем: числа цели нельзя показать как свойства самой ссылки.
-    pub fn for_symlink() -> Self {
-        Self::unavailable()
+    pub fn for_symlink(extra_attributes: ExtraFileAttributes) -> Self {
+        Self {
+            extra_attributes: Detail::Known(extra_attributes),
+            ..Self::unavailable()
+        }
     }
 }
 
@@ -69,10 +83,13 @@ pub fn heavy_details_path<'a>(
     selected: Option<&'a Path>,
     selected_is_archive_member: bool,
 ) -> Option<&'a Path> {
+    if in_archive || secure_trash {
+        return None;
+    }
     if let Some(path) = props_window {
         return Some(path);
     }
-    if in_archive || secure_trash || selected_is_archive_member {
+    if selected_is_archive_member {
         return None;
     }
     selected
@@ -153,7 +170,10 @@ mod tests {
 
     #[test]
     fn symlink_details_do_not_invent_target_numbers() {
-        let details = EntryDetails::for_symlink();
+        let details = EntryDetails::for_symlink(ExtraFileAttributes {
+            reparse_point: true,
+            ..ExtraFileAttributes::default()
+        });
         assert_eq!(details.size_on_disk, Detail::Unavailable);
         assert_eq!(details.owner, Detail::Unavailable);
         assert_eq!(details.access, Detail::Unavailable);
@@ -183,6 +203,10 @@ mod tests {
         let selected = Path::new(r"C:\docs\book.zip");
         assert_eq!(
             heavy_details_path(None, true, false, Some(selected), false),
+            None
+        );
+        assert_eq!(
+            heavy_details_path(Some(selected), true, false, Some(selected), false),
             None
         );
         assert_eq!(
@@ -223,6 +247,46 @@ mod tests {
                 Detail::Unavailable => None,
             }),
             Some("owner-b")
+        );
+    }
+
+    #[test]
+    fn stale_details_response_does_not_leak_into_props_panel_or_window() {
+        let old_path = Path::new(r"C:\docs\old.txt");
+        let new_path = Path::new(r"C:\docs\new.txt");
+        let mut watch = DetailsWatch::default();
+        let DetailsStep::Start {
+            generation: old_generation,
+            ..
+        } = watch.follow(Some(old_path))
+        else {
+            panic!("старый выбор должен запустить запрос");
+        };
+        let DetailsStep::Start {
+            generation: new_generation,
+            ..
+        } = watch.follow(Some(new_path))
+        else {
+            panic!("новый выбор должен сменить поколение");
+        };
+        assert!(!watch.receive(
+            old_generation,
+            old_path,
+            known_owner("устаревший владелец")
+        ));
+        assert_eq!(watch.path.as_deref(), Some(new_path));
+        assert!(watch.pending);
+        assert!(watch.receive(
+            new_generation,
+            new_path,
+            known_owner("актуальный владелец")
+        ));
+        assert_eq!(
+            watch.details.as_ref().and_then(|details| match &details.owner {
+                Detail::Known(name) => Some(name.as_str()),
+                Detail::Unavailable => None,
+            }),
+            Some("актуальный владелец")
         );
     }
 

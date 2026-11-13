@@ -193,6 +193,8 @@ pub struct FileManagerApp {
     tab_strip_scroll_target: Option<u64>,
     /// Path shown in the properties dialog.
     pub(crate) props_target: Option<PathBuf>,
+    /// Снимок выбранных объектов для агрегата в том же окне свойств.
+    pub(crate) props_multi_target: Option<Vec<crate::core::fs::FileEntry>>,
     /// Запрос тяжёлых свойств. Список папки его не заполняет.
     pub(crate) details_watch: crate::core::entry_details::DetailsWatch,
     props_viewport_placed: bool,
@@ -460,6 +462,7 @@ impl FileManagerApp {
             tab_drag_preview: tab_drag_preview::TabDragPreviewState::default(),
             tab_strip_scroll_target: None,
             props_target: None,
+            props_multi_target: None,
             details_watch: crate::core::entry_details::DetailsWatch::default(),
             props_viewport_placed: false,
             preview: PreviewState::default(),
@@ -1311,9 +1314,9 @@ impl eframe::App for FileManagerApp {
             .show(ui, |ui| self.tree_panel(&ctx, ui));
 
         egui::Panel::right("props_panel")
-            .resizable(true)
-            .default_size(380.0)
-            .size_range(300.0..=500.0)
+            .resizable(false)
+            .default_size(crate::ui::PROPERTY_PANEL_FIXED_WIDTH)
+            .size_range(crate::ui::property_panel_fixed_range())
             .show(ui, |ui| self.props_panel(ui));
 
         egui::Panel::bottom("ops_panel").show(ui, |ui| self.ops_panel(ui));

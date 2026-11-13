@@ -45,8 +45,6 @@ pub(super) const DETACHED_WINDOW_MIN_SIZE: [f32; 2] = [640.0, 420.0];
 pub(super) const DETACHED_TAB_MIN_WIDTH: f32 = 100.0;
 pub(super) const DETACHED_TREE_DEFAULT_WIDTH: f32 = 210.0;
 pub(super) const DETACHED_TREE_WIDTH_RANGE: std::ops::RangeInclusive<f32> = 140.0..=360.0;
-pub(super) const DETACHED_PROPS_DEFAULT_WIDTH: f32 = 340.0;
-pub(super) const DETACHED_PROPS_WIDTH_RANGE: std::ops::RangeInclusive<f32> = 260.0..=460.0;
 
 pub(super) fn new_tab_button_size(text_height: f32, min_interact_height: f32) -> egui::Vec2 {
     egui::vec2(
@@ -439,9 +437,9 @@ impl FileManagerApp {
                     .size_range(DETACHED_TREE_WIDTH_RANGE)
                     .show(viewport_ui, |ui| self.tree_panel(&viewport_ctx, ui));
                 egui::Panel::right("detached_props")
-                    .resizable(true)
-                    .default_size(DETACHED_PROPS_DEFAULT_WIDTH)
-                    .size_range(DETACHED_PROPS_WIDTH_RANGE)
+                    .resizable(false)
+                    .default_size(crate::ui::PROPERTY_PANEL_FIXED_WIDTH)
+                    .size_range(crate::ui::property_panel_fixed_range())
                     .show(viewport_ui, |ui| self.props_panel(ui));
                 egui::Panel::bottom("detached_status").show(viewport_ui, |ui| {
                     self.show_active_tab_status(ui);

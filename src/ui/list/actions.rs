@@ -270,6 +270,7 @@ impl FileManagerApp {
                 ui.separator();
                 if ui.button(self.t("ctx.properties").to_owned()).clicked() {
                     self.props_target = Some(entry.path.clone());
+                    self.props_multi_target = None;
                     ui.close();
                 }
             }
