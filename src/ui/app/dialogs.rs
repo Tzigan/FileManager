@@ -691,13 +691,7 @@ impl FileManagerApp {
             return None;
         }
         let tab = self.tabs.get(self.active);
-        let selected = tab.and_then(|tab| {
-            if tab.selection.len() != 1 {
-                return None;
-            }
-            let key = tab.selection.iter().next()?;
-            tab.entries.iter().find(|entry| key.matches(entry))
-        });
+        let selected = tab.and_then(selected_entry_for_details);
         crate::core::entry_details::heavy_details_path(
             self.props_target.as_deref(),
             tab.is_some_and(|tab| tab.archive_prefix.is_some()),
@@ -813,14 +807,30 @@ impl FileManagerApp {
         });
         self.props_viewport_placed = !close_requested;
         if let (Some((ro, hi)), Some(target)) = (apply, target.as_ref()) {
-            if crate::platform::set_attributes(target, ro, hi).is_ok() {
-                self.refresh(ctx);
-            }
+            refresh_after_attribute_change(
+                crate::platform::set_attributes(target, ro, hi),
+                || self.refresh(ctx),
+            );
         }
         if close_requested {
             self.props_target = None;
             self.props_multi_target = None;
         }
+    }
+}
+
+fn selected_entry_for_details(tab: &Tab) -> Option<&crate::core::fs::FileEntry> {
+    if tab.selection.len() != 1 {
+        return None;
+    }
+    let key = tab.selection.iter().next()?;
+    tab.entries.iter().find(|entry| key.matches(entry))
+}
+
+/// После успешной смены флага перечитываем список: hidden меняет состав видимых строк.
+fn refresh_after_attribute_change(result: std::io::Result<()>, refresh: impl FnOnce()) {
+    if result.is_ok() {
+        refresh();
     }
 }
 
@@ -888,7 +898,32 @@ fn update_progress_row(ui: &mut egui::Ui, downloaded: u64, total: u64) {
 
 #[cfg(test)]
 mod tests {
-    use super::{SettingsCategory, settings_category_column_width};
+    use std::path::PathBuf;
+
+    use super::{
+        SettingsCategory, refresh_after_attribute_change, selected_entry_for_details,
+        settings_category_column_width,
+    };
+    use crate::core::dir_cache::DirCache;
+    use crate::core::fs::FileEntry;
+    use crate::ui::tabs::{SelectionKey, Tab};
+
+    fn entry(name: &str) -> FileEntry {
+        FileEntry {
+            name: name.to_owned(),
+            path: PathBuf::from(r"C:\cache-edit").join(name),
+            is_dir: false,
+            is_symlink: false,
+            hidden: false,
+            system: false,
+            readonly: false,
+            size: Some(1),
+            modified: None,
+            created: None,
+            extension: Some("txt".to_owned()),
+            archive_member: None,
+        }
+    }
 
     #[test]
     fn settings_categories_have_distinct_labels_and_start_with_general() {
@@ -921,5 +956,35 @@ mod tests {
         output.textures_delta.clear();
         assert!(long > short);
         assert!(short > crate::ui::style::SPACE_MD);
+    }
+
+    #[test]
+    fn editing_attribute_invalidates_dir_cache() {
+        let parent = std::env::temp_dir().join(format!(
+            "fm-properties-cache-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&parent).unwrap();
+        let key = DirCache::cache_key(&parent).unwrap();
+        let mut cache = DirCache::new(4);
+        let generation = cache.begin(&key);
+        assert!(cache.store(&key, generation, Vec::new()));
+
+        refresh_after_attribute_change(Ok(()), || cache.invalidate_dir(&parent));
+
+        assert!(cache.lookup(&parent).is_none());
+        let _ = std::fs::remove_dir_all(parent);
+    }
+
+    #[test]
+    fn multiple_selection_does_not_issue_per_item_heavy_requests() {
+        let mut tab = Tab::new(PathBuf::from(r"C:\cache-edit"));
+        let first = entry("one.txt");
+        let second = entry("two.txt");
+        tab.selection.insert(SelectionKey::from_entry(&first));
+        tab.selection.insert(SelectionKey::from_entry(&second));
+        tab.entries = vec![first, second];
+
+        assert!(selected_entry_for_details(&tab).is_none());
     }
 }
