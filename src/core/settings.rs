@@ -259,14 +259,31 @@ impl Default for Settings {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsLoadIssue {
+    Invalid,
+    Unreadable,
+}
+
+impl SettingsLoadIssue {
+    pub fn message_key(self) -> &'static str {
+        match self {
+            Self::Invalid => "settings.load_invalid",
+            Self::Unreadable => "settings.load_failed",
+        }
+    }
+}
+
 pub struct SettingsStore {
     path: PathBuf,
     pub settings: Settings,
+    pub load_issue: Option<SettingsLoadIssue>,
 }
 
 impl SettingsStore {
     pub fn load(config_dir: &Path) -> Self {
         let path = config_dir.join("settings.json");
+        let mut load_issue = None;
         let settings = match fs::read_to_string(&path) {
             Ok(raw) => match serde_json::from_str::<Settings>(&raw) {
                 Ok(s) => {
@@ -274,7 +291,8 @@ impl SettingsStore {
                     s
                 }
                 Err(e) => {
-                    tracing::warn!(path = %path.display(), "settings parse failed, using defaults: {e}");
+                    tracing::debug!(path = %path.display(), error = %e, "settings parse failed, using defaults");
+                    load_issue = Some(SettingsLoadIssue::Invalid);
                     Settings::default()
                 }
             },
@@ -283,11 +301,16 @@ impl SettingsStore {
                 Settings::default()
             }
             Err(e) => {
-                tracing::warn!(path = %path.display(), "settings read failed, using defaults: {e}");
+                tracing::debug!(path = %path.display(), error = %e, "settings read failed, using defaults");
+                load_issue = Some(SettingsLoadIssue::Unreadable);
                 Settings::default()
             }
         };
-        Self { path, settings }
+        Self {
+            path,
+            settings,
+            load_issue,
+        }
     }
 
     pub fn save(&self) -> anyhow::Result<()> {
@@ -333,6 +356,19 @@ mod tests {
             settings.max_concurrent_bg_ops,
             crate::core::bg_ops::DEFAULT_CONCURRENT_BG_OPS
         );
+    }
+
+    #[test]
+    fn settings_load_failure_reports_that_defaults_are_active() {
+        let dir = temp_config();
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("settings.json"), b"{ invalid json").unwrap();
+
+        let store = SettingsStore::load(&dir);
+
+        assert_eq!(store.load_issue, Some(SettingsLoadIssue::Invalid));
+        assert_eq!(store.settings.language, Language::default());
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]

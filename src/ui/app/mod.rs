@@ -116,7 +116,7 @@ pub(crate) enum WorkerMsg {
     /// Фоновое помещение в защищённую корзину закончилось.
     /// `paths` — исходные файлы: их папки надо сбросить в кэше, сама корзина кэшем списка не обслуживается.
     SecureTrashFinished {
-        errors: Vec<String>,
+        errors: Vec<(PathBuf, crate::core::secure_trash::TrashError)>,
         paths: Vec<PathBuf>,
     },
     /// Тяжёлые свойства одного объекта. Поколение отбрасывает ответ для уже другого выбора.
@@ -273,6 +273,7 @@ impl FileManagerApp {
         initial_path: Option<PathBuf>,
         initial_select: Option<String>,
     ) -> Self {
+        let settings_load_issue = store.load_issue;
         let (msg_tx, msg_rx) = channel();
         let (bg_ops_events_tx, bg_ops_events_rx) = channel();
         let repaint_ctx = cc.egui_ctx.clone();
@@ -526,6 +527,10 @@ impl FileManagerApp {
             op_reply: Some(op_reply),
             ops_worker: Some(ops_worker),
         };
+        if let Some(issue) = settings_load_issue {
+            app.ops_ui.journal.push(app.t(issue.message_key()).to_owned());
+            app.ops_ui.show_journal = true;
+        }
         // CLI path (Explorer "Open in FileManager") wins over restored tabs.
         if let Some(p) = initial_path {
             app.tabs.push(Tab::new(p));
@@ -566,9 +571,16 @@ impl FileManagerApp {
         self.persist();
     }
 
-    pub(crate) fn persist(&self) {
+    pub(crate) fn persist(&mut self) {
         if let Err(e) = self.store.save() {
-            tracing::error!("failed to save settings: {e}");
+            let path = self.dirs.config_dir.join("settings.json");
+            tracing::debug!(
+                path = %path.display(),
+                error = %e,
+                "settings save failed"
+            );
+            self.ops_ui.journal.push(self.t("settings.save_failed").to_owned());
+            self.ops_ui.show_journal = true;
         }
     }
 
@@ -791,7 +803,11 @@ impl FileManagerApp {
                         }
                         Err(ReadDirError::Cancelled) => {}
                         Err(ReadDirError::Io(e)) => {
-                            tracing::warn!(path = %self.tabs[tab].path.display(), "read_dir failed: {e}");
+                            tracing::debug!(
+                                path = %self.tabs[tab].path.display(),
+                                error = %e,
+                                "read_dir failed"
+                            );
                             let text = if self.tabs[tab].archive_prefix.is_some() {
                                 self.zip_error_text(&e)
                             } else if crate::platform::is_wsl_path(&self.tabs[tab].path) {
@@ -957,7 +973,15 @@ impl FileManagerApp {
                     self.trash_notice = if errors.is_empty() {
                         Some(self.t("trash.moved").to_owned())
                     } else {
-                        Some(errors.join("\n"))
+                        Some(
+                            errors
+                                .iter()
+                                .map(|(path, error)| {
+                                    self.trash_error_line(&path.display().to_string(), error)
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n"),
+                        )
                     };
                     for path in paths {
                         self.dir_cache.invalidate_dir(&path);
@@ -1166,16 +1190,7 @@ impl FileManagerApp {
     }
 
     fn error_text(&self, e: &std::io::Error) -> String {
-        match e.kind() {
-            std::io::ErrorKind::PermissionDenied => self.t("error.access_denied").to_owned(),
-            std::io::ErrorKind::NotFound => self.t("error.not_found").to_owned(),
-            std::io::ErrorKind::InvalidData => self.t("zip.error_invalid").to_owned(),
-            std::io::ErrorKind::InvalidInput => self.t("zip.error_path").to_owned(),
-            std::io::ErrorKind::AlreadyExists => self.t("zip.error_exists").to_owned(),
-            std::io::ErrorKind::StorageFull => self.t("zip.error_space").to_owned(),
-            std::io::ErrorKind::WouldBlock => self.t("zip.error_busy").to_owned(),
-            _ => format!("{}: {}", self.t("error.open_dir"), e),
-        }
+        self.operation_error_message(e.kind())
     }
 }
 

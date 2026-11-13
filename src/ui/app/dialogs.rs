@@ -807,8 +807,12 @@ impl FileManagerApp {
         });
         self.props_viewport_placed = !close_requested;
         if let (Some((ro, hi)), Some(target)) = (apply, target.as_ref()) {
+            let result = crate::platform::set_attributes(target, ro, hi);
+            if let Err(error) = &result {
+                self.record_io_error(Some(target), error);
+            }
             refresh_after_attribute_change(
-                crate::platform::set_attributes(target, ro, hi),
+                result,
                 || self.refresh(ctx),
             );
         }

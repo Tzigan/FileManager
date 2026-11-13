@@ -423,11 +423,11 @@ pub fn removal_totals(records: &[TrashRecord]) -> (usize, u64) {
     )
 }
 
-pub fn empty_trash(volumes: &[PathBuf]) -> Vec<String> {
+pub fn empty_trash(volumes: &[PathBuf]) -> Vec<(String, TrashError)> {
     let mut errors = Vec::new();
     for record in list_trash(volumes) {
         if let Err(error) = purge(&record) {
-            errors.push(format!("{}: {error}", record.original_name));
+            errors.push((record.original_name, error));
         }
     }
     errors
@@ -738,6 +738,13 @@ impl Fnv {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trash_io_error_has_separate_user_message_key_and_diagnostic() {
+        let error = TrashError::Io(io::Error::other("raw os error 5"));
+        assert_eq!(error.message_key(), "trash.err.io");
+        assert!(error.to_string().contains("raw os error 5"));
+    }
 
     fn scratch() -> PathBuf {
         let dir = std::env::temp_dir().join(format!("fm-trash-{}", unique_id()));

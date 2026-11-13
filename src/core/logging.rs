@@ -7,14 +7,25 @@ fn install_panic_log_hook() {
     PANIC_LOG_HOOK.call_once(|| {
         let default_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
+            #[cfg(debug_assertions)]
             tracing::error!(
                 panic = %info,
                 backtrace = %std::backtrace::Backtrace::force_capture(),
                 "application panic"
             );
+            #[cfg(not(debug_assertions))]
+            tracing::error!("application panic");
             default_hook(info);
         }));
     });
+}
+
+fn configured_max_level() -> tracing::Level {
+    if cfg!(debug_assertions) {
+        tracing::Level::DEBUG
+    } else {
+        tracing::Level::INFO
+    }
 }
 
 /// Initializes daily rolling file logging into `<log_dir>/filemanager.log`.
@@ -29,7 +40,7 @@ pub fn init(log_dir: &Path) -> tracing_appender::non_blocking::WorkerGuard {
         .with_writer(writer)
         .with_ansi(false)
         .with_target(true)
-        .with_max_level(tracing::Level::INFO)
+        .with_max_level(configured_max_level())
         .try_init()
         .ok();
 
@@ -41,6 +52,16 @@ pub fn init(log_dir: &Path) -> tracing_appender::non_blocking::WorkerGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn diagnostics_logged_under_debug_flag_not_noisy_in_release() {
+        let expected = if cfg!(debug_assertions) {
+            tracing::Level::DEBUG
+        } else {
+            tracing::Level::INFO
+        };
+        assert_eq!(configured_max_level(), expected);
+    }
 
     #[test]
     fn log_file_created() {

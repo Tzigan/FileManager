@@ -14,14 +14,14 @@ impl FileManagerApp {
                     if let Ok(exe) = std::env::current_exe() {
                         let title = self.t("integrate.title").to_owned();
                         if let Err(e) = install_context_menu(&exe, &title) {
-                            self.ops_ui.journal.push(format!("context menu: {e}"));
+                            self.record_io_error(None, &e);
                         }
                     }
                     ui.close();
                 }
                 if ui.button(self.t("integrate.remove").to_owned()).clicked() {
                     if let Err(e) = uninstall_context_menu() {
-                        self.ops_ui.journal.push(format!("context menu: {e}"));
+                        self.record_io_error(None, &e);
                     }
                     ui.close();
                 }
@@ -29,7 +29,9 @@ impl FileManagerApp {
                     .button(self.t("integrate.open_recycle").to_owned())
                     .clicked()
                 {
-                    let _ = crate::platform::open_recycle_bin();
+                    if let Err(error) = crate::platform::open_recycle_bin() {
+                        self.record_io_error(None, &error);
+                    }
                     ui.close();
                 }
                 ui.separator();
