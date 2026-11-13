@@ -4,6 +4,15 @@ use anyhow::Context;
 
 use super::*;
 
+fn log_export_error_key(error: &crate::core::log_export::LogExportError) -> &'static str {
+    match error {
+        crate::core::log_export::LogExportError::NoLogFiles => "logs.export_no_logs",
+        crate::core::log_export::LogExportError::Io { source, .. } => {
+            crate::ui::opsui::operation_error_key(source.kind())
+        }
+    }
+}
+
 /// Категории окна настроек. Подписи берутся из локализации, не из текста виджета.
 /// Новая категория добавляется сюда и в `settings_window`, без новой панели.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -65,6 +74,8 @@ impl FileManagerApp {
         let title = self.t("about.title").to_owned();
         let config_label = self.t("label.config_dir").to_owned();
         let log_label = self.t("label.log_dir").to_owned();
+        let export_label = self.t("logs.export").to_owned();
+        let export_hint = self.t("logs.export_hint").to_owned();
         let viewport_id = egui::ViewportId::from_hash_of("filemanager-about");
         let builder = floating_dialog_viewport(
             ctx,
@@ -73,6 +84,7 @@ impl FileManagerApp {
             self.about_viewport_placed,
         );
         let mut close_requested = false;
+        let mut export_requested = false;
         ctx.show_viewport_immediate(viewport_id, builder, |viewport_ui, _class| {
             let viewport_ctx = viewport_ui.ctx().clone();
             if viewport_ctx.input(|i| i.viewport().close_requested()) {
@@ -89,7 +101,16 @@ impl FileManagerApp {
                     config_label,
                     self.dirs.config_dir.display()
                 ));
-                ui.label(format!("{}: {}", log_label, self.dirs.log_dir.display()));
+                ui.horizontal(|ui| {
+                    ui.label(format!("{}: {}", log_label, self.dirs.log_dir.display()));
+                    if ui.button(export_label.clone()).clicked() {
+                        export_requested = true;
+                    }
+                });
+                ui.add(egui::Label::new(&export_hint).wrap());
+                if let Some(status) = &self.log_export_status {
+                    ui.label(status);
+                }
                 ui.add_space(style::SPACE_SM);
                 let can_check = !self.update_busy
                     && self.pending_update.is_none()
@@ -160,6 +181,66 @@ impl FileManagerApp {
         self.about_viewport_placed = !close_requested;
         if close_requested {
             self.show_about = false;
+        }
+        if export_requested {
+            self.export_logs_from_about();
+            ctx.request_repaint();
+        }
+    }
+
+    fn export_logs_from_about(&mut self) {
+        let picker_title = self.t("logs.export_folder").to_owned();
+        let destination = match crate::platform::pick_folder(
+            &picker_title,
+            Some(&self.dirs.log_dir),
+        ) {
+            Ok(Some(path)) => path,
+            Ok(None) => return,
+            Err(error) => {
+                self.log_export_status = Some(format!(
+                    "{}: {}",
+                    self.t("logs.export_failed"),
+                    self.operation_error_message(error.kind())
+                ));
+                self.record_io_error(None, &error);
+                return;
+            }
+        };
+
+        let labels = crate::core::log_export::ExportLabels {
+            title: self.t("logs.export_header").to_owned(),
+            version: self.t("logs.export_version").to_owned(),
+            exported_at: self.t("logs.export_time").to_owned(),
+            scope: self
+                .t("logs.export_scope")
+                .replace("{days}", &crate::core::log_export::LOG_EXPORT_WINDOW_FILES.to_string()),
+            journal_note: self.t("logs.export_journal_excluded").to_owned(),
+        };
+        let exported_at = crate::platform::format_local_time(
+            std::time::SystemTime::now(),
+            self.i18n.language(),
+        );
+        match crate::core::log_export::export_logs(
+            &self.dirs.log_dir,
+            &destination,
+            env!("CARGO_PKG_VERSION"),
+            &exported_at,
+            &labels,
+        ) {
+            Ok(path) => {
+                self.log_export_status = Some(format!(
+                    "{}: {}",
+                    self.t("logs.export_done"),
+                    path.display()
+                ));
+            }
+            Err(error) => {
+                let failure = self.t(log_export_error_key(&error)).to_owned();
+                self.log_export_status = Some(format!("{}: {failure}", self.t("logs.export_failed")));
+                if let crate::core::log_export::LogExportError::Io { path, source } = error {
+                    self.record_io_error(Some(&path), &source);
+                }
+            }
         }
     }
 
@@ -905,8 +986,8 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        SettingsCategory, refresh_after_attribute_change, selected_entry_for_details,
-        settings_category_column_width,
+        SettingsCategory, log_export_error_key, refresh_after_attribute_change,
+        selected_entry_for_details, settings_category_column_width,
     };
     use crate::core::dir_cache::DirCache;
     use crate::core::fs::FileEntry;
@@ -990,5 +1071,58 @@ mod tests {
         tab.entries = vec![first, second];
 
         assert!(selected_entry_for_details(&tab).is_none());
+    }
+
+    #[test]
+    fn log_export_error_shows_understandable_message_no_stacktrace() {
+        assert_eq!(
+            log_export_error_key(&crate::core::log_export::LogExportError::NoLogFiles),
+            "logs.export_no_logs"
+        );
+        let error = crate::core::log_export::LogExportError::Io {
+            path: PathBuf::from(r"C:\export\file.txt"),
+            source: std::io::Error::other("HRESULT 0x80070005\nstack trace: internal detail"),
+        };
+        let key = log_export_error_key(&error);
+        let text = crate::core::i18n::I18n::new(crate::core::i18n::Language::En)
+            .t(key)
+            .to_owned();
+        assert_eq!(key, "error.operation.failed");
+        assert!(!text.contains("HRESULT"));
+        assert!(!text.contains("stack trace"));
+        assert!(text.contains("operation could not be completed"));
+    }
+
+    #[test]
+    fn export_hint_mentions_paths_localized() {
+        for (json, path_word, journal_word, privacy_word) in [
+            (
+                include_str!("../../../i18n/en.json"),
+                "file paths",
+                "operations journal",
+                "Nothing is sent automatically",
+            ),
+            (
+                include_str!("../../../i18n/ru.json"),
+                "пути к вашим файлам",
+                "журнал операций",
+                "никуда не отправляются автоматически",
+            ),
+        ] {
+            let labels: serde_json::Value = serde_json::from_str(json).unwrap();
+            let hint = labels["logs.export_hint"].as_str().unwrap();
+            assert!(hint.contains(path_word));
+            assert!(hint.contains(journal_word));
+            assert!(hint.contains(privacy_word));
+        }
+    }
+
+    #[test]
+    fn export_entry_in_about_window_not_second_window_menu_bar_untouched() {
+        let dialogs = include_str!("dialogs.rs");
+        let toolbar = include_str!("toolbar.rs");
+        assert!(dialogs.contains("ViewportId::from_hash_of(\"filemanager-about\")"));
+        assert!(dialogs.contains("self.export_logs_from_about()"));
+        assert!(!toolbar.contains("logs.export"));
     }
 }
