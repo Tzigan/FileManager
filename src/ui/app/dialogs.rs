@@ -20,6 +20,12 @@ fn settings_reset_requires_restart(previous_single_instance: bool) -> bool {
     previous_single_instance != crate::core::settings::Settings::default().single_instance
 }
 
+fn settings_reset_load_warning(
+    issue: Option<crate::core::settings::SettingsLoadIssue>,
+) -> Option<&'static str> {
+    issue.map(crate::core::settings::SettingsLoadIssue::message_key)
+}
+
 /// Категории окна настроек. Подписи берутся из локализации, не из текста виджета.
 /// Новая категория добавляется сюда и в `settings_window`, без новой панели.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -377,10 +383,10 @@ impl FileManagerApp {
                     .resizable(false)
                     .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                     .show(&viewport_ctx, |ui| {
-                        if let Some(issue) = self.store.load_issue {
+                        if let Some(issue_key) = settings_reset_load_warning(self.store.load_issue) {
                             ui.colored_label(
                                 ui.visuals().warn_fg_color,
-                                self.t(issue.message_key()),
+                                self.t(issue_key),
                             );
                             ui.add_space(style::SPACE_SM);
                             ui.label(self.t("settings.reset_confirm_load_issue"));
@@ -1114,7 +1120,7 @@ mod tests {
     use super::{
         SettingsCategory, log_export_error_key, refresh_after_attribute_change,
         selected_entry_for_details, settings_category_column_width,
-        settings_reset_requires_restart,
+        settings_reset_load_warning, settings_reset_requires_restart,
     };
     use crate::core::dir_cache::DirCache;
     use crate::core::fs::FileEntry;
@@ -1331,6 +1337,38 @@ mod tests {
                 assert!(load_issue.contains(word), "missing load-issue text: {word}");
             }
         }
+    }
+
+    #[test]
+    fn first_launch_missing_file_reset_writes_defaults_without_damage_warning() {
+        let dir = std::env::temp_dir().join(format!(
+            "fm-reset-first-launch-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut store = crate::core::settings::SettingsStore::load(&dir);
+        assert_eq!(store.load_issue, None);
+        assert_eq!(settings_reset_load_warning(store.load_issue), None);
+
+        store.settings.reset_behavior_preserving_user_data();
+        store.save().unwrap();
+
+        let loaded = crate::core::settings::SettingsStore::load(&dir);
+        assert_eq!(loaded.load_issue, None);
+        assert_eq!(
+            serde_json::to_value(&loaded.settings).unwrap(),
+            serde_json::to_value(crate::core::settings::Settings::default()).unwrap()
+        );
+        let scope = crate::core::i18n::I18n::new(crate::core::i18n::Language::En)
+            .t("settings.reset_confirm_scope")
+            .to_owned();
+        assert!(!scope.contains("corrupt"));
+        assert!(!scope.contains("damaged"));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
