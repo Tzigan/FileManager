@@ -15,6 +15,11 @@ pub(super) fn log_export_error_key(
     }
 }
 
+/// Единственное поле, которое читается до создания интерфейса, требует перезапуска.
+fn settings_reset_requires_restart(previous_single_instance: bool) -> bool {
+    previous_single_instance != crate::core::settings::Settings::default().single_instance
+}
+
 /// Категории окна настроек. Подписи берутся из локализации, не из текста виджета.
 /// Новая категория добавляется сюда и в `settings_window`, без новой панели.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -276,6 +281,7 @@ impl FileManagerApp {
         let mut close_requested = false;
         let mut hidden_files_changed = false;
         let mut wsl_visibility_changed = false;
+        let mut reset_choice = None;
         // Раньше слева была одна подпись «Общие», а справа лежали все параметры сразу.
         // Список категорий один: новая секция добавляется в SettingsCategory::ALL,
         // а не отдельной вёрсткой. Значения живут в Settings и пишутся сразу,
@@ -363,6 +369,37 @@ impl FileManagerApp {
                     );
                 });
             });
+            if self.settings_reset_confirm {
+                let mut open = true;
+                egui::Window::new(self.t("settings.reset_confirm_title").to_owned())
+                    .open(&mut open)
+                    .collapsible(false)
+                    .resizable(false)
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                    .show(&viewport_ctx, |ui| {
+                        if let Some(issue) = self.store.load_issue {
+                            ui.colored_label(
+                                ui.visuals().warn_fg_color,
+                                self.t(issue.message_key()),
+                            );
+                            ui.add_space(style::SPACE_SM);
+                            ui.label(self.t("settings.reset_confirm_load_issue"));
+                        } else {
+                            ui.label(self.t("settings.reset_confirm_scope"));
+                        }
+                        ui.horizontal(|ui| {
+                            if ui.button(self.t("settings.reset_confirm_action")).clicked() {
+                                reset_choice = Some(true);
+                            }
+                            if ui.button(self.t("dlg.cancel")).clicked() {
+                                reset_choice = Some(false);
+                            }
+                        });
+                    });
+                if !open && reset_choice.is_none() {
+                    reset_choice = Some(false);
+                }
+            }
         });
         self.settings_category = selected;
         if hidden_files_changed {
@@ -377,10 +414,73 @@ impl FileManagerApp {
                 self.refresh_wsl_distributions();
             }
         }
+        if let Some(confirmed) = reset_choice {
+            self.settings_reset_confirm = false;
+            if confirmed {
+                self.apply_settings_reset(ctx);
+            }
+        }
         self.settings_viewport_placed = !close_requested;
         if close_requested {
             self.show_settings = false;
+            self.settings_reset_confirm = false;
         }
+    }
+
+    fn apply_settings_reset(&mut self, ctx: &egui::Context) {
+        self.sync_tabs_to_settings();
+        let previous = self.store.settings.clone();
+        let load_issue = self.store.load_issue;
+        let settings_file_exists = self.dirs.config_dir.join("settings.json").is_file();
+        let defaults = crate::core::settings::Settings::default();
+        let hidden_files_changed =
+            previous.show_hidden_files != defaults.show_hidden_files;
+        let wsl_visibility_changed =
+            previous.show_wsl_in_tree != defaults.show_wsl_in_tree;
+        let restart_required = settings_reset_requires_restart(previous.single_instance);
+
+        self.store.settings.reset_behavior_preserving_user_data();
+        self.i18n.set_language(self.store.settings.language);
+        crate::core::logging::set_panic_language(self.store.settings.language);
+        self.style_configured = false;
+        self.bg_ops_pool
+            .set_limit(self.store.settings.max_concurrent_bg_ops);
+        self.dir_cache
+            .set_limit(self.store.settings.dir_cache_entries);
+
+        if hidden_files_changed {
+            for index in 0..self.tabs.len() {
+                self.navigate_fresh(index, ctx);
+            }
+        }
+        if wsl_visibility_changed && self.store.settings.show_wsl_in_tree {
+            self.refresh_wsl_distributions();
+        }
+        self.sync_dir_watch(ctx);
+
+        if self.persist_checked().is_ok() {
+            self.store.load_issue = None;
+            self.settings_reset_status = Some(self.t(if restart_required {
+                "settings.reset_done_restart"
+            } else {
+                "settings.reset_done"
+            }).to_owned());
+        } else {
+            let message_key = if load_issue.is_some() {
+                "settings.reset_session_only_load_issue"
+            } else if settings_file_exists {
+                "settings.reset_session_only"
+            } else {
+                "settings.reset_session_only_no_file"
+            };
+            let mut message = self.t(message_key).to_owned();
+            if restart_required {
+                message.push('\n');
+                message.push_str(self.t("settings.reset_restart_note"));
+            }
+            self.settings_reset_status = Some(message);
+        }
+        ctx.request_repaint();
     }
 
     fn settings_general(&mut self, ui: &mut egui::Ui) {
@@ -417,6 +517,17 @@ impl FileManagerApp {
         }
         ui.add_space(style::SPACE_SM);
         ui.label(egui::RichText::new(self.t("settings.max_concurrent_bg_ops_hint")).weak());
+        ui.add_space(style::SPACE_MD);
+        ui.separator();
+        ui.add_space(style::SPACE_SM);
+        if ui.button(self.t("settings.reset_button")).clicked() {
+            self.settings_reset_status = None;
+            self.settings_reset_confirm = true;
+        }
+        if let Some(status) = &self.settings_reset_status {
+            ui.add_space(style::SPACE_SM);
+            ui.label(status);
+        }
     }
 
     fn settings_files(&mut self, ui: &mut egui::Ui, hidden_files_changed: &mut bool) {
@@ -1005,6 +1116,7 @@ mod tests {
     use super::{
         SettingsCategory, log_export_error_key, refresh_after_attribute_change,
         selected_entry_for_details, settings_category_column_width,
+        settings_reset_requires_restart,
     };
     use crate::core::dir_cache::DirCache;
     use crate::core::fs::FileEntry;
@@ -1168,5 +1280,87 @@ mod tests {
                 < handler.find("crate::core::log_export::export_logs").unwrap()
         );
         assert!(handler.contains("WorkerMsg::LogExportFinished"));
+    }
+
+    #[test]
+    fn settings_reset_requires_confirmation() {
+        let source = include_str!("dialogs.rs");
+        assert!(source.contains("self.settings_reset_confirm = true;"));
+        assert!(source.contains("settings.reset_confirm_action"));
+        assert!(source.contains("if let Some(confirmed) = reset_choice"));
+        assert!(source.contains("if confirmed {\n                self.apply_settings_reset(ctx);"));
+    }
+
+    #[test]
+    fn settings_reset_confirmation_describes_scope_honestly() {
+        for (json, scope_words, issue_words) in [
+            (
+                include_str!("../../../i18n/en.json"),
+                [
+                    "Behavior preferences",
+                    "bookmarks",
+                    "tabs",
+                    "protected-folder list",
+                    "Files",
+                    "Recycle Bin",
+                    "system bookmarks",
+                ],
+                ["could not be loaded", "Only data currently in memory", "cannot recover"],
+            ),
+            (
+                include_str!("../../../i18n/ru.json"),
+                [
+                    "Параметры поведения",
+                    "закладки",
+                    "вкладки",
+                    "список папок защищённой корзины",
+                    "Файлы",
+                    "корзин",
+                    "системные закладки",
+                ],
+                ["не удалось загрузить", "памяти сейчас", "восстановить"],
+            ),
+        ] {
+            let labels: serde_json::Value = serde_json::from_str(json).unwrap();
+            let scope = labels["settings.reset_confirm_scope"].as_str().unwrap();
+            for word in scope_words {
+                assert!(scope.contains(word), "missing scope text: {word}");
+            }
+            let load_issue = labels["settings.reset_confirm_load_issue"]
+                .as_str()
+                .unwrap();
+            for word in issue_words {
+                assert!(load_issue.contains(word), "missing load-issue text: {word}");
+            }
+        }
+    }
+
+    #[test]
+    fn settings_reset_applies_without_restart_or_documents_need() {
+        assert!(settings_reset_requires_restart(false));
+        assert!(!settings_reset_requires_restart(true));
+        let source = include_str!("dialogs.rs");
+        let start = source.find("fn apply_settings_reset").unwrap();
+        let end = source[start..]
+            .find("\n    fn settings_general")
+            .unwrap()
+            + start;
+        let reset = &source[start..end];
+        assert!(reset.contains("self.bg_ops_pool"));
+        assert!(reset.contains("self.dir_cache"));
+        assert!(reset.contains("self.sync_dir_watch(ctx)"));
+        assert!(reset.contains("self.navigate_fresh"));
+        assert!(reset.contains("self.i18n.set_language"));
+    }
+
+    #[test]
+    fn settings_reset_entry_in_settings_window_not_menu_bar_about_untouched() {
+        let dialogs = include_str!("dialogs.rs");
+        let toolbar = include_str!("toolbar.rs");
+        let about_start = dialogs.find("pub(super) fn about_window").unwrap();
+        let settings_start = dialogs.find("pub(super) fn settings_window").unwrap();
+        assert!(!dialogs[about_start..settings_start].contains("settings.reset"));
+        assert!(dialogs[settings_start..].contains("settings.reset_button"));
+        assert!(!toolbar.contains("settings.reset"));
     }
 }

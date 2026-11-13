@@ -173,6 +173,8 @@ pub struct FileManagerApp {
     settings_viewport_placed: bool,
     /// Активная категория окна настроек. На сохранение значений не влияет.
     settings_category: dialogs::SettingsCategory,
+    settings_reset_confirm: bool,
+    settings_reset_status: Option<String>,
     pub(crate) show_secure_trash: bool,
     trash_selected: HashSet<String>,
     trash_conflict: Option<String>,
@@ -451,6 +453,8 @@ impl FileManagerApp {
             show_settings: false,
             settings_viewport_placed: false,
             settings_category: dialogs::SettingsCategory::default(),
+            settings_reset_confirm: false,
+            settings_reset_status: None,
             show_secure_trash: false,
             trash_selected: HashSet::new(),
             trash_conflict: None,
@@ -584,19 +588,29 @@ impl FileManagerApp {
     }
 
     pub(crate) fn persist(&mut self) {
-        if let Err(e) = self.store.save() {
-            let path = self.dirs.config_dir.join("settings.json");
-            let error_kind = e
-                .downcast_ref::<std::io::Error>()
-                .map(std::io::Error::kind);
-            tracing::info!(
-                path = %path.display(),
-                error_kind = ?error_kind,
-                error = %format!("{e:#}"),
-                "settings save failed"
-            );
-            self.ops_ui.journal.push(self.t("settings.save_failed").to_owned());
-            self.ops_ui.show_journal = true;
+        let _ = self.persist_checked();
+    }
+
+    pub(crate) fn persist_checked(&mut self) -> anyhow::Result<()> {
+        match self.store.save() {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                let path = self.dirs.config_dir.join("settings.json");
+                let error_kind = error
+                    .downcast_ref::<std::io::Error>()
+                    .map(std::io::Error::kind);
+                tracing::info!(
+                    path = %path.display(),
+                    error_kind = ?error_kind,
+                    error = %format!("{error:#}"),
+                    "settings save failed"
+                );
+                self.ops_ui
+                    .journal
+                    .push(self.t("settings.save_failed").to_owned());
+                self.ops_ui.show_journal = true;
+                Err(error)
+            }
         }
     }
 

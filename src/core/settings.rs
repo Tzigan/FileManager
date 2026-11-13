@@ -1,6 +1,9 @@
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
 use crate::core::i18n::Language;
@@ -259,6 +262,25 @@ impl Default for Settings {
     }
 }
 
+impl Settings {
+    /// Сбрасывает поведение, сохраняя `tabs`, `pinned_tabs`, `active_tab`, `bookmarks`
+    /// и `secure_trash_folders`. Эта граница фиксирована и не является переключателем.
+    pub fn reset_behavior_preserving_user_data(&mut self) {
+        let tabs = std::mem::take(&mut self.tabs);
+        let pinned_tabs = std::mem::take(&mut self.pinned_tabs);
+        let active_tab = self.active_tab;
+        let bookmarks = std::mem::take(&mut self.bookmarks);
+        let secure_trash_folders = std::mem::take(&mut self.secure_trash_folders);
+
+        *self = Self::default();
+        self.tabs = tabs;
+        self.pinned_tabs = pinned_tabs;
+        self.active_tab = active_tab;
+        self.bookmarks = bookmarks;
+        self.secure_trash_folders = secure_trash_folders;
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsLoadIssue {
     Invalid,
@@ -314,11 +336,40 @@ impl SettingsStore {
     }
 
     pub fn save(&self) -> anyhow::Result<()> {
-        if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent)?;
+        let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
+        fs::create_dir_all(parent)?;
+        let raw = serde_json::to_vec_pretty(&self.settings)?;
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let temp_path = parent.join(format!(
+            ".settings.json.{}.{}.tmp",
+            std::process::id(),
+            stamp
+        ));
+        let mut temp = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)
+            .with_context(|| format!("failed to create {}", temp_path.display()))?;
+        if let Err(error) = temp
+            .write_all(&raw)
+            .and_then(|()| temp.sync_all())
+        {
+            drop(temp);
+            let _ = fs::remove_file(&temp_path);
+            return Err(error).with_context(|| {
+                format!("failed to write temporary settings file {}", temp_path.display())
+            });
         }
-        let raw = serde_json::to_string_pretty(&self.settings)?;
-        fs::write(&self.path, raw)?;
+        drop(temp);
+        if let Err(error) = crate::platform::replace_file(&temp_path, &self.path) {
+            let _ = fs::remove_file(&temp_path);
+            return Err(error).with_context(|| {
+                format!("failed to replace settings file {}", self.path.display())
+            });
+        }
         Ok(())
     }
 }
@@ -510,6 +561,263 @@ mod tests {
         assert!(loaded.settings.single_instance);
         assert_eq!(loaded.settings.view_mode, ViewMode::Table);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn settings_reset_preserves_user_bookmarks_and_tabs() {
+        let mut settings = Settings {
+            tabs: vec![PathBuf::from("C:\\work"), PathBuf::from("D:\\data")],
+            pinned_tabs: vec![PathBuf::from("C:\\work")],
+            active_tab: 1,
+            bookmarks: vec![PathBuf::from("D:\\docs")],
+            show_hidden_files: true,
+            ..Settings::default()
+        };
+        let tabs = settings.tabs.clone();
+        let pinned_tabs = settings.pinned_tabs.clone();
+        let active_tab = settings.active_tab;
+        let bookmarks = settings.bookmarks.clone();
+
+        settings.reset_behavior_preserving_user_data();
+
+        assert_eq!(settings.tabs, tabs);
+        assert_eq!(settings.pinned_tabs, pinned_tabs);
+        assert_eq!(settings.active_tab, active_tab);
+        assert_eq!(settings.bookmarks, bookmarks);
+        assert!(!settings.show_hidden_files);
+    }
+
+    #[test]
+    fn settings_reset_preserves_secure_trash_folders() {
+        let folders = vec![PathBuf::from("C:\\private"), PathBuf::from("D:\\vault")];
+        let mut settings = Settings {
+            delete_mode: DeleteMode::SecureTrash,
+            secure_trash_hash_max_bytes: 1,
+            secure_trash_allow_fallback: true,
+            secure_trash_folders: folders.clone(),
+            ..Settings::default()
+        };
+
+        settings.reset_behavior_preserving_user_data();
+
+        assert_eq!(settings.delete_mode, DeleteMode::WindowsRecycle);
+        assert_eq!(settings.secure_trash_hash_max_bytes, default_hash_max_bytes());
+        assert!(!settings.secure_trash_allow_fallback);
+        assert_eq!(settings.secure_trash_folders, folders);
+    }
+
+    #[test]
+    fn settings_reset_clears_behavior_params_only() {
+        let mut settings = Settings {
+            language: Language::En,
+            theme: Theme::Dark,
+            tabs: vec![PathBuf::from("C:\\work")],
+            pinned_tabs: vec![PathBuf::from("C:\\work")],
+            active_tab: 0,
+            bookmarks: vec![PathBuf::from("D:\\docs")],
+            show_hidden_files: true,
+            show_wsl_in_tree: false,
+            view_mode: ViewMode::Grid,
+            col_size: false,
+            col_type: false,
+            col_modified: false,
+            group_by_type: true,
+            group_order: vec!["ext:txt".to_owned()],
+            single_instance: false,
+            enable_mouse_side_navigation: false,
+            auto_restart_after_update: false,
+            update_restart_delay_secs: 42,
+            delete_mode: DeleteMode::Ask,
+            secure_trash_hash_max_bytes: 1,
+            secure_trash_allow_fallback: true,
+            secure_trash_folders: vec![PathBuf::from("D:\\protected")],
+            dir_cache_entries: 1,
+            dir_watch_enabled: false,
+            dir_watch_debounce_ms: 1,
+            max_concurrent_bg_ops: 1,
+        };
+        let mut expected = Settings::default();
+        expected.tabs = settings.tabs.clone();
+        expected.pinned_tabs = settings.pinned_tabs.clone();
+        expected.active_tab = settings.active_tab;
+        expected.bookmarks = settings.bookmarks.clone();
+        expected.secure_trash_folders = settings.secure_trash_folders.clone();
+
+        settings.reset_behavior_preserving_user_data();
+
+        assert_eq!(
+            serde_json::to_value(&settings).unwrap(),
+            serde_json::to_value(&expected).unwrap()
+        );
+    }
+
+    #[test]
+    fn settings_reset_does_not_touch_files_or_trash() {
+        let dir = temp_config();
+        fs::create_dir_all(&dir).unwrap();
+        let marker = dir.join("user-file.txt");
+        fs::write(&marker, "keep").unwrap();
+        let mut settings = Settings {
+            secure_trash_folders: vec![dir.clone()],
+            delete_mode: DeleteMode::SecureTrash,
+            ..Settings::default()
+        };
+
+        settings.reset_behavior_preserving_user_data();
+
+        assert_eq!(fs::read_to_string(&marker).unwrap(), "keep");
+        assert_eq!(settings.secure_trash_folders, vec![dir.clone()]);
+        assert_eq!(settings.delete_mode, DeleteMode::WindowsRecycle);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn settings_reset_handles_settings_load_issue() {
+        let dir = temp_config();
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("settings.json"), "{ invalid json").unwrap();
+        let mut store = SettingsStore::load(&dir);
+        assert_eq!(store.load_issue, Some(SettingsLoadIssue::Invalid));
+
+        store.settings.reset_behavior_preserving_user_data();
+
+        assert_eq!(store.load_issue, Some(SettingsLoadIssue::Invalid));
+        assert_eq!(
+            serde_json::to_value(&store.settings).unwrap(),
+            serde_json::to_value(Settings::default()).unwrap()
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn settings_reset_handles_unreadable_settings_load_issue() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let dir = temp_config();
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        let mut locked_file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .share_mode(0x0000_0002 | 0x0000_0004)
+            .open(&path)
+            .unwrap();
+        locked_file.write_all(b"{ valid json }").unwrap();
+        locked_file.flush().unwrap();
+
+        let mut store = SettingsStore::load(&dir);
+        assert_eq!(store.load_issue, Some(SettingsLoadIssue::Unreadable));
+        store.settings.reset_behavior_preserving_user_data();
+
+        assert_eq!(store.load_issue, Some(SettingsLoadIssue::Unreadable));
+        assert_eq!(
+            serde_json::to_value(&store.settings).unwrap(),
+            serde_json::to_value(Settings::default()).unwrap()
+        );
+        drop(locked_file);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn settings_structure_and_json_schema_unchanged() {
+        let settings = serde_json::to_value(Settings::default()).unwrap();
+        let mut actual: Vec<_> = settings.as_object().unwrap().keys().map(String::as_str).collect();
+        let mut expected = vec![
+            "active_tab",
+            "auto_restart_after_update",
+            "bookmarks",
+            "col_modified",
+            "col_size",
+            "col_type",
+            "delete_mode",
+            "dir_cache_entries",
+            "dir_watch_debounce_ms",
+            "dir_watch_enabled",
+            "enable_mouse_side_navigation",
+            "group_by_type",
+            "group_order",
+            "language",
+            "max_concurrent_bg_ops",
+            "pinned_tabs",
+            "secure_trash_allow_fallback",
+            "secure_trash_folders",
+            "secure_trash_hash_max_bytes",
+            "show_hidden_files",
+            "show_wsl_in_tree",
+            "single_instance",
+            "tabs",
+            "theme",
+            "update_restart_delay_secs",
+            "view_mode",
+        ];
+        actual.sort_unstable();
+        expected.sort_unstable();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn settings_reset_boundary_not_configurable_flag() {
+        let settings = serde_json::to_value(Settings::default()).unwrap();
+        let fields = settings.as_object().unwrap();
+        assert!(!fields.keys().any(|field| field.starts_with("reset_")));
+    }
+
+    #[test]
+    fn settings_store_atomically_replaces_existing_file() {
+        let dir = temp_config();
+        let mut store = SettingsStore::load(&dir);
+        store.settings.show_hidden_files = true;
+        store.save().unwrap();
+        store.settings.show_hidden_files = false;
+        store.save().unwrap();
+
+        let loaded = SettingsStore::load(&dir);
+        assert!(!loaded.settings.show_hidden_files);
+        assert_eq!(loaded.load_issue, None);
+        assert!(
+            fs::read_dir(&dir)
+                .unwrap()
+                .all(|entry| !entry.unwrap().file_name().to_string_lossy().ends_with(".tmp"))
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn settings_reset_save_failure_states_session_only() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let dir = temp_config();
+        let mut store = SettingsStore::load(&dir);
+        store.settings.show_hidden_files = true;
+        store.settings.tabs = vec![PathBuf::from("C:\\work")];
+        store.save().unwrap();
+        let settings_path = dir.join("settings.json");
+        let previous_file = fs::read(&settings_path).unwrap();
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .share_mode(0x0000_0001 | 0x0000_0002)
+            .open(&settings_path)
+            .unwrap();
+
+        store.settings.reset_behavior_preserving_user_data();
+        let save_result = store.save();
+
+        assert!(save_result.is_err());
+        assert!(!store.settings.show_hidden_files);
+        assert_eq!(store.settings.tabs, vec![PathBuf::from("C:\\work")]);
+        drop(lock);
+        assert_eq!(fs::read(&settings_path).unwrap(), previous_file);
+        for json in [
+            include_str!("../../i18n/en.json"),
+            include_str!("../../i18n/ru.json"),
+        ] {
+            let labels: serde_json::Value = serde_json::from_str(json).unwrap();
+            let message = labels["settings.reset_session_only"].as_str().unwrap();
+            assert!(message.contains("restart") || message.contains("перезапуска"));
+            assert!(message.contains("session") || message.contains("сессии"));
+        }
+        let _ = fs::remove_dir_all(dir);
     }
 }
 

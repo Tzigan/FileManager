@@ -34,6 +34,11 @@ impl FileManagerApp {
     }
 
     pub(super) fn persist_tabs(&mut self) {
+        self.sync_tabs_to_settings();
+        self.persist();
+    }
+
+    pub(super) fn sync_tabs_to_settings(&mut self) {
         self.store.settings.tabs = self
             .tabs
             .iter()
@@ -47,7 +52,6 @@ impl FileManagerApp {
             .map(persisted_tab_path)
             .collect();
         self.store.settings.active_tab = self.active;
-        self.persist();
     }
 
     // ------------------------------------------------------------------
