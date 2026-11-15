@@ -362,6 +362,7 @@
   "update.later": "Later",
   "update.downloading": "Downloading update...",
   "update.check": "Check for updates",
+  "update.checking": "Checking for updates...",
   "update.latest": "You are on the latest version",
   "update.ready": "Ready to install",
   "update.install": "Install",

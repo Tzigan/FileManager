@@ -45,6 +45,44 @@ use crate::ui::tree::TreeState;
 const DISK_USAGE_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 /// Канал эскизов остаётся отдельным от пула тяжёлых независимых операций.
 pub(crate) const THUMBNAIL_QUEUE_CAPACITY: usize = 24;
+/// Ноль зарезервирован за автопроверкой при запуске.
+const STARTUP_UPDATE_CHECK_ID: u64 = 0;
+
+/// Отбрасывает поздний ответ, если проверка About уже закрыта или заменена новой.
+#[derive(Default)]
+struct UpdateCheckState {
+    generation: u64,
+    busy: bool,
+}
+
+impl UpdateCheckState {
+    fn begin_manual(&mut self) -> Option<u64> {
+        if self.busy {
+            return None;
+        }
+        self.generation = self.generation.wrapping_add(1).max(1);
+        self.busy = true;
+        Some(self.generation)
+    }
+
+    fn accept_result(&mut self, request_id: u64, about_open: bool) -> bool {
+        // Автопроверка общая для приложения, ручной ответ допустим только в своём окне.
+        if request_id == STARTUP_UPDATE_CHECK_ID {
+            return self.generation == STARTUP_UPDATE_CHECK_ID;
+        }
+        if self.generation != request_id || !self.busy || !about_open {
+            return false;
+        }
+        self.busy = false;
+        true
+    }
+
+    fn close_about(&mut self) {
+        // Ответ, пришедший после закрытия, не должен менять состояние следующего окна.
+        self.generation = self.generation.wrapping_add(1).max(1);
+        self.busy = false;
+    }
+}
 
 /// Results produced by background worker threads.
 pub(crate) enum WorkerMsg {
@@ -104,15 +142,22 @@ pub(crate) enum WorkerMsg {
     /// A path forwarded by another instance / CLI — open in a new tab.
     OpenPath(PathBuf),
     /// Найдена более новая версия приложения.
-    UpdateFound { manifest: UpdateManifest },
+    UpdateFound {
+        request_id: u64,
+        manifest: UpdateManifest,
+    },
     /// Получено обновление прогресса скачивания.
     UpdateProgress { downloaded: u64, total: u64 },
     /// Проверенный пакет подготовлен для установки отдельным updater.
     UpdateReady(PathBuf),
     /// При проверке вручную установлена последняя версия.
-    UpdateLatest,
+    UpdateLatest { request_id: u64 },
     /// Проверка или загрузка обновления завершилась ошибкой.
-    UpdateFailed(String),
+    UpdateFailed {
+        /// `None` используется для ошибки загрузки после завершения проверки.
+        check_id: Option<u64>,
+        error: String,
+    },
     /// Фоновое помещение в защищённую корзину закончилось.
     /// `paths` — исходные файлы: их папки надо сбросить в кэше, сама корзина кэшем списка не обслуживается.
     SecureTrashFinished {
@@ -187,6 +232,7 @@ pub struct FileManagerApp {
     /// Update offer: (version, exe URL).
     pending_update: Option<UpdateManifest>,
     update_busy: bool,
+    update_check: UpdateCheckState,
     update_downloaded: u64,
     update_total: u64,
     update_ready: Option<PathBuf>,
@@ -364,7 +410,10 @@ impl FileManagerApp {
             thread::spawn(move || {
                 if let Ok(r) = crate::core::update::check_latest() {
                     if crate::core::update::version_newer(env!("CARGO_PKG_VERSION"), &r.version) {
-                        let _ = msg_tx.send(WorkerMsg::UpdateFound { manifest: r });
+                        let _ = msg_tx.send(WorkerMsg::UpdateFound {
+                            request_id: STARTUP_UPDATE_CHECK_ID,
+                            manifest: r,
+                        });
                         ctx.request_repaint();
                     }
                 }
@@ -467,6 +516,7 @@ impl FileManagerApp {
             update_startup_signaled: false,
             pending_update: None,
             update_busy: false,
+            update_check: UpdateCheckState::default(),
             update_downloaded: 0,
             update_total: 0,
             update_ready: None,
@@ -1119,7 +1169,16 @@ impl FileManagerApp {
                     }
                     ctx.request_repaint();
                 }
-                WorkerMsg::UpdateFound { manifest } => {
+                WorkerMsg::UpdateFound {
+                    request_id,
+                    manifest,
+                } => {
+                    if !self
+                        .update_check
+                        .accept_result(request_id, self.show_about)
+                    {
+                        continue;
+                    }
                     self.update_busy = false;
                     self.update_total = manifest.size;
                     self.update_downloaded = 0;
@@ -1142,7 +1201,13 @@ impl FileManagerApp {
                     self.update_err = None;
                     ctx.request_repaint();
                 }
-                WorkerMsg::UpdateLatest => {
+                WorkerMsg::UpdateLatest { request_id } => {
+                    if !self
+                        .update_check
+                        .accept_result(request_id, self.show_about)
+                    {
+                        continue;
+                    }
                     self.update_busy = false;
                     self.pending_update = None;
                     self.update_ready = None;
@@ -1152,9 +1217,17 @@ impl FileManagerApp {
                     self.update_status = Some(self.t("update.latest").to_owned());
                     ctx.request_repaint();
                 }
-                WorkerMsg::UpdateFailed(e) => {
+                WorkerMsg::UpdateFailed { check_id, error } => {
+                    if let Some(request_id) = check_id {
+                        if !self
+                            .update_check
+                            .accept_result(request_id, self.show_about)
+                        {
+                            continue;
+                        }
+                    }
                     self.update_busy = false;
-                    tracing::warn!(error = %e, "update operation failed");
+                    tracing::warn!(error = %error, "update operation failed");
                     self.update_ready = None;
                     self.update_status = None;
                     self.update_err = Some(self.t("update.failed").to_owned());
