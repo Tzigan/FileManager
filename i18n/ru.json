@@ -364,6 +364,7 @@
   "update.later": "Позже",
   "update.downloading": "Загрузка обновления...",
   "update.check": "Проверить обновления",
+  "update.checking": "Проверка обновлений...",
   "update.latest": "Установлена последняя версия",
   "update.ready": "Готово к установке",
   "update.install": "Установить",

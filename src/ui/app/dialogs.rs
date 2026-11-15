@@ -158,6 +158,7 @@ impl FileManagerApp {
                     }
                     ui.add_space(style::SPACE_SM);
                     let can_check = !self.update_busy
+                        && !self.update_check.busy
                         && self.pending_update.is_none()
                         && self.update_ready.is_none();
                     if ui
@@ -167,9 +168,11 @@ impl FileManagerApp {
                         )
                         .clicked()
                     {
-                        self.update_status = None;
-                        self.update_err = None;
-                        self.spawn_update_check(&viewport_ctx);
+                        if let Some(request_id) = self.update_check.begin_manual() {
+                            self.update_status = Some(self.t("update.checking").to_owned());
+                            self.update_err = None;
+                            self.spawn_update_check(&viewport_ctx, request_id);
+                        }
                     }
                     if let Some(manifest) = self.pending_update.clone() {
                         ui.add_space(style::SPACE_SM);
@@ -238,6 +241,9 @@ impl FileManagerApp {
         self.about_viewport_placed = !close_requested;
         if close_requested {
             self.show_about = false;
+            self.update_check.close_about();
+            self.update_status = None;
+            self.update_err = None;
         }
         if export_requested {
             self.export_logs_from_about(ctx);
@@ -817,7 +823,7 @@ impl FileManagerApp {
         }
     }
 
-    fn spawn_update_check(&self, ctx: &egui::Context) {
+    fn spawn_update_check(&self, ctx: &egui::Context, request_id: u64) {
         let tx = self.msg_tx.clone();
         let ctx = ctx.clone();
         thread::spawn(move || {
@@ -828,10 +834,16 @@ impl FileManagerApp {
                         &manifest.version,
                     ) =>
                 {
-                    WorkerMsg::UpdateFound { manifest }
+                    WorkerMsg::UpdateFound {
+                        request_id,
+                        manifest,
+                    }
                 }
-                Ok(_) => WorkerMsg::UpdateLatest,
-                Err(e) => WorkerMsg::UpdateFailed(e.to_string()),
+                Ok(_) => WorkerMsg::UpdateLatest { request_id },
+                Err(e) => WorkerMsg::UpdateFailed {
+                    check_id: Some(request_id),
+                    error: e.to_string(),
+                },
             };
             let _ = tx.send(msg);
             ctx.request_repaint();
@@ -876,10 +888,16 @@ impl FileManagerApp {
                     }
                     match stage {
                         Ok(stage_dir) => WorkerMsg::UpdateReady(stage_dir),
-                        Err(e) => WorkerMsg::UpdateFailed(e.to_string()),
+                        Err(e) => WorkerMsg::UpdateFailed {
+                            check_id: None,
+                            error: e.to_string(),
+                        },
                     }
                 }
-                Err(e) => WorkerMsg::UpdateFailed(e.to_string()),
+                Err(e) => WorkerMsg::UpdateFailed {
+                    check_id: None,
+                    error: e.to_string(),
+                },
             };
             let _ = tx.send(msg);
             ctx.request_repaint();
@@ -1767,10 +1785,15 @@ mod tests {
     fn about_update_check_reuses_spawn_update_check_no_second_system() {
         let about = about_window_source();
         let dialogs = include_str!("dialogs.rs");
-        assert_eq!(about.matches("self.spawn_update_check(&viewport_ctx)").count(), 1);
+        assert_eq!(
+            about
+                .matches("self.spawn_update_check(&viewport_ctx, request_id)")
+                .count(),
+            1
+        );
         assert!(!about.contains("core::update::check_latest"));
         let start = dialogs
-            .find("fn spawn_update_check(&self, ctx: &egui::Context)")
+            .find("fn spawn_update_check(&self, ctx: &egui::Context, request_id: u64)")
             .unwrap();
         let end = dialogs[start..]
             .find("\n    fn start_update_download")
@@ -1786,12 +1809,17 @@ mod tests {
     #[test]
     fn about_update_result_user_facing_no_raw_error() {
         let app = include_str!("mod.rs");
-        let start = app.find("WorkerMsg::UpdateFailed(e) => {").unwrap();
+        let start = app
+            .find("WorkerMsg::UpdateFailed { check_id, error } => {")
+            .unwrap();
         let end = app[start..].find("\n                }").unwrap() + start;
         let handler = &app[start..end];
-        assert!(handler.contains("tracing::warn!(error = %e"));
+        assert!(handler.contains("tracing::warn!(error = %error"));
         assert!(handler.contains("self.t(\"update.failed\")"));
-        assert!(!handler.contains("self.update_err = Some(e)"));
+        assert!(!handler.contains("self.update_err = Some(error)"));
+        assert!(
+            handler.find("accept_result").unwrap() < handler.find("tracing::warn!").unwrap()
+        );
 
         for json in [
             include_str!("../../../i18n/en.json"),
@@ -1804,6 +1832,8 @@ mod tests {
             assert_ne!(failed, "update.failed");
             assert_ne!(latest, "update.latest");
             assert_ne!(found, "update.found");
+            let checking = labels["update.checking"].as_str().unwrap();
+            assert_ne!(checking, "update.checking");
             assert!(!failed.contains("HRESULT"));
             assert!(!failed.contains("stack trace"));
         }
@@ -1857,7 +1887,7 @@ mod tests {
         let dialogs = include_str!("dialogs.rs");
         let input = include_str!("input.rs");
         let toolbar = include_str!("toolbar.rs");
-        assert!(app.contains("tracing::warn!(error = %e, \"update operation failed\")"));
+        assert!(app.contains("tracing::warn!(error = %error, \"update operation failed\")"));
         assert!(app.contains("self.t(\"update.failed\")"));
         assert!(dialogs.contains("crate::core::log_export::export_logs("));
         assert!(dialogs.contains("self.store.settings.reset_behavior_preserving_user_data()"));

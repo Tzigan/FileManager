@@ -2,7 +2,7 @@
 use super::{
     PreviewState, breadcrumb_segments, configure_tab_scroll_style, dialogs, dropped_paths,
     floating_dialog_viewport, parse_archive_address, persisted_tab_path, tab_close_button_hovered,
-    tab_scroll_source, tab_strip_content_margin,
+    tab_scroll_source, tab_strip_content_margin, UpdateCheckState, STARTUP_UPDATE_CHECK_ID,
 };
 use std::path::{Path, PathBuf};
 
@@ -36,6 +36,111 @@ fn update_install_respects_auto_restart_and_busy_work() {
         dialogs::plan_update_install(false, true),
         dialogs::UpdateInstallAction::Blocked
     );
+}
+
+#[test]
+fn update_check_result_ignores_stale_response_after_about_close() {
+    let mut state = UpdateCheckState::default();
+    let request_id = state.begin_manual().unwrap();
+
+    state.close_about();
+
+    assert!(!state.accept_result(request_id, false));
+    assert!(!state.accept_result(request_id, true));
+    assert!(!state.busy);
+
+    let mut startup_check = UpdateCheckState::default();
+    startup_check.close_about();
+    assert!(!startup_check.accept_result(STARTUP_UPDATE_CHECK_ID, false));
+    assert!(!startup_check.accept_result(STARTUP_UPDATE_CHECK_ID, true));
+}
+
+#[test]
+fn manual_update_check_supersedes_startup_auto_check() {
+    let mut state = UpdateCheckState::default();
+    let manual_id = state.begin_manual().unwrap();
+
+    assert_ne!(manual_id, STARTUP_UPDATE_CHECK_ID);
+    assert!(!state.accept_result(STARTUP_UPDATE_CHECK_ID, true));
+    assert!(state.busy);
+    assert!(state.accept_result(manual_id, true));
+    assert!(!state.busy);
+
+    let app = include_str!("mod.rs");
+    let drain_start = app.find("fn drain_messages").unwrap();
+    let drain = &app[drain_start..];
+    let found_start = drain.find("WorkerMsg::UpdateFound {").unwrap();
+    let found_end = drain[found_start..]
+        .find("WorkerMsg::UpdateProgress")
+        .unwrap()
+        + found_start;
+    let found = &drain[found_start..found_end];
+    assert!(
+        found.find("accept_result").unwrap()
+            < found.find("self.pending_update = Some(manifest)").unwrap()
+    );
+    let latest_start = drain.find("WorkerMsg::UpdateLatest {").unwrap();
+    let latest_end = drain[latest_start..]
+        .find("WorkerMsg::UpdateFailed")
+        .unwrap()
+        + latest_start;
+    let latest = &drain[latest_start..latest_end];
+    assert!(
+        latest.find("accept_result").unwrap() < latest.find("self.update_status = Some").unwrap()
+    );
+}
+
+#[test]
+fn repeated_update_clicks_do_not_spawn_parallel_checks_or_break_status() {
+    let mut state = UpdateCheckState::default();
+    let active_id = state.begin_manual().unwrap();
+
+    assert_eq!(state.begin_manual(), None);
+    assert_eq!(state.generation, active_id);
+    assert!(state.busy);
+    let about = include_str!("dialogs.rs");
+    assert!(about.contains("&& !self.update_check.busy"));
+    assert!(about.contains("self.update_check.begin_manual()"));
+    assert!(about.contains("self.spawn_update_check(&viewport_ctx, request_id)"));
+}
+
+#[test]
+fn reopening_about_does_not_show_stale_update_result() {
+    let mut state = UpdateCheckState::default();
+    let old_request_id = state.begin_manual().unwrap();
+
+    state.close_about();
+
+    assert!(!state.accept_result(old_request_id, true));
+    assert!(!state.busy);
+
+    let dialogs = include_str!("dialogs.rs");
+    let close_start = dialogs.find("if close_requested {").unwrap();
+    let close_end = dialogs[close_start..].find("\n        }").unwrap() + close_start;
+    let close = &dialogs[close_start..close_end];
+    assert!(close.contains("self.update_check.close_about()"));
+    assert!(close.contains("self.update_status = None"));
+    assert!(close.contains("self.update_err = None"));
+}
+
+#[test]
+fn existing_about_3_5_tests_not_regressed() {
+    let dialogs = include_str!("dialogs.rs");
+    for test_name in [
+        "about_version_from_single_source_not_hardcoded",
+        "about_build_profile_reflects_actual_configuration",
+        "about_commit_hash_shown_only_if_really_available",
+        "about_description_matches_real_capabilities_no_false_promises",
+        "about_update_check_reuses_spawn_update_check_no_second_system",
+        "about_update_result_user_facing_no_raw_error",
+        "about_export_entry_not_duplicated",
+        "about_window_single_instance_existing_style_localized",
+    ] {
+        assert!(
+            dialogs.contains(&format!("fn {test_name}")),
+            "missing About 3.5 test: {test_name}"
+        );
+    }
 }
 
 #[test]
