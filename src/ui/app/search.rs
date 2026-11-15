@@ -10,12 +10,18 @@ pub(super) fn search_result_tab_index(tabs: &[Tab], tab_id: u64, generation: u64
 
 impl FileManagerApp {
     fn schedule_search(&mut self) {
+        if self.shutdown_active() {
+            return;
+        }
         let tab_id = self.tabs[self.active].id;
         self.cancel_search_bg_ops(tab_id);
         self.tabs[self.active].search.schedule();
     }
 
     pub(super) fn start_search(&mut self, tab: usize, ctx: &egui::Context) {
+        if self.shutdown_active() {
+            return;
+        }
         let tab_id = self.tabs[tab].id;
         self.cancel_search_bg_ops(tab_id);
         if !self.tabs[tab].search.has_criteria() {

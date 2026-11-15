@@ -321,8 +321,10 @@ impl ShutdownSnapshot {
 #[derive(Default)]
 struct ShutdownProgress {
     started_at: Option<Instant>,
+    notice_started_at: Option<Instant>,
     initial_snapshot: ShutdownSnapshot,
     warning_shown: bool,
+    awaiting_user_response: bool,
     close_allowed: bool,
 }
 
@@ -332,6 +334,7 @@ impl ShutdownProgress {
             return false;
         }
         self.started_at = Some(now);
+        self.notice_started_at = Some(now);
         self.initial_snapshot = snapshot;
         true
     }
@@ -348,13 +351,25 @@ impl ShutdownProgress {
 
     fn take_warning(&mut self, now: Instant) -> bool {
         if self.is_active()
+            && !self.awaiting_user_response
             && !self.warning_shown
-            && self.elapsed(now) >= SHUTDOWN_NOTICE_DELAY
+            && self
+                .notice_started_at
+                .is_some_and(|started_at| now.saturating_duration_since(started_at) >= SHUTDOWN_NOTICE_DELAY)
         {
             self.warning_shown = true;
             return true;
         }
         false
+    }
+
+    // Ожидание ответа пользователя нельзя выдавать за задержку файловой системы.
+    fn set_awaiting_user_response(&mut self, awaiting: bool, now: Instant) {
+        if self.awaiting_user_response != awaiting {
+            self.awaiting_user_response = awaiting;
+            self.notice_started_at = Some(now);
+            self.warning_shown = false;
+        }
     }
 
     fn allow_close(&mut self) -> bool {
@@ -1016,6 +1031,10 @@ impl FileManagerApp {
         self.prepare_shutdown();
     }
 
+    pub(crate) fn shutdown_active(&self) -> bool {
+        self.shutdown.is_active()
+    }
+
     fn prepare_shutdown(&mut self) {
         if self.shutdown_prepared {
             return;
@@ -1050,46 +1069,12 @@ impl FileManagerApp {
         for job in &self.ops_ui.jobs {
             job.cancel.store(true, Ordering::Relaxed);
         }
-        if let Some(reply_tx) = &self.op_reply {
-            if let Some((id, _, _)) = self.ops_ui.conflict.as_ref() {
-                let _ = reply_tx.send(OpReply::Conflict {
-                    id: *id,
-                    action: crate::core::ops::ConflictAction::Cancel,
-                });
-            }
-            if let Some((id, _, _, _)) = self.ops_ui.error_q.as_ref() {
-                let _ = reply_tx.send(OpReply::Error {
-                    id: *id,
-                    action: crate::core::ops::ErrorAction::Cancel,
-                });
-            }
-        }
-        self.op_reply.take();
+        // Пока worker ждёт ответа, UI должен оставить канал открытым и показать вопрос.
         self.ops_tx.take();
     }
 
-    fn drain_shutdown_ops(&mut self) {
-        while let Ok(event) = self.ops_evt.try_recv() {
-            match event {
-                OpEvent::Cancelled { id } => {
-                    if self.ops_ui.jobs.iter().any(|job| job.id == id) {
-                        self.ops_ui.jobs.retain(|job| job.id != id);
-                        tracing::info!(operation_id = id, "файловая операция отменена при shutdown");
-                    }
-                }
-                OpEvent::Done { id, failed } => {
-                    if self.ops_ui.jobs.iter().any(|job| job.id == id) {
-                        self.ops_ui.jobs.retain(|job| job.id != id);
-                        tracing::info!(
-                            operation_id = id,
-                            failed,
-                            "файловая операция завершилась при shutdown"
-                        );
-                    }
-                }
-                OpEvent::Progress { .. } | OpEvent::AskConflict { .. } | OpEvent::AskError { .. } => {}
-            }
-        }
+    fn drain_shutdown_ops(&mut self, ctx: &egui::Context) {
+        self.drain_ops_events(ctx);
     }
 
     fn shutdown_frame(
@@ -1099,9 +1084,13 @@ impl FileManagerApp {
         close_requested: bool,
     ) {
         self.drain_bg_op_events();
-        self.drain_shutdown_ops();
+        self.drain_shutdown_ops(ctx);
 
         let now = Instant::now();
+        let awaiting_user_response =
+            self.ops_ui.conflict.is_some() || self.ops_ui.error_q.is_some();
+        self.shutdown
+            .set_awaiting_user_response(awaiting_user_response, now);
         let pending = self.pending_shutdown_snapshot();
         let elapsed = self.shutdown.elapsed(now);
         let file_worker_finished = self
@@ -1123,6 +1112,10 @@ impl FileManagerApp {
                 ui.heading(self.t("shutdown.waiting"));
                 ui.add_space(12.0);
                 ui.label(format!("{}: {details}", self.t("shutdown.pending")));
+                if awaiting_user_response {
+                    ui.add_space(8.0);
+                    ui.label(self.t("shutdown.awaiting_response"));
+                }
                 if warning_shown {
                     ui.add_space(16.0);
                     ui.separator();
@@ -1135,6 +1128,7 @@ impl FileManagerApp {
                 }
             });
         });
+        self.ops_dialogs(ctx);
 
         if workers_finished && self.shutdown.allow_close() {
             tracing::info!(

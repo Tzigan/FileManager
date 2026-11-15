@@ -222,6 +222,9 @@ pub struct OpsUi {
 
 impl FileManagerApp {
     pub(crate) fn enqueue(&mut self, verb: &'static str, kind: OpKind) {
+        if self.shutdown_active() {
+            return;
+        }
         self.ops_ui.next_id += 1;
         let id = self.ops_ui.next_id;
         let touched_dirs = crate::core::dir_cache::affected_dirs(&kind);
@@ -267,6 +270,9 @@ impl FileManagerApp {
     // ------------------------------------------------------------------
 
     pub(crate) fn act_copy(&mut self) {
+        if self.shutdown_active() {
+            return;
+        }
         let paths = self.selected_paths();
         if !paths.is_empty() {
             if let Err(e) = crate::platform::set_clipboard_files(&paths) {
@@ -280,6 +286,9 @@ impl FileManagerApp {
     }
 
     pub(crate) fn act_cut(&mut self) {
+        if self.shutdown_active() {
+            return;
+        }
         let paths = self.selected_paths();
         if !paths.is_empty() {
             if let Err(e) = crate::platform::set_clipboard_files(&paths) {
@@ -290,6 +299,9 @@ impl FileManagerApp {
     }
 
     pub(crate) fn act_paste(&mut self) {
+        if self.shutdown_active() {
+            return;
+        }
         if self.tabs[self.active].archive_prefix.is_some() {
             return;
         }
@@ -323,11 +335,17 @@ impl FileManagerApp {
 
     /// `permanent`: Shift+Delete — bypass the Recycle Bin.
     pub(crate) fn act_delete(&mut self, permanent: bool) {
+        if self.shutdown_active() {
+            return;
+        }
         let paths = self.selected_paths();
         self.ops_ui.delete_confirm = delete_confirmation(paths, permanent);
     }
 
     pub(crate) fn act_rename(&mut self) {
+        if self.shutdown_active() {
+            return;
+        }
         let tab = &self.tabs[self.active];
         if tab.archive_prefix.is_some() {
             return;
@@ -415,15 +433,17 @@ impl FileManagerApp {
                     if let Some(pos) = self.ops_ui.jobs.iter().position(|j| j.id == id) {
                         self.ops_ui.jobs.remove(pos);
                     }
-                    for path in touched {
-                        self.dir_cache.invalidate_dir(&path);
+                    if !self.shutdown_active() {
+                        for path in touched {
+                            self.dir_cache.invalidate_dir(&path);
+                        }
+                        if failed > 0 {
+                            self.ops_ui.show_journal = true;
+                        }
+                        // Reflect changes: reload listing + invalidate tree cache.
+                        self.navigate_fresh(self.active, ctx);
+                        self.tree.children.clear();
                     }
-                    if failed > 0 {
-                        self.ops_ui.show_journal = true;
-                    }
-                    // Reflect changes: reload listing + invalidate tree cache.
-                    self.navigate_fresh(self.active, ctx);
-                    self.tree.children.clear();
                 }
             }
         }
@@ -504,6 +524,11 @@ impl FileManagerApp {
     // ------------------------------------------------------------------
 
     pub(crate) fn ops_dialogs(&mut self, ctx: &egui::Context) {
+        if self.shutdown_active() {
+            self.conflict_dialog(ctx);
+            self.error_dialog(ctx);
+            return;
+        }
         self.delete_dialog(ctx);
         self.delete_ask_dialog(ctx);
         self.rename_dialog(ctx);
