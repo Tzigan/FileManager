@@ -3,6 +3,276 @@
 use super::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ShortcutId {
+    Copy,
+    Cut,
+    Paste,
+    PreviousTab,
+    NewTab,
+    CloseTab,
+    NextTab,
+    Delete,
+    Properties,
+    Rename,
+    Preview,
+    SelectAll,
+    Parent,
+    Open,
+    Back,
+    Forward,
+    MoveDown,
+    MoveUp,
+    PageDown,
+    PageUp,
+    First,
+    Last,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ShortcutModifiers {
+    Any,
+    Ctrl,
+    CtrlShift,
+    Alt,
+    Command,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) struct HotkeyBinding {
+    pub(super) id: ShortcutId,
+    pub(super) key: egui::Key,
+    pub(super) modifiers: ShortcutModifiers,
+    pub(super) key_label_key: &'static str,
+    pub(super) action_key: &'static str,
+    pub(super) condition_key: Option<&'static str>,
+    pub(super) shift_action_key: Option<&'static str>,
+}
+
+const HOTKEY_BINDINGS: &[HotkeyBinding] = &[
+    HotkeyBinding {
+        id: ShortcutId::Copy,
+        key: egui::Key::C,
+        modifiers: ShortcutModifiers::Ctrl,
+        key_label_key: "help.hotkeys.key.c",
+        action_key: "help.hotkeys.action.copy",
+        condition_key: Some("help.hotkeys.condition.clipboard"),
+        shift_action_key: None,
+    },
+    HotkeyBinding {
+        id: ShortcutId::Cut,
+        key: egui::Key::X,
+        modifiers: ShortcutModifiers::Ctrl,
+        key_label_key: "help.hotkeys.key.x",
+        action_key: "help.hotkeys.action.cut",
+        condition_key: Some("help.hotkeys.condition.clipboard"),
+        shift_action_key: None,
+    },
+    HotkeyBinding {
+        id: ShortcutId::Paste,
+        key: egui::Key::V,
+        modifiers: ShortcutModifiers::Ctrl,
+        key_label_key: "help.hotkeys.key.v",
+        action_key: "help.hotkeys.action.paste",
+        condition_key: Some("help.hotkeys.condition.clipboard"),
+        shift_action_key: None,
+    },
+    HotkeyBinding {
+        id: ShortcutId::PreviousTab,
+        key: egui::Key::Tab,
+        modifiers: ShortcutModifiers::CtrlShift,
+        key_label_key: "help.hotkeys.key.tab",
+        action_key: "help.hotkeys.action.previous_tab",
+        condition_key: Some("help.hotkeys.condition.tabs"),
+        shift_action_key: None,
+    },
+    HotkeyBinding {
+        id: ShortcutId::NewTab,
+        key: egui::Key::T,
+        modifiers: ShortcutModifiers::Ctrl,
+        key_label_key: "help.hotkeys.key.t",
+        action_key: "help.hotkeys.action.new_tab",
+        condition_key: Some("help.hotkeys.condition.tabs"),
+        shift_action_key: None,
+    },
+    HotkeyBinding {
+        id: ShortcutId::CloseTab,
+        key: egui::Key::W,
+        modifiers: ShortcutModifiers::Ctrl,
+        key_label_key: "help.hotkeys.key.w",
+        action_key: "help.hotkeys.action.close_tab",
+        condition_key: Some("help.hotkeys.condition.tabs"),
+        shift_action_key: None,
+    },
+    HotkeyBinding {
+        id: ShortcutId::NextTab,
+        key: egui::Key::Tab,
+        modifiers: ShortcutModifiers::Ctrl,
+        key_label_key: "help.hotkeys.key.tab",
+        action_key: "help.hotkeys.action.next_tab",
+        condition_key: Some("help.hotkeys.condition.tabs"),
+        shift_action_key: None,
+    },
+    HotkeyBinding {
+        id: ShortcutId::Delete,
+        key: egui::Key::Delete,
+        modifiers: ShortcutModifiers::Any,
+        key_label_key: "help.hotkeys.key.delete",
+        action_key: "help.hotkeys.action.delete",
+        condition_key: None,
+        shift_action_key: Some("help.hotkeys.action.delete_permanent"),
+    },
+    HotkeyBinding {
+        id: ShortcutId::Properties,
+        key: egui::Key::Enter,
+        modifiers: ShortcutModifiers::Alt,
+        key_label_key: "help.hotkeys.key.enter",
+        action_key: "help.hotkeys.action.properties",
+        condition_key: None,
+        shift_action_key: None,
+    },
+    HotkeyBinding {
+        id: ShortcutId::Rename,
+        key: egui::Key::F2,
+        modifiers: ShortcutModifiers::Any,
+        key_label_key: "help.hotkeys.key.f2",
+        action_key: "help.hotkeys.action.rename",
+        condition_key: None,
+        shift_action_key: None,
+    },
+    HotkeyBinding {
+        id: ShortcutId::Preview,
+        key: egui::Key::F3,
+        modifiers: ShortcutModifiers::Any,
+        key_label_key: "help.hotkeys.key.f3",
+        action_key: "help.hotkeys.action.preview",
+        condition_key: None,
+        shift_action_key: None,
+    },
+    HotkeyBinding {
+        id: ShortcutId::SelectAll,
+        key: egui::Key::A,
+        modifiers: ShortcutModifiers::Command,
+        key_label_key: "help.hotkeys.key.a",
+        action_key: "help.hotkeys.action.select_all",
+        condition_key: None,
+        shift_action_key: None,
+    },
+    HotkeyBinding {
+        id: ShortcutId::Parent,
+        key: egui::Key::Backspace,
+        modifiers: ShortcutModifiers::Any,
+        key_label_key: "help.hotkeys.key.backspace",
+        action_key: "help.hotkeys.action.parent",
+        condition_key: None,
+        shift_action_key: None,
+    },
+    HotkeyBinding {
+        id: ShortcutId::Open,
+        key: egui::Key::Enter,
+        modifiers: ShortcutModifiers::Any,
+        key_label_key: "help.hotkeys.key.enter",
+        action_key: "help.hotkeys.action.open",
+        condition_key: None,
+        shift_action_key: None,
+    },
+    HotkeyBinding {
+        id: ShortcutId::Back,
+        key: egui::Key::ArrowLeft,
+        modifiers: ShortcutModifiers::Alt,
+        key_label_key: "help.hotkeys.key.left",
+        action_key: "help.hotkeys.action.back",
+        condition_key: None,
+        shift_action_key: None,
+    },
+    HotkeyBinding {
+        id: ShortcutId::Forward,
+        key: egui::Key::ArrowRight,
+        modifiers: ShortcutModifiers::Alt,
+        key_label_key: "help.hotkeys.key.right",
+        action_key: "help.hotkeys.action.forward",
+        condition_key: None,
+        shift_action_key: None,
+    },
+    HotkeyBinding {
+        id: ShortcutId::MoveDown,
+        key: egui::Key::ArrowDown,
+        modifiers: ShortcutModifiers::Any,
+        key_label_key: "help.hotkeys.key.down",
+        action_key: "help.hotkeys.action.move_cursor",
+        condition_key: None,
+        shift_action_key: Some("help.hotkeys.action.extend_selection"),
+    },
+    HotkeyBinding {
+        id: ShortcutId::MoveUp,
+        key: egui::Key::ArrowUp,
+        modifiers: ShortcutModifiers::Any,
+        key_label_key: "help.hotkeys.key.up",
+        action_key: "help.hotkeys.action.move_cursor",
+        condition_key: None,
+        shift_action_key: Some("help.hotkeys.action.extend_selection"),
+    },
+    HotkeyBinding {
+        id: ShortcutId::PageDown,
+        key: egui::Key::PageDown,
+        modifiers: ShortcutModifiers::Any,
+        key_label_key: "help.hotkeys.key.page_down",
+        action_key: "help.hotkeys.action.move_page",
+        condition_key: None,
+        shift_action_key: Some("help.hotkeys.action.extend_selection"),
+    },
+    HotkeyBinding {
+        id: ShortcutId::PageUp,
+        key: egui::Key::PageUp,
+        modifiers: ShortcutModifiers::Any,
+        key_label_key: "help.hotkeys.key.page_up",
+        action_key: "help.hotkeys.action.move_page",
+        condition_key: None,
+        shift_action_key: Some("help.hotkeys.action.extend_selection"),
+    },
+    HotkeyBinding {
+        id: ShortcutId::First,
+        key: egui::Key::Home,
+        modifiers: ShortcutModifiers::Any,
+        key_label_key: "help.hotkeys.key.home",
+        action_key: "help.hotkeys.action.first",
+        condition_key: None,
+        shift_action_key: Some("help.hotkeys.action.extend_selection"),
+    },
+    HotkeyBinding {
+        id: ShortcutId::Last,
+        key: egui::Key::End,
+        modifiers: ShortcutModifiers::Any,
+        key_label_key: "help.hotkeys.key.end",
+        action_key: "help.hotkeys.action.last",
+        condition_key: None,
+        shift_action_key: Some("help.hotkeys.action.extend_selection"),
+    },
+];
+
+pub(super) fn hotkey_bindings() -> &'static [HotkeyBinding] {
+    HOTKEY_BINDINGS
+}
+
+fn hotkey_binding(id: ShortcutId) -> Option<&'static HotkeyBinding> {
+    HOTKEY_BINDINGS.iter().find(|binding| binding.id == id)
+}
+
+fn shortcut_pressed(ctx: &egui::Context, id: ShortcutId) -> bool {
+    let Some(binding) = hotkey_binding(id) else {
+        return false;
+    };
+    let (pressed, modifiers) = ctx.input(|input| (input.key_pressed(binding.key), input.modifiers));
+    pressed
+        && match binding.modifiers {
+            ShortcutModifiers::Any => true,
+            ShortcutModifiers::Ctrl => modifiers.ctrl,
+            ShortcutModifiers::CtrlShift => modifiers.ctrl && modifiers.shift,
+            ShortcutModifiers::Alt => modifiers.alt,
+            ShortcutModifiers::Command => modifiers.command,
+        }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum MouseNavigationAction {
     Back,
     Forward,
@@ -32,13 +302,12 @@ impl FileManagerApp {
         self.handle_side_mouse_navigation(ctx);
         let text_edit_focused = ctx.text_edit_focused();
         let mods = ctx.input(|i| i.modifiers);
-        let input = |i: &egui::InputState| i.clone();
 
         // Prefer file operations when a file selection/internal file clipboard
         // exists. This also recovers if the address TextEdit retained focus after
         // the user clicked a file row; without a file selection normal text-edit
         // shortcuts (copy/paste in the address bar) remain untouched.
-        if mods.ctrl && ctx.input(|i| i.key_pressed(egui::Key::C)) {
+        if shortcut_pressed(ctx, ShortcutId::Copy) {
             match crate::ui::opsui::clipboard_target(
                 crate::ui::opsui::ClipboardCommand::Copy,
                 text_edit_focused,
@@ -55,7 +324,7 @@ impl FileManagerApp {
             }
             return;
         }
-        if mods.ctrl && ctx.input(|i| i.key_pressed(egui::Key::X)) {
+        if shortcut_pressed(ctx, ShortcutId::Cut) {
             match crate::ui::opsui::clipboard_target(
                 crate::ui::opsui::ClipboardCommand::Cut,
                 text_edit_focused,
@@ -69,7 +338,7 @@ impl FileManagerApp {
             }
             return;
         }
-        if mods.ctrl && ctx.input(|i| i.key_pressed(egui::Key::V)) {
+        if shortcut_pressed(ctx, ShortcutId::Paste) {
             let has_file_clipboard = self.ops_ui.clipboard.is_some()
                 || !crate::platform::get_clipboard_files().is_empty();
             match crate::ui::opsui::clipboard_target(
@@ -97,7 +366,7 @@ impl FileManagerApp {
 
         // Пока вкладка нажата или перетаскивается, горячие клавиши не меняют список.
         if allow_tab_management && !self.tab_drag_state.is_active() {
-            if mods.ctrl && mods.shift && ctx.input(|i| i.key_pressed(egui::Key::Tab)) {
+            if shortcut_pressed(ctx, ShortcutId::PreviousTab) {
                 let visible = self.visible_tab_indices();
                 if !visible.is_empty() {
                     let current = visible
@@ -109,15 +378,15 @@ impl FileManagerApp {
                 }
                 return;
             }
-            if mods.ctrl && ctx.input(|i| i.key_pressed(egui::Key::T)) {
+            if shortcut_pressed(ctx, ShortcutId::NewTab) {
                 self.new_tab(ctx);
                 return;
             }
-            if mods.ctrl && ctx.input(|i| i.key_pressed(egui::Key::W)) {
+            if shortcut_pressed(ctx, ShortcutId::CloseTab) {
                 self.close_tab(self.active, ctx);
                 return;
             }
-            if mods.ctrl && ctx.input(|i| i.key_pressed(egui::Key::Tab)) {
+            if shortcut_pressed(ctx, ShortcutId::NextTab) {
                 let visible = self.visible_tab_indices();
                 if !visible.is_empty() {
                     let current = visible
@@ -130,33 +399,34 @@ impl FileManagerApp {
             }
         }
 
-        if ctx.input(|i| i.key_pressed(egui::Key::Delete)) {
+        if shortcut_pressed(ctx, ShortcutId::Delete) {
             self.act_delete(mods.shift);
             return;
         }
-        if mods.alt && ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
+        if shortcut_pressed(ctx, ShortcutId::Properties) {
             self.act_props();
+            return;
         }
-        if ctx.input(|i| i.key_pressed(egui::Key::F2)) {
+        if shortcut_pressed(ctx, ShortcutId::Rename) {
             self.act_rename();
             return;
         }
-        if ctx.input(|i| i.key_pressed(egui::Key::F3)) {
+        if shortcut_pressed(ctx, ShortcutId::Preview) {
             self.act_preview(ctx);
             return;
         }
 
         // Selection and navigation.
-        if mods.command && ctx.input(|i| i.key_pressed(egui::Key::A)) {
+        if shortcut_pressed(ctx, ShortcutId::SelectAll) {
             let tab = &mut self.tabs[self.active];
             crate::ui::tabs::select_all_entries(&mut tab.selection, &tab.entries);
             return;
         }
-        if ctx.input(|i| i.key_pressed(egui::Key::Backspace)) {
+        if shortcut_pressed(ctx, ShortcutId::Parent) {
             self.go_up(ctx);
             return;
         }
-        if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
+        if shortcut_pressed(ctx, ShortcutId::Open) {
             let target = {
                 let tab = &self.tabs[self.active];
                 if tab.selection.len() == 1 {
@@ -192,11 +462,11 @@ impl FileManagerApp {
             }
             return;
         }
-        if ctx.input(|i| i.key_pressed(egui::Key::ArrowLeft)) && mods.alt {
+        if shortcut_pressed(ctx, ShortcutId::Back) {
             self.go_back(ctx);
             return;
         }
-        if ctx.input(|i| i.key_pressed(egui::Key::ArrowRight)) && mods.alt {
+        if shortcut_pressed(ctx, ShortcutId::Forward) {
             self.go_forward(ctx);
             return;
         }
@@ -205,20 +475,19 @@ impl FileManagerApp {
         if len == 0 {
             return;
         }
-        let i = input(&ctx.input(|i| i.clone()));
-        let relative_move = if i.key_pressed(egui::Key::ArrowDown) {
+        let relative_move = if shortcut_pressed(ctx, ShortcutId::MoveDown) {
             Some(1isize)
-        } else if i.key_pressed(egui::Key::ArrowUp) {
+        } else if shortcut_pressed(ctx, ShortcutId::MoveUp) {
             Some(-1)
-        } else if i.key_pressed(egui::Key::PageDown) {
+        } else if shortcut_pressed(ctx, ShortcutId::PageDown) {
             Some(20)
-        } else if i.key_pressed(egui::Key::PageUp) {
+        } else if shortcut_pressed(ctx, ShortcutId::PageUp) {
             Some(-20)
         } else {
             None
         };
-        let move_to_start = i.key_pressed(egui::Key::Home);
-        let move_to_end = i.key_pressed(egui::Key::End);
+        let move_to_start = shortcut_pressed(ctx, ShortcutId::First);
+        let move_to_end = shortcut_pressed(ctx, ShortcutId::Last);
         if relative_move.is_none() && !move_to_start && !move_to_end {
             return;
         }
@@ -313,5 +582,130 @@ impl FileManagerApp {
         };
         tab.cursor = target;
         self.scroll_to_cursor = true;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ShortcutId, ShortcutModifiers, hotkey_bindings};
+
+    #[test]
+    fn hotkey_registry_covers_real_bindings_from_input_handler() {
+        let ids: Vec<_> = hotkey_bindings().iter().map(|binding| binding.id).collect();
+        assert_eq!(
+            ids,
+            [
+                ShortcutId::Copy,
+                ShortcutId::Cut,
+                ShortcutId::Paste,
+                ShortcutId::PreviousTab,
+                ShortcutId::NewTab,
+                ShortcutId::CloseTab,
+                ShortcutId::NextTab,
+                ShortcutId::Delete,
+                ShortcutId::Properties,
+                ShortcutId::Rename,
+                ShortcutId::Preview,
+                ShortcutId::SelectAll,
+                ShortcutId::Parent,
+                ShortcutId::Open,
+                ShortcutId::Back,
+                ShortcutId::Forward,
+                ShortcutId::MoveDown,
+                ShortcutId::MoveUp,
+                ShortcutId::PageDown,
+                ShortcutId::PageUp,
+                ShortcutId::First,
+                ShortcutId::Last,
+            ]
+        );
+        let source = include_str!("input.rs");
+        let handler_start = source.find("fn handle_keys_impl").unwrap();
+        let handler_end = source[handler_start..]
+            .find("\n    fn handle_side_mouse_navigation")
+            .unwrap()
+            + handler_start;
+        let handler = &source[handler_start..handler_end];
+        assert!(!handler.contains("key_pressed(egui::Key::"));
+        for id in ids {
+            assert!(
+                handler.contains(&format!("ShortcutId::{id:?}")),
+                "handler does not use registry entry {id:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn f3_is_preview_not_search_in_hotkey_registry() {
+        let binding = hotkey_bindings()
+            .iter()
+            .find(|binding| binding.id == ShortcutId::Preview)
+            .unwrap();
+        assert_eq!(binding.key, egui::Key::F3);
+        assert_eq!(binding.action_key, "help.hotkeys.action.preview");
+    }
+
+    #[test]
+    fn properties_shortcut_does_not_fall_through_to_open() {
+        let source = include_str!("input.rs");
+        let start = source
+            .find("if shortcut_pressed(ctx, ShortcutId::Properties)")
+            .unwrap();
+        let end = source[start..]
+            .find("if shortcut_pressed(ctx, ShortcutId::Rename)")
+            .unwrap()
+            + start;
+        let handler = &source[start..end];
+        assert!(handler.contains("self.act_props();"));
+        assert!(handler.contains("return;"));
+    }
+
+    #[test]
+    fn conditional_bindings_are_represented_in_registry() {
+        let bindings = hotkey_bindings();
+        for id in [ShortcutId::Copy, ShortcutId::Cut, ShortcutId::Paste] {
+            let binding = bindings.iter().find(|binding| binding.id == id).unwrap();
+            assert_eq!(binding.modifiers, ShortcutModifiers::Ctrl);
+            assert_eq!(
+                binding.condition_key,
+                Some("help.hotkeys.condition.clipboard")
+            );
+        }
+        for id in [
+            ShortcutId::PreviousTab,
+            ShortcutId::NewTab,
+            ShortcutId::CloseTab,
+            ShortcutId::NextTab,
+        ] {
+            let binding = bindings.iter().find(|binding| binding.id == id).unwrap();
+            assert_eq!(binding.condition_key, Some("help.hotkeys.condition.tabs"));
+        }
+        for id in [
+            ShortcutId::MoveDown,
+            ShortcutId::MoveUp,
+            ShortcutId::PageDown,
+            ShortcutId::PageUp,
+            ShortcutId::First,
+            ShortcutId::Last,
+        ] {
+            let binding = bindings.iter().find(|binding| binding.id == id).unwrap();
+            assert_eq!(
+                binding.shift_action_key,
+                Some("help.hotkeys.action.extend_selection")
+            );
+        }
+        let delete = bindings
+            .iter()
+            .find(|binding| binding.id == ShortcutId::Delete)
+            .unwrap();
+        assert_eq!(
+            delete.shift_action_key,
+            Some("help.hotkeys.action.delete_permanent")
+        );
+        let source = include_str!("input.rs");
+        assert!(source.contains("if allow_tab_management && !self.tab_drag_state.is_active()"));
+        assert!(source.contains("self.act_delete(mods.shift)"));
+        assert!(source.contains("let extend = mods.shift"));
+        assert!(source.contains("crate::ui::opsui::clipboard_target"));
     }
 }

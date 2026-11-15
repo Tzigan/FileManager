@@ -207,7 +207,7 @@ impl FileManagerApp {
         }
     }
 
-    fn export_logs_from_about(&mut self, ctx: &egui::Context) {
+    pub(super) fn export_logs_from_about(&mut self, ctx: &egui::Context) {
         let picker_title = self.t("logs.export_folder").to_owned();
         let destination = match crate::platform::pick_folder(
             &picker_title,
@@ -270,6 +270,90 @@ impl FileManagerApp {
             let _ = msg_tx.send(WorkerMsg::LogExportFinished { result });
             ctx.request_repaint();
         });
+    }
+
+    pub(super) fn hotkeys_window(&mut self, ctx: &egui::Context) {
+        if !self.show_hotkeys {
+            return;
+        }
+        let title = self.t("help.hotkeys.title").to_owned();
+        let max_height = ctx.content_rect().height() * 0.72;
+        let mut open = true;
+        let mut close_requested = false;
+        egui::Window::new(title)
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.add(egui::Label::new(self.t("help.hotkeys.text_focus_note")).wrap());
+                ui.add_space(style::SPACE_SM);
+                egui::ScrollArea::vertical()
+                    .max_height(max_height)
+                    .show(ui, |ui| {
+                        for binding in super::input::hotkey_bindings() {
+                            let shortcut = self.hotkey_shortcut_label(binding, false);
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new(shortcut).monospace().strong());
+                                ui.add(egui::Label::new(self.t(binding.action_key)).wrap());
+                            });
+                            if let Some(condition_key) = binding.condition_key {
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(self.t(condition_key)).weak(),
+                                    )
+                                    .wrap(),
+                                );
+                            }
+                            if let Some(action_key) = binding.shift_action_key {
+                                let shortcut = self.hotkey_shortcut_label(binding, true);
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new(shortcut).monospace().strong());
+                                    ui.add(egui::Label::new(self.t(action_key)).wrap());
+                                });
+                            }
+                            ui.separator();
+                        }
+                    });
+                if ui.button(self.t("help.hotkeys.close")).clicked() {
+                    close_requested = true;
+                }
+            });
+        if !open || close_requested || ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+            self.show_hotkeys = false;
+        }
+    }
+
+    fn hotkey_shortcut_label(
+        &self,
+        binding: &super::input::HotkeyBinding,
+        with_shift: bool,
+    ) -> String {
+        let mut parts = Vec::with_capacity(3);
+        match binding.modifiers {
+            super::input::ShortcutModifiers::Any => {}
+            super::input::ShortcutModifiers::Ctrl | super::input::ShortcutModifiers::Command => {
+                parts.push(self.t("help.hotkeys.modifier.ctrl").to_owned());
+            }
+            super::input::ShortcutModifiers::CtrlShift => {
+                parts.push(self.t("help.hotkeys.modifier.ctrl").to_owned());
+                parts.push(self.t("help.hotkeys.modifier.shift").to_owned());
+            }
+            super::input::ShortcutModifiers::Alt => {
+                parts.push(self.t("help.hotkeys.modifier.alt").to_owned());
+            }
+        }
+        if with_shift {
+            parts.push(self.t("help.hotkeys.modifier.shift").to_owned());
+        }
+        parts.push(self.t(binding.key_label_key).to_owned());
+        parts.join("+")
+    }
+
+    pub(super) fn request_settings_reset(&mut self) {
+        self.settings_reset_status = None;
+        self.show_settings = true;
+        self.settings_reset_confirm = true;
     }
 
     pub(super) fn settings_window(&mut self, ctx: &egui::Context) {
@@ -525,8 +609,7 @@ impl FileManagerApp {
         ui.separator();
         ui.add_space(style::SPACE_SM);
         if ui.button(self.t("settings.reset_button")).clicked() {
-            self.settings_reset_status = None;
-            self.settings_reset_confirm = true;
+            self.request_settings_reset();
         }
         if let Some(status) = &self.settings_reset_status {
             ui.add_space(style::SPACE_SM);
@@ -1398,5 +1481,160 @@ mod tests {
         assert!(!dialogs[about_start..settings_start].contains("settings.reset"));
         assert!(dialogs[settings_start..].contains("settings.reset_button"));
         assert!(!toolbar.contains("settings.reset"));
+    }
+
+    #[test]
+    fn hotkey_registry_is_source_for_help_list_not_hardcoded_ui_text() {
+        let dialogs = include_str!("dialogs.rs");
+        let window_start = dialogs.find("pub(super) fn hotkeys_window").unwrap();
+        let window_end = dialogs[window_start..]
+            .find("pub(super) fn request_settings_reset")
+            .unwrap()
+            + window_start;
+        let window = &dialogs[window_start..window_end];
+        assert!(window.contains("super::input::hotkey_bindings()"));
+        assert!(window.contains("binding.action_key"));
+        assert!(window.contains("binding.condition_key"));
+        assert!(!window.contains("\"Ctrl+"));
+    }
+
+    #[test]
+    fn help_export_item_reuses_existing_log_export_handler() {
+        let toolbar = include_str!("toolbar.rs");
+        let dialogs = include_str!("dialogs.rs");
+        assert!(toolbar.contains("!self.log_export_busy"));
+        assert!(toolbar.contains("self.export_logs_from_about(&ctx)"));
+        assert!(dialogs.contains("pub(super) fn export_logs_from_about"));
+        assert!(dialogs.contains("crate::core::log_export::export_logs("));
+        assert!(dialogs.contains("self.export_logs_from_about(ctx)"));
+    }
+
+    #[test]
+    fn help_reset_item_reuses_existing_settings_reset_flow() {
+        let toolbar = include_str!("toolbar.rs");
+        let dialogs = include_str!("dialogs.rs");
+        assert!(toolbar.contains("self.request_settings_reset()"));
+        assert!(dialogs.contains("pub(super) fn request_settings_reset"));
+        assert!(dialogs.contains("self.settings_reset_confirm = true"));
+        assert!(dialogs.contains("self.apply_settings_reset(ctx)"));
+        assert!(dialogs.contains("self.store.settings.reset_behavior_preserving_user_data()"));
+        assert!(dialogs.contains("self.persist_checked().is_ok()"));
+    }
+
+    #[test]
+    fn help_about_item_opens_existing_about_window_without_content_change() {
+        let toolbar = include_str!("toolbar.rs");
+        let app = include_str!("mod.rs");
+        let dialogs = include_str!("dialogs.rs");
+        assert!(toolbar.contains("self.show_about = true"));
+        assert!(app.contains("self.about_window(&ctx)"));
+        assert!(dialogs.contains("pub(super) fn about_window"));
+        assert!(dialogs.contains("ViewportId::from_hash_of(\"filemanager-about\")"));
+    }
+
+    #[test]
+    fn hotkey_window_uses_existing_dialog_style_and_localization() {
+        let dialogs = include_str!("dialogs.rs");
+        let window_start = dialogs.find("pub(super) fn hotkeys_window").unwrap();
+        let window_end = dialogs[window_start..]
+            .find("pub(super) fn request_settings_reset")
+            .unwrap()
+            + window_start;
+        let window = &dialogs[window_start..window_end];
+        assert!(window.contains("egui::Window::new(title)"));
+        assert!(window.contains("egui::Align2::CENTER_CENTER"));
+        assert!(window.contains("egui::ScrollArea::vertical()"));
+        assert!(window.contains("Key::Escape"));
+        assert!(window.contains("help.hotkeys.close"));
+    }
+
+    #[test]
+    fn help_menu_labels_localized_in_ru_and_en() {
+        let en: serde_json::Value =
+            serde_json::from_str(include_str!("../../../i18n/en.json")).unwrap();
+        let ru: serde_json::Value =
+            serde_json::from_str(include_str!("../../../i18n/ru.json")).unwrap();
+        let mut keys = vec![
+            "help.hotkeys",
+            "help.export_logs",
+            "help.reset_settings",
+            "help.about",
+            "help.hotkeys.title",
+            "help.hotkeys.close",
+            "help.hotkeys.text_focus_note",
+            "help.hotkeys.condition.clipboard",
+            "help.hotkeys.condition.tabs",
+            "help.hotkeys.modifier.ctrl",
+            "help.hotkeys.modifier.shift",
+            "help.hotkeys.modifier.alt",
+        ];
+        for binding in super::super::input::hotkey_bindings() {
+            keys.push(binding.key_label_key);
+            keys.push(binding.action_key);
+            if let Some(condition_key) = binding.condition_key {
+                keys.push(condition_key);
+            }
+            if let Some(action_key) = binding.shift_action_key {
+                keys.push(action_key);
+            }
+        }
+        keys.sort_unstable();
+        keys.dedup();
+        for key in keys {
+            for labels in [&en, &ru] {
+                let value = labels[key]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("missing localized help string: {key}"));
+                assert_ne!(value, key, "untranslated help string: {key}");
+            }
+        }
+        let f3_ru = ru["help.hotkeys.action.preview"].as_str().unwrap();
+        let f3_en = en["help.hotkeys.action.preview"].as_str().unwrap();
+        assert!(f3_ru.contains("Предпросмотр"));
+        assert!(f3_en.contains("Preview"));
+        assert!(!f3_ru.contains("Поиск"));
+        assert!(!f3_en.contains("Search"));
+    }
+
+    #[test]
+    fn settings_structure_and_json_schema_unchanged() {
+        let value = serde_json::to_value(crate::core::settings::Settings::default()).unwrap();
+        let actual: std::collections::BTreeSet<_> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let expected: std::collections::BTreeSet<_> = [
+            "active_tab",
+            "auto_restart_after_update",
+            "bookmarks",
+            "col_modified",
+            "col_size",
+            "col_type",
+            "delete_mode",
+            "dir_cache_entries",
+            "dir_watch_debounce_ms",
+            "dir_watch_enabled",
+            "enable_mouse_side_navigation",
+            "group_by_type",
+            "group_order",
+            "language",
+            "max_concurrent_bg_ops",
+            "pinned_tabs",
+            "secure_trash_allow_fallback",
+            "secure_trash_folders",
+            "secure_trash_hash_max_bytes",
+            "show_hidden_files",
+            "show_wsl_in_tree",
+            "single_instance",
+            "tabs",
+            "theme",
+            "update_restart_delay_secs",
+            "view_mode",
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(actual, expected);
     }
 }
