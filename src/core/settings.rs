@@ -229,6 +229,14 @@ fn default_restart_delay_secs() -> u32 {
     3
 }
 
+fn cleanup_settings_temp(path: &Path) {
+    if let Err(error) = fs::remove_file(path)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        crate::core::logging::log_io_error("settings temp cleanup", None, Some(path), &error);
+    }
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -358,14 +366,14 @@ impl SettingsStore {
             .and_then(|()| temp.sync_all())
         {
             drop(temp);
-            let _ = fs::remove_file(&temp_path);
+            cleanup_settings_temp(&temp_path);
             return Err(error).with_context(|| {
                 format!("failed to write temporary settings file {}", temp_path.display())
             });
         }
         drop(temp);
         if let Err(error) = crate::platform::replace_file(&temp_path, &self.path) {
-            let _ = fs::remove_file(&temp_path);
+            cleanup_settings_temp(&temp_path);
             return Err(error).with_context(|| {
                 format!("failed to replace settings file {}", self.path.display())
             });
@@ -385,6 +393,32 @@ mod tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!("filemanager-settings-{n}"))
+    }
+
+    fn lock_settings_file_for_replace(path: &Path) -> fs::File {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .share_mode(0x0000_0001 | 0x0000_0002)
+            .open(path)
+            .unwrap()
+    }
+
+    fn settings_temp_files(dir: &Path) -> Vec<PathBuf> {
+        fs::read_dir(dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with(".settings.json."))
+                    && path
+                        .extension()
+                        .is_some_and(|extension| extension == "tmp")
+            })
+            .collect()
     }
 
     #[test]
@@ -816,6 +850,100 @@ mod tests {
             let message = labels["settings.reset_session_only"].as_str().unwrap();
             assert!(message.contains("restart") || message.contains("перезапуска"));
             assert!(message.contains("session") || message.contains("сессии"));
+        }
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn normal_settings_save_still_atomic_and_not_regressed() {
+        let dir = temp_config();
+        let mut store = SettingsStore::load(&dir);
+        store.settings.theme = Theme::Light;
+        store.settings.bookmarks = vec![PathBuf::from("C:\\user-bookmark")];
+        store.save().unwrap();
+
+        store.settings.theme = Theme::Dark;
+        store.settings.show_hidden_files = true;
+        store.save().unwrap();
+
+        let loaded = SettingsStore::load(&dir);
+        assert_eq!(loaded.settings.theme, Theme::Dark);
+        assert!(loaded.settings.show_hidden_files);
+        assert_eq!(
+            loaded.settings.bookmarks,
+            vec![PathBuf::from("C:\\user-bookmark")]
+        );
+        assert!(settings_temp_files(&dir).is_empty());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn settings_replace_failure_cleans_temp_best_effort() {
+        let dir = temp_config();
+        let mut store = SettingsStore::load(&dir);
+        store.settings.theme = Theme::Light;
+        store.save().unwrap();
+        let settings_path = dir.join("settings.json");
+        let lock = lock_settings_file_for_replace(&settings_path);
+        store.settings.theme = Theme::Dark;
+
+        assert!(store.save().is_err());
+
+        drop(lock);
+        assert!(settings_temp_files(&dir).is_empty());
+        assert_eq!(SettingsStore::load(&dir).settings.theme, Theme::Light);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn settings_replace_failure_does_not_leave_half_written_settings() {
+        let dir = temp_config();
+        let mut store = SettingsStore::load(&dir);
+        store.settings.show_hidden_files = false;
+        store.settings.bookmarks = vec![PathBuf::from("D:\\saved")];
+        store.save().unwrap();
+        let settings_path = dir.join("settings.json");
+        let previous_bytes = fs::read(&settings_path).unwrap();
+        let lock = lock_settings_file_for_replace(&settings_path);
+        store.settings.show_hidden_files = true;
+        store.settings.bookmarks.clear();
+
+        assert!(store.save().is_err());
+
+        drop(lock);
+        assert_eq!(fs::read(&settings_path).unwrap(), previous_bytes);
+        let loaded = SettingsStore::load(&dir);
+        assert!(!loaded.settings.show_hidden_files);
+        assert_eq!(loaded.settings.bookmarks, vec![PathBuf::from("D:\\saved")]);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn first_launch_missing_file_reset_writes_defaults_without_damage_warning() {
+        let dir = temp_config();
+        fs::create_dir_all(&dir).unwrap();
+        let settings_path = dir.join("settings.json");
+        let mut store = SettingsStore::load(&dir);
+        assert_eq!(store.load_issue, None);
+        assert!(!settings_path.exists());
+
+        store.settings.reset_behavior_preserving_user_data();
+        store.save().unwrap();
+
+        let loaded = SettingsStore::load(&dir);
+        assert_eq!(loaded.load_issue, None);
+        assert_eq!(
+            serde_json::to_value(&loaded.settings).unwrap(),
+            serde_json::to_value(Settings::default()).unwrap()
+        );
+        for json in [
+            include_str!("../../i18n/en.json"),
+            include_str!("../../i18n/ru.json"),
+        ] {
+            let labels: serde_json::Value = serde_json::from_str(json).unwrap();
+            let scope = labels["settings.reset_confirm_scope"].as_str().unwrap();
+            assert!(!scope.contains("corrupt"));
+            assert!(!scope.contains("поврежд"));
         }
         let _ = fs::remove_dir_all(dir);
     }
