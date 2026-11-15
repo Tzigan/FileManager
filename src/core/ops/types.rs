@@ -35,20 +35,6 @@ pub enum OpKind {
     },
 }
 
-impl OpKind {
-    /// Short description for the ops panel (UI adds the localized verb).
-    pub fn target_label(&self) -> String {
-        match self {
-            OpKind::Copy { dest, .. } | OpKind::Move { dest, .. } => dest.display().to_string(),
-            OpKind::Delete { sources } | OpKind::Recycle { sources } => {
-                format!("{} items", sources.len())
-            }
-            OpKind::Rename { to, .. } => to.display().to_string(),
-            OpKind::CreateDir { path } | OpKind::CreateFile { path } => path.display().to_string(),
-        }
-    }
-}
-
 pub struct OpJob {
     pub id: u64,
     pub kind: OpKind,

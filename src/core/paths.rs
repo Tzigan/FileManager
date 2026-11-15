@@ -18,7 +18,6 @@ fn is_portable(exe_dir: &std::path::Path) -> bool {
 #[derive(Debug, Clone)]
 pub struct AppDirs {
     pub config_dir: PathBuf,
-    pub data_dir: PathBuf,
     pub log_dir: PathBuf,
     pub portable: bool,
 }
@@ -43,7 +42,6 @@ pub fn discover() -> anyhow::Result<AppDirs> {
 
     Ok(AppDirs {
         config_dir: base.clone(),
-        data_dir: base.join("data"),
         log_dir: base.join("logs"),
         portable,
     })
