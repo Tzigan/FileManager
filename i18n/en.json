@@ -436,5 +436,13 @@
   "trash.err.path": "The restore path escapes the allowed root",
   "trash.err.special": "A special file cannot be handled as a normal file",
   "trash.err.conflict": "An item already exists at the original path",
-  "trash.err.io": "The operation did not complete"
+  "trash.err.io": "The operation did not complete",
+  "shutdown.waiting": "Finishing background operations…",
+  "shutdown.pending": "Waiting for",
+  "shutdown.searches": "Searches",
+  "shutdown.zip_operations": "ZIP operations",
+  "shutdown.finishing": "The application is completing its shutdown.",
+  "shutdown.fs_unresponsive": "The file system or device may not be responding.",
+  "shutdown.continue_waiting": "The application will keep waiting for the operations to actually finish.",
+  "shutdown.force_close_risk": "Forcing the application closed may cause data loss or corruption."
 }

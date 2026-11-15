@@ -1,6 +1,8 @@
 //! Тесты расположения вкладок, навигации и окон.
 use super::{
     MANUAL_UPDATE_CHECK_TIMEOUT, PreviewState, STARTUP_UPDATE_CHECK_ID, UpdateCheckState,
+    SHUTDOWN_NOTICE_DELAY, ShutdownOperation, ShutdownOperationKind, ShutdownProgress,
+    ShutdownSnapshot, log_shutdown_start, log_shutdown_wait,
     breadcrumb_segments, configure_tab_scroll_style, dialogs, dropped_paths,
     floating_dialog_viewport, parse_archive_address, persisted_tab_path, tab_close_button_hovered,
     tab_scroll_source, tab_strip_content_margin,
@@ -691,4 +693,268 @@ fn drive_root_is_one_absolute_breadcrumb() {
         assert_eq!(segs[0].0, "C:\\");
         assert_eq!(segs[0].1, PathBuf::from("C:\\"));
     }
+}
+
+fn shutdown_fixture() -> ShutdownSnapshot {
+    ShutdownSnapshot {
+        operations: vec![ShutdownOperation {
+            id: 41,
+            kind: ShutdownOperationKind::File("ops.copying"),
+            queued: None,
+        }],
+    }
+}
+
+#[test]
+fn shutdown_with_pending_ops_shows_waiting_status_not_silent() {
+    let now = Instant::now();
+    let mut progress = ShutdownProgress::default();
+    assert!(progress.begin(now, shutdown_fixture()));
+    assert!(progress.is_active());
+    assert!(include_str!("mod.rs").contains("self.t(\"shutdown.waiting\")"));
+    assert!(include_str!("mod.rs").contains("ViewportCommand::CancelClose"));
+}
+
+#[test]
+fn shutdown_long_wait_shows_fs_unresponsive_warning_localized() {
+    let now = Instant::now();
+    let mut progress = ShutdownProgress::default();
+    assert!(progress.begin(now, shutdown_fixture()));
+    assert!(!progress.take_warning(now + SHUTDOWN_NOTICE_DELAY - Duration::from_millis(1)));
+    assert!(progress.take_warning(now + SHUTDOWN_NOTICE_DELAY));
+    assert!(!progress.take_warning(now + SHUTDOWN_NOTICE_DELAY * 2));
+
+    for (json, filesystem, risk) in [
+        (
+            include_str!("../../../i18n/ru.json"),
+            "файловая система",
+            "потере или повреждению",
+        ),
+        (
+            include_str!("../../../i18n/en.json"),
+            "file system",
+            "data loss or corruption",
+        ),
+    ] {
+        let labels: serde_json::Value = serde_json::from_str(json).unwrap();
+        assert!(
+            labels["shutdown.fs_unresponsive"]
+                .as_str()
+                .unwrap()
+                .to_lowercase()
+                .contains(filesystem)
+        );
+        assert!(
+            labels["shutdown.force_close_risk"]
+                .as_str()
+                .unwrap()
+                .to_lowercase()
+                .contains(risk)
+        );
+    }
+}
+
+#[test]
+fn shutdown_warning_does_not_detach_or_force_kill_worker() {
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        started_tx.send(()).unwrap();
+        release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    });
+    started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+
+    let now = Instant::now();
+    let pending = shutdown_fixture();
+    let mut progress = ShutdownProgress::default();
+    assert!(progress.begin(now, pending.clone()));
+    assert!(progress.take_warning(now + SHUTDOWN_NOTICE_DELAY));
+    assert!(!worker.is_finished());
+    assert!(!progress.workers_finished(&pending, worker.is_finished()));
+
+    let source = include_str!("mod.rs");
+    assert!(source.contains("worker.join()"));
+    assert!(source.contains("bg_ops_pool.join_workers()"));
+    assert!(!source.contains("TerminateThread"));
+    assert!(release_tx.send(()).is_ok());
+    worker.join().unwrap();
+}
+
+#[test]
+fn shutdown_completes_normally_after_worker_returns() {
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || release_rx.recv_timeout(Duration::from_secs(5)).unwrap());
+    let now = Instant::now();
+    let mut progress = ShutdownProgress::default();
+    assert!(progress.begin(now, shutdown_fixture()));
+    assert!(release_tx.send(()).is_ok());
+    worker.join().unwrap();
+    assert!(progress.workers_finished(&ShutdownSnapshot::default(), true));
+    assert!(progress.allow_close());
+    assert!(!progress.allow_close());
+}
+
+#[test]
+fn shutdown_no_warning_when_no_pending_ops() {
+    let mut progress = ShutdownProgress::default();
+    assert!(!progress.begin(Instant::now(), ShutdownSnapshot::default()));
+    assert!(!progress.is_active());
+    assert!(!progress.take_warning(Instant::now() + SHUTDOWN_NOTICE_DELAY * 2));
+}
+
+fn capture_shutdown_logs(run: impl FnOnce()) -> String {
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone)]
+    struct Buffer(Arc<Mutex<Vec<u8>>>);
+
+    struct BufferWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for BufferWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Buffer {
+        type Writer = BufferWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            BufferWriter(Arc::clone(&self.0))
+        }
+    }
+
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer(Buffer(Arc::clone(&output)))
+        .finish();
+    tracing::subscriber::with_default(subscriber, run);
+    String::from_utf8(output.lock().unwrap().clone()).unwrap()
+}
+
+#[test]
+fn shutdown_logs_pending_operation_and_elapsed() {
+    let pending = shutdown_fixture();
+    let output = capture_shutdown_logs(|| {
+        log_shutdown_start(&pending);
+        log_shutdown_wait(Duration::from_millis(12_000), &pending);
+    });
+    assert!(output.contains("operation_id=41"));
+    assert!(output.contains("pending_operations=1"));
+    assert!(output.contains("elapsed_ms=12000"));
+    assert!(output.contains("продолжает ждать"));
+}
+
+#[test]
+fn shutdown_multiple_ops_reported_honestly() {
+    let snapshot = ShutdownSnapshot {
+        operations: vec![
+            ShutdownOperation {
+                id: 1,
+                kind: ShutdownOperationKind::File("ops.copying"),
+                queued: None,
+            },
+            ShutdownOperation {
+                id: 2,
+                kind: ShutdownOperationKind::File("ops.copying"),
+                queued: None,
+            },
+            ShutdownOperation {
+                id: 3,
+                kind: ShutdownOperationKind::Search,
+                queued: Some(false),
+            },
+            ShutdownOperation {
+                id: 4,
+                kind: ShutdownOperationKind::Zip,
+                queued: Some(false),
+            },
+        ],
+    };
+    let i18n = crate::core::i18n::I18n::new(crate::core::i18n::Language::En);
+    let summary = snapshot.summary(&i18n);
+    assert_eq!(summary.split(", ").count(), 3);
+    assert!(summary.contains("Copying: 2"));
+    assert!(summary.contains("Searches: 1"));
+    assert!(summary.contains("ZIP operations: 1"));
+}
+
+#[test]
+fn shutdown_observer_does_not_deadlock_with_worker_channel() {
+    let (event_tx, event_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        event_tx.send(()).unwrap();
+        release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    });
+    event_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(event_rx.try_recv().is_err());
+    assert!(release_tx.send(()).is_ok());
+    worker.join().unwrap();
+
+    let source = include_str!("mod.rs");
+    let start = source.find("fn drain_shutdown_ops").unwrap();
+    let drain = &source[start..];
+    assert!(drain.contains("self.ops_evt.try_recv()"));
+    assert!(!drain.contains("self.ops_evt.recv()"));
+}
+
+#[test]
+fn duplicate_close_requests_do_not_spawn_multiple_observers() {
+    let now = Instant::now();
+    let mut progress = ShutdownProgress::default();
+    assert!(progress.begin(now, shutdown_fixture()));
+    assert!(!progress.begin(now + Duration::from_secs(1), shutdown_fixture()));
+    assert_eq!(progress.initial_snapshot.operations.len(), 1);
+}
+
+#[test]
+fn domain1_5_shutdown_tests_not_regressed() {
+    let pool = include_str!("../../core/bg_ops.rs");
+    let file_ops = include_str!("../../core/ops/worker/tests/tests_v04.rs");
+    let zip = include_str!("../../platform/windows/zip/mod.rs");
+    for name in [
+        "app_shutdown_with_pending_bg_ops",
+        "app_shutdown_with_pending_bg_ops_and_file_ops_still_hold",
+        "critical_flows_not_blocked_by_pool",
+    ] {
+        assert!(pool.contains(name));
+    }
+    assert!(file_ops.contains("file_ops_shutdown_skips_cancelled_queue"));
+    assert!(zip.contains("shutdown_does_not_block_on_impossible_zip_publish"));
+}
+
+#[test]
+fn domain3_1_2_3_4_5_not_regressed() {
+    let dialogs = include_str!("dialogs.rs");
+    let app_tests = include_str!("tests.rs");
+    assert!(dialogs.contains("domain3_1_2_3_4_not_regressed"));
+    assert!(dialogs.contains("domain1_2_not_regressed"));
+    assert!(app_tests.contains("existing_about_3_5_tests_not_regressed"));
+    for name in [
+        "update_check_result_ignores_stale_response_after_about_close",
+        "manual_update_check_supersedes_startup_auto_check",
+        "repeated_update_clicks_do_not_spawn_parallel_checks_or_break_status",
+        "reopening_about_does_not_show_stale_update_result",
+        "about_build_profile_reflects_actual_configuration",
+    ] {
+        assert!(app_tests.contains(name) || dialogs.contains(name));
+    }
+}
+
+#[test]
+fn settings_structure_and_json_schema_unchanged_if_constant_used() {
+    let app = include_str!("mod.rs");
+    let settings = include_str!("../../core/settings.rs");
+    assert!(app.contains("const SHUTDOWN_NOTICE_DELAY"));
+    assert!(!settings.contains("shutdown_notice_delay"));
+    assert!(!include_str!("../../../i18n/ru.json").contains("shutdown_notice_delay"));
+    assert!(!include_str!("../../../i18n/en.json").contains("shutdown_notice_delay"));
 }

@@ -16,7 +16,7 @@ pub(crate) use chrome::{
     tab_close_button_hovered, tab_scroll_source, tab_strip_content_margin,
 };
 
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -45,6 +45,7 @@ use crate::ui::tree::TreeState;
 const DISK_USAGE_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 /// Канал эскизов остаётся отдельным от пула тяжёлых независимых операций.
 pub(crate) const THUMBNAIL_QUEUE_CAPACITY: usize = 24;
+const SHUTDOWN_NOTICE_DELAY: Duration = Duration::from_secs(10);
 /// Ноль зарезервирован за автопроверкой при запуске.
 const STARTUP_UPDATE_CHECK_ID: u64 = 0;
 /// Завершает ожидание интерфейса, не прерывая сетевой поток.
@@ -258,6 +259,178 @@ struct BgOpUiTask {
     queued: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ShutdownOperationKind {
+    File(&'static str),
+    Search,
+    Zip,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ShutdownOperation {
+    id: u64,
+    kind: ShutdownOperationKind,
+    queued: Option<bool>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct ShutdownSnapshot {
+    operations: Vec<ShutdownOperation>,
+}
+
+impl ShutdownSnapshot {
+    fn is_empty(&self) -> bool {
+        self.operations.is_empty()
+    }
+
+    fn summary(&self, i18n: &I18n) -> String {
+        let mut file_operations = BTreeMap::<&'static str, usize>::new();
+        let mut searches = 0;
+        let mut zip_operations = 0;
+        for operation in &self.operations {
+            match operation.kind {
+                ShutdownOperationKind::File(verb) => {
+                    *file_operations.entry(verb).or_default() += 1;
+                }
+                ShutdownOperationKind::Search => searches += 1,
+                ShutdownOperationKind::Zip => zip_operations += 1,
+            }
+        }
+
+        let mut details = Vec::new();
+        for (verb, count) in file_operations {
+            details.push(format!("{}: {count}", i18n.t(verb)));
+        }
+        if searches > 0 {
+            details.push(format!("{}: {searches}", i18n.t("shutdown.searches")));
+        }
+        if zip_operations > 0 {
+            details.push(format!(
+                "{}: {zip_operations}",
+                i18n.t("shutdown.zip_operations")
+            ));
+        }
+        if details.is_empty() {
+            i18n.t("shutdown.finishing").to_owned()
+        } else {
+            details.join(", ")
+        }
+    }
+}
+
+#[derive(Default)]
+struct ShutdownProgress {
+    started_at: Option<Instant>,
+    initial_snapshot: ShutdownSnapshot,
+    warning_shown: bool,
+    close_allowed: bool,
+}
+
+impl ShutdownProgress {
+    fn begin(&mut self, now: Instant, snapshot: ShutdownSnapshot) -> bool {
+        if self.started_at.is_some() || snapshot.is_empty() {
+            return false;
+        }
+        self.started_at = Some(now);
+        self.initial_snapshot = snapshot;
+        true
+    }
+
+    fn is_active(&self) -> bool {
+        self.started_at.is_some()
+    }
+
+    fn elapsed(&self, now: Instant) -> Duration {
+        self.started_at
+            .map(|started_at| now.saturating_duration_since(started_at))
+            .unwrap_or_default()
+    }
+
+    fn take_warning(&mut self, now: Instant) -> bool {
+        if self.is_active()
+            && !self.warning_shown
+            && self.elapsed(now) >= SHUTDOWN_NOTICE_DELAY
+        {
+            self.warning_shown = true;
+            return true;
+        }
+        false
+    }
+
+    fn allow_close(&mut self) -> bool {
+        if self.close_allowed {
+            return false;
+        }
+        self.close_allowed = true;
+        true
+    }
+
+    fn workers_finished(&self, pending: &ShutdownSnapshot, file_worker_finished: bool) -> bool {
+        pending.is_empty() && file_worker_finished
+    }
+}
+
+fn log_shutdown_start(snapshot: &ShutdownSnapshot) {
+    tracing::info!(
+        pending_operations = snapshot.operations.len(),
+        "начато штатное ожидание фоновых операций"
+    );
+    for operation in &snapshot.operations {
+        match operation.kind {
+            ShutdownOperationKind::File(verb) => tracing::info!(
+                operation_id = operation.id,
+                operation_type = "file",
+                action = verb,
+                queued = ?operation.queued,
+                "ожидает завершения файловая операция"
+            ),
+            ShutdownOperationKind::Search => tracing::info!(
+                operation_id = operation.id,
+                operation_type = "search",
+                queued = ?operation.queued,
+                "ожидает завершения поиск"
+            ),
+            ShutdownOperationKind::Zip => tracing::info!(
+                operation_id = operation.id,
+                operation_type = "zip",
+                queued = ?operation.queued,
+                "ожидает завершения операция ZIP"
+            ),
+        }
+    }
+}
+
+fn log_shutdown_wait(elapsed: Duration, snapshot: &ShutdownSnapshot) {
+    tracing::warn!(
+        elapsed_ms = elapsed.as_millis(),
+        pending_operations = snapshot.operations.len(),
+        "порог ожидания shutdown превышен; приложение продолжает ждать worker-ы"
+    );
+    for operation in &snapshot.operations {
+        match operation.kind {
+            ShutdownOperationKind::File(verb) => tracing::warn!(
+                operation_id = operation.id,
+                operation_type = "file",
+                action = verb,
+                queued = ?operation.queued,
+                "файловая операция всё ещё ожидает завершения"
+            ),
+            ShutdownOperationKind::Search => tracing::warn!(
+                operation_id = operation.id,
+                operation_type = "search",
+                queued = ?operation.queued,
+                "поиск всё ещё ожидает завершения"
+            ),
+            ShutdownOperationKind::Zip => tracing::warn!(
+                operation_id = operation.id,
+                operation_type = "zip",
+                queued = ?operation.queued,
+                "операция ZIP всё ещё ожидает завершения"
+            ),
+        }
+    }
+}
+
 pub struct FileManagerApp {
     pub(crate) store: SettingsStore,
     pub(crate) i18n: I18n,
@@ -332,6 +505,7 @@ pub struct FileManagerApp {
     bg_ops_pool: crate::core::bg_ops::BgOpPool,
     bg_ops_events_rx: Receiver<crate::core::bg_ops::BgOpEvent>,
     bg_op_ui: HashMap<u64, BgOpUiTask>,
+    shutdown_bg_op_ids: HashSet<u64>,
     thumbnail_order: VecDeque<ThumbnailKey>,
     thumbnail_failed: HashSet<ThumbnailKey>,
     zip_generation: u64,
@@ -371,6 +545,8 @@ pub struct FileManagerApp {
     pub(crate) ops_evt: Receiver<OpEvent>,
     pub(crate) op_reply: Option<Sender<OpReply>>,
     ops_worker: Option<std::thread::JoinHandle<()>>,
+    shutdown: ShutdownProgress,
+    shutdown_prepared: bool,
 }
 
 impl FileManagerApp {
@@ -606,6 +782,7 @@ impl FileManagerApp {
             bg_ops_pool,
             bg_ops_events_rx,
             bg_op_ui: HashMap::new(),
+            shutdown_bg_op_ids: HashSet::new(),
             thumbnail_order: VecDeque::new(),
             thumbnail_failed: HashSet::new(),
             zip_generation: 0,
@@ -645,6 +822,8 @@ impl FileManagerApp {
             ops_evt,
             op_reply: Some(op_reply),
             ops_worker: Some(ops_worker),
+            shutdown: ShutdownProgress::default(),
+            shutdown_prepared: false,
         };
         if let Some(issue) = settings_load_issue {
             app.ops_ui.journal.push(app.t(issue.message_key()).to_owned());
@@ -777,7 +956,10 @@ impl FileManagerApp {
             })
             .collect();
         for (id, generation) in ids {
-            let _ = self.bg_ops_pool.cancel(id);
+            if self.bg_ops_pool.cancel(id) == crate::core::bg_ops::BgOpCancelOutcome::Running {
+                // Поиск уже не показывается, но shutdown должен дождаться его worker-а.
+                self.shutdown_bg_op_ids.insert(id);
+            }
             self.bg_op_ui.remove(&id);
             if let Some(tab) = self
                 .tabs
@@ -787,6 +969,184 @@ impl FileManagerApp {
                 tab.search.running = false;
             }
         }
+    }
+
+    fn pending_shutdown_snapshot(&self) -> ShutdownSnapshot {
+        let mut operations: Vec<_> = self
+            .ops_ui
+            .jobs
+            .iter()
+            .map(|job| ShutdownOperation {
+                id: job.id,
+                kind: ShutdownOperationKind::File(job.verb),
+                queued: None,
+            })
+            .collect();
+        let mut pool_ids = HashSet::new();
+        for (&id, task) in &self.bg_op_ui {
+            pool_ids.insert(id);
+            operations.push(ShutdownOperation {
+                id,
+                kind: match task.kind {
+                    BgOpUiKind::Search { .. } => ShutdownOperationKind::Search,
+                    BgOpUiKind::Zip { .. } => ShutdownOperationKind::Zip,
+                },
+                queued: Some(task.queued),
+            });
+        }
+        for &id in &self.shutdown_bg_op_ids {
+            if pool_ids.insert(id) {
+                operations.push(ShutdownOperation {
+                    id,
+                    kind: ShutdownOperationKind::Search,
+                    queued: Some(false),
+                });
+            }
+        }
+        operations.sort_by_key(|operation| operation.id);
+        ShutdownSnapshot { operations }
+    }
+
+    fn start_shutdown(&mut self) {
+        let snapshot = self.pending_shutdown_snapshot();
+        if !self.shutdown.begin(Instant::now(), snapshot.clone()) {
+            return;
+        }
+        log_shutdown_start(&snapshot);
+        self.prepare_shutdown();
+    }
+
+    fn prepare_shutdown(&mut self) {
+        if self.shutdown_prepared {
+            return;
+        }
+        self.shutdown_prepared = true;
+        self.bg_ops_pool.request_shutdown();
+
+        let queued_pool_ids: Vec<_> = self
+            .bg_op_ui
+            .iter()
+            .filter_map(|(&id, task)| task.queued.then_some(id))
+            .collect();
+        for id in queued_pool_ids {
+            if self.bg_ops_pool.cancel(id) != crate::core::bg_ops::BgOpCancelOutcome::Running {
+                self.bg_op_ui.remove(&id);
+                tracing::info!(
+                    operation_id = id,
+                    "ожидающая фоновая операция снята штатной отменой shutdown"
+                );
+            }
+        }
+
+        // Навигация остаётся вне пула, но получает штатные флаги отмены при закрытии окна.
+        for tab in &self.tabs {
+            tab.cancel.store(true, Ordering::Relaxed);
+            tab.search.cancel.store(true, Ordering::Relaxed);
+        }
+        let _ = self
+            .dir_watch_tx
+            .send(crate::core::dir_watch::DirWatchCommand::Stop);
+        // Сначала отменяем текущую и ожидающие операции, не нарушая их FIFO-порядок.
+        for job in &self.ops_ui.jobs {
+            job.cancel.store(true, Ordering::Relaxed);
+        }
+        if let Some(reply_tx) = &self.op_reply {
+            if let Some((id, _, _)) = self.ops_ui.conflict.as_ref() {
+                let _ = reply_tx.send(OpReply::Conflict {
+                    id: *id,
+                    action: crate::core::ops::ConflictAction::Cancel,
+                });
+            }
+            if let Some((id, _, _, _)) = self.ops_ui.error_q.as_ref() {
+                let _ = reply_tx.send(OpReply::Error {
+                    id: *id,
+                    action: crate::core::ops::ErrorAction::Cancel,
+                });
+            }
+        }
+        self.op_reply.take();
+        self.ops_tx.take();
+    }
+
+    fn drain_shutdown_ops(&mut self) {
+        while let Ok(event) = self.ops_evt.try_recv() {
+            match event {
+                OpEvent::Cancelled { id } => {
+                    if self.ops_ui.jobs.iter().any(|job| job.id == id) {
+                        self.ops_ui.jobs.retain(|job| job.id != id);
+                        tracing::info!(operation_id = id, "файловая операция отменена при shutdown");
+                    }
+                }
+                OpEvent::Done { id, failed } => {
+                    if self.ops_ui.jobs.iter().any(|job| job.id == id) {
+                        self.ops_ui.jobs.retain(|job| job.id != id);
+                        tracing::info!(
+                            operation_id = id,
+                            failed,
+                            "файловая операция завершилась при shutdown"
+                        );
+                    }
+                }
+                OpEvent::Progress { .. } | OpEvent::AskConflict { .. } | OpEvent::AskError { .. } => {}
+            }
+        }
+    }
+
+    fn shutdown_frame(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        close_requested: bool,
+    ) {
+        self.drain_bg_op_events();
+        self.drain_shutdown_ops();
+
+        let now = Instant::now();
+        let pending = self.pending_shutdown_snapshot();
+        let elapsed = self.shutdown.elapsed(now);
+        let file_worker_finished = self
+            .ops_worker
+            .as_ref()
+            .is_none_or(std::thread::JoinHandle::is_finished);
+        let workers_finished = self
+            .shutdown
+            .workers_finished(&pending, file_worker_finished);
+        if !workers_finished && self.shutdown.take_warning(now) {
+            log_shutdown_wait(elapsed, &pending);
+        }
+        let details = pending.summary(&self.i18n);
+        let warning_shown = self.shutdown.warning_shown;
+
+        egui::CentralPanel::default().show(ui, |ui| {
+            ui.vertical_centered(|ui| {
+                ui.add_space(32.0);
+                ui.heading(self.t("shutdown.waiting"));
+                ui.add_space(12.0);
+                ui.label(format!("{}: {details}", self.t("shutdown.pending")));
+                if warning_shown {
+                    ui.add_space(16.0);
+                    ui.separator();
+                    ui.colored_label(
+                        ui.visuals().error_fg_color,
+                        self.t("shutdown.fs_unresponsive"),
+                    );
+                    ui.label(self.t("shutdown.continue_waiting"));
+                    ui.label(self.t("shutdown.force_close_risk"));
+                }
+            });
+        });
+
+        if workers_finished && self.shutdown.allow_close() {
+            tracing::info!(
+                elapsed_ms = elapsed.as_millis(),
+                initial_operations = self.shutdown.initial_snapshot.operations.len(),
+                "операции завершились; штатные join продолжают безопасное закрытие"
+            );
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        } else if close_requested && !self.shutdown.close_allowed {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        }
+        ctx.request_repaint_after(Duration::from_millis(150));
     }
 
     fn search_bg_op_queued(&self, tab_id: u64, generation: u64) -> bool {
@@ -839,6 +1199,22 @@ impl FileManagerApp {
                     kind,
                     panicked,
                 } => {
+                    let shutdown_tracked = self.shutdown_bg_op_ids.remove(&id);
+                    if shutdown_tracked && self.shutdown.is_active() {
+                        tracing::info!(
+                            operation_id = id,
+                            operation_type = ?kind,
+                            "отменённый поиск завершился во время ожидания shutdown"
+                        );
+                    }
+                    if self.shutdown.is_active() && !shutdown_tracked {
+                        tracing::info!(
+                            operation_id = id,
+                            operation_type = ?kind,
+                            panicked,
+                            "фоновая операция завершилась при shutdown"
+                        );
+                    }
                     let Some(task) = self.bg_op_ui.remove(&id) else {
                         continue;
                     };
@@ -1493,6 +1869,7 @@ fn breadcrumb_segments(path: &Path) -> Vec<(String, PathBuf)> {
 impl eframe::App for FileManagerApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        let close_requested = ctx.input(|input| input.viewport().close_requested());
         ctx.set_theme(match self.store.settings.theme {
             Theme::System => egui::ThemePreference::System,
             Theme::Light => egui::ThemePreference::Light,
@@ -1508,6 +1885,10 @@ impl eframe::App for FileManagerApp {
             if let Err(e) = crate::platform::signal_update_started() {
                 tracing::warn!("failed to signal successful update startup: {e}");
             }
+        }
+        if self.shutdown.is_active() {
+            self.shutdown_frame(ui, &ctx, close_requested);
+            return;
         }
         self.drain_bg_op_events();
         self.drain_messages(&ctx);
@@ -1525,6 +1906,13 @@ impl eframe::App for FileManagerApp {
         self.sync_dir_watch(&ctx);
         self.schedule_disk_usage_refresh(&ctx);
         self.drain_ops_events(&ctx);
+        if close_requested {
+            self.start_shutdown();
+            if self.shutdown.is_active() {
+                self.shutdown_frame(ui, &ctx, close_requested);
+                return;
+            }
+        }
         self.handle_keys(&ctx);
         self.handle_dropped_files(&ctx);
 
@@ -1585,39 +1973,17 @@ impl eframe::App for FileManagerApp {
 
 impl Drop for FileManagerApp {
     fn drop(&mut self) {
-        self.bg_ops_pool.request_shutdown();
-        // Навигация остаётся вне пула, но получает штатные флаги отмены при закрытии окна.
-        for tab in &self.tabs {
-            tab.cancel.store(true, Ordering::Relaxed);
-            tab.search.cancel.store(true, Ordering::Relaxed);
-        }
-        let _ = self
-            .dir_watch_tx
-            .send(crate::core::dir_watch::DirWatchCommand::Stop);
-        // Сначала отменяем текущую и ожидающие операции, не нарушая их FIFO-порядок.
-        for job in &self.ops_ui.jobs {
-            job.cancel.store(true, Ordering::Relaxed);
-        }
-        if let Some(reply_tx) = &self.op_reply {
-            if let Some((id, _, _)) = self.ops_ui.conflict.as_ref() {
-                let _ = reply_tx.send(OpReply::Conflict {
-                    id: *id,
-                    action: crate::core::ops::ConflictAction::Cancel,
-                });
-            }
-            if let Some((id, _, _, _)) = self.ops_ui.error_q.as_ref() {
-                let _ = reply_tx.send(OpReply::Error {
-                    id: *id,
-                    action: crate::core::ops::ErrorAction::Cancel,
-                });
-            }
-        }
-        self.op_reply.take();
-        self.ops_tx.take();
+        self.prepare_shutdown();
         if let Some(worker) = self.ops_worker.take() {
             let _ = worker.join();
         }
         self.bg_ops_pool.join_workers();
+        if self.shutdown.is_active() {
+            tracing::info!(
+                elapsed_ms = self.shutdown.elapsed(Instant::now()).as_millis(),
+                "join файлового worker-а и пула завершён; приложение штатно выходит"
+            );
+        }
     }
 }
 
