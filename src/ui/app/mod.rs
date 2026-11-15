@@ -169,6 +169,7 @@ pub struct FileManagerApp {
     dirs: AppDirs,
     show_about: bool,
     about_viewport_placed: bool,
+    show_hotkeys: bool,
     show_settings: bool,
     settings_viewport_placed: bool,
     /// Активная категория окна настроек. На сохранение значений не влияет.
@@ -450,6 +451,7 @@ impl FileManagerApp {
             dirs,
             show_about: false,
             about_viewport_placed: false,
+            show_hotkeys: false,
             show_settings: false,
             settings_viewport_placed: false,
             settings_category: dialogs::SettingsCategory::default(),
@@ -1423,6 +1425,7 @@ impl eframe::App for FileManagerApp {
         self.show_detached_tab_windows(&ctx);
         self.finish_thumbnail_frame();
         self.about_window(&ctx);
+        self.hotkeys_window(&ctx);
         self.settings_window(&ctx);
         self.secure_trash_window(&ctx);
         self.trash_confirm_windows(&ctx);

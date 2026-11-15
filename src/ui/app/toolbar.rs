@@ -77,6 +77,30 @@ impl FileManagerApp {
             }
 
             ui.menu_button(self.t("menu.help").to_owned(), |ui| {
+                if ui.button(self.t("help.hotkeys").to_owned()).clicked() {
+                    self.show_hotkeys = true;
+                    ui.close();
+                }
+                if ui
+                    .add_enabled(
+                        !self.log_export_busy,
+                        egui::Button::new(self.t("help.export_logs").to_owned()),
+                    )
+                    .clicked()
+                {
+                    let ctx = ui.ctx().clone();
+                    self.show_about = true;
+                    self.export_logs_from_about(&ctx);
+                    ui.close();
+                }
+                if ui
+                    .button(self.t("help.reset_settings").to_owned())
+                    .clicked()
+                {
+                    self.request_settings_reset();
+                    ui.close();
+                }
+                ui.separator();
                 if ui.button(self.t("help.about").to_owned()).clicked() {
                     self.show_about = true;
                     ui.close();
