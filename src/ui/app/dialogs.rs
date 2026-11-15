@@ -79,14 +79,27 @@ fn settings_category_column_width(ui: &egui::Ui, labels: &[String]) -> f32 {
     text_width + ui.spacing().button_padding.x * 2.0 + style::SPACE_MD
 }
 
+fn about_build_profile_key() -> &'static str {
+    if cfg!(debug_assertions) {
+        "about.profile.debug"
+    } else {
+        "about.profile.release"
+    }
+}
+
 impl FileManagerApp {
     pub(super) fn about_window(&mut self, ctx: &egui::Context) {
         if !self.show_about {
             return;
         }
         let title = self.t("about.title").to_owned();
+        let version_label = self
+            .t("about.version")
+            .replace("{version}", env!("CARGO_PKG_VERSION"));
         let config_label = self.t("label.config_dir").to_owned();
         let log_label = self.t("label.log_dir").to_owned();
+        let build_label = self.t("about.build_profile").to_owned();
+        let build_profile = self.t(about_build_profile_key()).to_owned();
         let export_label = self.t("logs.export").to_owned();
         let export_hint = self.t("logs.export_hint").to_owned();
         let viewport_id = egui::ViewportId::from_hash_of("filemanager-about");
@@ -106,95 +119,120 @@ impl FileManagerApp {
                 return;
             }
             egui::CentralPanel::default().show(viewport_ui, |ui| {
-                ui.heading(format!("FileManager v{}", env!("CARGO_PKG_VERSION")));
-                ui.label("Rust + egui/eframe");
-                ui.add_space(style::SPACE_SM);
-                ui.label(format!(
-                    "{}: {}",
-                    config_label,
-                    self.dirs.config_dir.display()
-                ));
-                ui.horizontal(|ui| {
-                    ui.label(format!("{}: {}", log_label, self.dirs.log_dir.display()));
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    ui.heading(version_label.clone());
+                    ui.label(format!("{build_label}: {build_profile}"));
+                    ui.add(egui::Label::new(self.t("about.description")).wrap());
+                    ui.add_space(style::SPACE_SM);
+                    ui.add(
+                        egui::Label::new(format!(
+                            "{}: {}",
+                            config_label,
+                            self.dirs.config_dir.display()
+                        ))
+                        .wrap(),
+                    );
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::Label::new(format!(
+                                "{}: {}",
+                                log_label,
+                                self.dirs.log_dir.display()
+                            ))
+                            .wrap(),
+                        );
+                        // Экспорт остаётся единственным входом в механизм 3.2.
+                        if ui
+                            .add_enabled(
+                                !self.log_export_busy,
+                                egui::Button::new(export_label.clone()),
+                            )
+                            .clicked()
+                        {
+                            export_requested = true;
+                        }
+                    });
+                    ui.add(egui::Label::new(&export_hint).wrap());
+                    if let Some(status) = &self.log_export_status {
+                        ui.add(egui::Label::new(status.as_str()).wrap());
+                    }
+                    ui.add_space(style::SPACE_SM);
+                    let can_check = !self.update_busy
+                        && self.pending_update.is_none()
+                        && self.update_ready.is_none();
                     if ui
                         .add_enabled(
-                            !self.log_export_busy,
-                            egui::Button::new(export_label.clone()),
+                            can_check,
+                            egui::Button::new(self.t("update.check").to_owned()),
                         )
                         .clicked()
                     {
-                        export_requested = true;
+                        self.update_status = None;
+                        self.update_err = None;
+                        self.spawn_update_check(&viewport_ctx);
+                    }
+                    if let Some(manifest) = self.pending_update.clone() {
+                        ui.add_space(style::SPACE_SM);
+                        ui.add(
+                            egui::Label::new(
+                                self.t("update.found").replace("{v}", &manifest.version),
+                            )
+                            .wrap(),
+                        );
+                        if self.update_ready.is_some() {
+                            ui.horizontal(|ui| {
+                                ui.label(self.t("update.ready").to_owned());
+                                if ui.button(self.t("update.install").to_owned()).clicked() {
+                                    self.request_update_install(&viewport_ctx);
+                                }
+                                if self.update_restart_offer
+                                    && ui.button(self.t("update.restart_now").to_owned()).clicked()
+                                {
+                                    self.arm_update_restart(&viewport_ctx);
+                                }
+                            });
+                        } else {
+                            ui.horizontal(|ui| {
+                                if ui
+                                    .add_enabled(
+                                        !self.update_busy,
+                                        egui::Button::new(self.t("update.now").to_owned()),
+                                    )
+                                    .clicked()
+                                {
+                                    self.start_update_download(&viewport_ctx);
+                                }
+                                if !self.update_busy
+                                    && ui.button(self.t("update.later").to_owned()).clicked()
+                                {
+                                    self.pending_update = None;
+                                    self.update_downloaded = 0;
+                                    self.update_total = 0;
+                                    self.update_status = None;
+                                    self.update_err = None;
+                                }
+                            });
+                        }
+                    }
+                    if let Some(status) = &self.update_status {
+                        ui.add(egui::Label::new(status.as_str()).wrap());
+                    }
+                    if self.update_busy
+                        || (self.update_err.is_some() && self.update_total > 0)
+                        || self.update_ready.is_some()
+                    {
+                        update_progress_row(ui, self.update_downloaded, self.update_total);
+                    }
+                    if let Some(error) = &self.update_err {
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(error.as_str())
+                                    .color(ui.visuals().error_fg_color),
+                            )
+                            .wrap(),
+                        );
                     }
                 });
-                ui.add(egui::Label::new(&export_hint).wrap());
-                if let Some(status) = &self.log_export_status {
-                    ui.label(status);
-                }
-                ui.add_space(style::SPACE_SM);
-                let can_check = !self.update_busy
-                    && self.pending_update.is_none()
-                    && self.update_ready.is_none();
-                if ui
-                    .add_enabled(
-                        can_check,
-                        egui::Button::new(self.t("update.check").to_owned()),
-                    )
-                    .clicked()
-                {
-                    self.update_status = None;
-                    self.update_err = None;
-                    self.spawn_update_check(&viewport_ctx);
-                }
-                if let Some(manifest) = self.pending_update.clone() {
-                    ui.add_space(style::SPACE_SM);
-                    ui.label(self.t("update.found").replace("{v}", &manifest.version));
-                    if self.update_ready.is_some() {
-                        ui.horizontal(|ui| {
-                            ui.label(self.t("update.ready").to_owned());
-                            if ui.button(self.t("update.install").to_owned()).clicked() {
-                                self.request_update_install(&viewport_ctx);
-                            }
-                            if self.update_restart_offer
-                                && ui.button(self.t("update.restart_now").to_owned()).clicked()
-                            {
-                                self.arm_update_restart(&viewport_ctx);
-                            }
-                        });
-                    } else {
-                        ui.horizontal(|ui| {
-                            if ui
-                                .add_enabled(
-                                    !self.update_busy,
-                                    egui::Button::new(self.t("update.now").to_owned()),
-                                )
-                                .clicked()
-                            {
-                                self.start_update_download(&viewport_ctx);
-                            }
-                            if !self.update_busy
-                                && ui.button(self.t("update.later").to_owned()).clicked()
-                            {
-                                self.pending_update = None;
-                                self.update_downloaded = 0;
-                                self.update_total = 0;
-                                self.update_status = None;
-                                self.update_err = None;
-                            }
-                        });
-                    }
-                }
-                if let Some(status) = &self.update_status {
-                    ui.label(status);
-                }
-                if self.update_busy
-                    || (self.update_err.is_some() && self.update_total > 0)
-                    || self.update_ready.is_some()
-                {
-                    update_progress_row(ui, self.update_downloaded, self.update_total);
-                }
-                if let Some(error) = &self.update_err {
-                    ui.colored_label(ui.visuals().error_fg_color, error);
-                }
             });
         });
         self.about_viewport_placed = !close_requested;
@@ -1201,13 +1239,24 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        SettingsCategory, log_export_error_key, refresh_after_attribute_change,
+        SettingsCategory, about_build_profile_key, log_export_error_key,
+        refresh_after_attribute_change,
         selected_entry_for_details, settings_category_column_width,
         settings_reset_load_warning, settings_reset_requires_restart,
     };
     use crate::core::dir_cache::DirCache;
     use crate::core::fs::FileEntry;
     use crate::ui::tabs::{SelectionKey, Tab};
+
+    fn about_window_source() -> &'static str {
+        let source = include_str!("dialogs.rs");
+        let start = source.find("pub(super) fn about_window").unwrap();
+        let end = source[start..]
+            .find("\n    pub(super) fn export_logs_from_about")
+            .unwrap()
+            + start;
+        &source[start..end]
+    }
 
     fn entry(name: &str) -> FileEntry {
         FileEntry {
@@ -1636,5 +1685,206 @@ mod tests {
         .into_iter()
         .collect();
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn about_version_from_single_source_not_hardcoded() {
+        let about = about_window_source();
+        assert!(about.contains("env!(\"CARGO_PKG_VERSION\")"));
+        assert_eq!(about.matches("CARGO_PKG_VERSION").count(), 1);
+        assert!(about.contains(".t(\"about.version\")"));
+        assert!(!about.contains("0.8.0"));
+    }
+
+    #[test]
+    fn about_build_profile_reflects_actual_configuration() {
+        let expected = if cfg!(debug_assertions) {
+            "about.profile.debug"
+        } else {
+            "about.profile.release"
+        };
+        assert_eq!(about_build_profile_key(), expected);
+        assert!(about_window_source().contains("about_build_profile_key()"));
+
+        for (json, profile_key) in [
+            (
+                include_str!("../../../i18n/en.json"),
+                "about.profile.debug",
+            ),
+            (
+                include_str!("../../../i18n/ru.json"),
+                "about.profile.release",
+            ),
+        ] {
+            let labels: serde_json::Value = serde_json::from_str(json).unwrap();
+            assert!(labels[profile_key].as_str().is_some());
+            assert!(labels["about.build_profile"].as_str().is_some());
+        }
+    }
+
+    #[test]
+    fn about_commit_hash_shown_only_if_really_available() {
+        let about = about_window_source();
+        let build_script = include_str!("../../../build.rs");
+        let manifest = include_str!("../../../Cargo.toml");
+        assert!(!about.contains("commit"));
+        assert!(!about.contains("BUILD_NUMBER"));
+        assert!(!build_script.contains("GIT_COMMIT"));
+        assert!(!build_script.contains("VERGEN"));
+        assert!(!build_script.contains("git describe"));
+        assert!(!build_script.contains("git rev-parse"));
+        assert!(!manifest.contains("vergen"));
+    }
+
+    #[test]
+    fn about_description_matches_real_capabilities_no_false_promises() {
+        let en: serde_json::Value =
+            serde_json::from_str(include_str!("../../../i18n/en.json")).unwrap();
+        let ru: serde_json::Value =
+            serde_json::from_str(include_str!("../../../i18n/ru.json")).unwrap();
+        let description_en = en["about.description"].as_str().unwrap().to_lowercase();
+        let description_ru = ru["about.description"].as_str().unwrap().to_lowercase();
+        assert!(description_en.contains("windows 11"));
+        assert!(description_en.contains("protected trash"));
+        assert!(description_en.contains("properties"));
+        assert!(description_ru.contains("windows 11"));
+        assert!(description_ru.contains("защищённую корзину"));
+        assert!(description_ru.contains("свойства файлов"));
+        for forbidden in [
+            "secure erase",
+            "cryptographic destruction",
+            "cross-platform",
+            "ssd",
+        ] {
+            assert!(!description_en.contains(forbidden));
+        }
+        for forbidden in ["криптограф", "гарантирован", "кроссплатформ", "ssd"] {
+            assert!(!description_ru.contains(forbidden));
+        }
+    }
+
+    #[test]
+    fn about_update_check_reuses_spawn_update_check_no_second_system() {
+        let about = about_window_source();
+        let dialogs = include_str!("dialogs.rs");
+        assert_eq!(about.matches("self.spawn_update_check(&viewport_ctx)").count(), 1);
+        assert!(!about.contains("core::update::check_latest"));
+        let start = dialogs
+            .find("fn spawn_update_check(&self, ctx: &egui::Context)")
+            .unwrap();
+        let end = dialogs[start..]
+            .find("\n    fn start_update_download")
+            .unwrap()
+            + start;
+        let spawn = &dialogs[start..end];
+        assert!(spawn.contains("thread::spawn"));
+        assert!(spawn.contains("crate::core::update::check_latest()"));
+        assert!(spawn.contains("WorkerMsg::UpdateLatest"));
+        assert!(spawn.contains("ctx.request_repaint()"));
+    }
+
+    #[test]
+    fn about_update_result_user_facing_no_raw_error() {
+        let app = include_str!("mod.rs");
+        let start = app.find("WorkerMsg::UpdateFailed(e) => {").unwrap();
+        let end = app[start..].find("\n                }").unwrap() + start;
+        let handler = &app[start..end];
+        assert!(handler.contains("tracing::warn!(error = %e"));
+        assert!(handler.contains("self.t(\"update.failed\")"));
+        assert!(!handler.contains("self.update_err = Some(e)"));
+
+        for json in [
+            include_str!("../../../i18n/en.json"),
+            include_str!("../../../i18n/ru.json"),
+        ] {
+            let labels: serde_json::Value = serde_json::from_str(json).unwrap();
+            let failed = labels["update.failed"].as_str().unwrap();
+            let latest = labels["update.latest"].as_str().unwrap();
+            let found = labels["update.found"].as_str().unwrap();
+            assert_ne!(failed, "update.failed");
+            assert_ne!(latest, "update.latest");
+            assert_ne!(found, "update.found");
+            assert!(!failed.contains("HRESULT"));
+            assert!(!failed.contains("stack trace"));
+        }
+    }
+
+    #[test]
+    fn about_export_entry_not_duplicated() {
+        let about = about_window_source();
+        assert_eq!(about.matches("egui::Button::new(export_label.clone())").count(), 1);
+        assert_eq!(about.matches("export_requested = true").count(), 1);
+        assert_eq!(about.matches("self.export_logs_from_about(ctx)").count(), 1);
+        assert!(about.contains("let export_label = self.t(\"logs.export\")"));
+    }
+
+    #[test]
+    fn about_window_single_instance_existing_style_localized() {
+        let source = include_str!("dialogs.rs");
+        let about = about_window_source();
+        assert_eq!(
+            source
+                .matches("ViewportId::from_hash_of(\"filemanager-about\")")
+                .count(),
+            1
+        );
+        assert!(about.contains("floating_dialog_viewport("));
+        assert!(about.contains("show_viewport_immediate("));
+        assert!(about.contains("egui::ScrollArea::vertical()"));
+        assert!(about.contains("about.description"));
+
+        for json in [
+            include_str!("../../../i18n/en.json"),
+            include_str!("../../../i18n/ru.json"),
+        ] {
+            let labels: serde_json::Value = serde_json::from_str(json).unwrap();
+            for key in [
+                "about.version",
+                "about.description",
+                "about.build_profile",
+                "about.profile.debug",
+                "about.profile.release",
+            ] {
+                let value = labels[key].as_str().unwrap();
+                assert_ne!(value, key, "untranslated about string: {key}");
+            }
+        }
+    }
+
+    #[test]
+    fn domain3_1_2_3_4_not_regressed() {
+        let app = include_str!("mod.rs");
+        let dialogs = include_str!("dialogs.rs");
+        let input = include_str!("input.rs");
+        let toolbar = include_str!("toolbar.rs");
+        assert!(app.contains("tracing::warn!(error = %e, \"update operation failed\")"));
+        assert!(app.contains("self.t(\"update.failed\")"));
+        assert!(dialogs.contains("crate::core::log_export::export_logs("));
+        assert!(dialogs.contains("self.store.settings.reset_behavior_preserving_user_data()"));
+        assert!(dialogs.contains("self.persist_checked().is_ok()"));
+        assert!(input.contains("const HOTKEY_BINDINGS"));
+        assert!(dialogs.contains("pub(super) fn hotkeys_window"));
+        assert!(toolbar.contains("self.request_settings_reset()"));
+        assert!(toolbar.contains("self.show_about = true"));
+    }
+
+    #[test]
+    fn domain1_2_not_regressed() {
+        let list = include_str!("../list/mod.rs");
+        let cache = include_str!("../../core/dir_cache.rs");
+        let watch = include_str!("../../core/dir_watch.rs");
+        let bg_ops = include_str!("../../core/bg_ops.rs");
+        let tree = include_str!("../tree.rs");
+        let props = include_str!("../props.rs");
+        let zip_ui = include_str!("archive.rs");
+        let zip_platform = include_str!("../../platform/windows/zip/mod.rs");
+        assert!(list.contains("fn stale_virtual_row_index_is_ignored_safely"));
+        assert!(cache.contains("fn cache_memory_limit_evicts_old_dirs"));
+        assert!(watch.contains("fn notify_invalidates_dir_cache"));
+        assert!(bg_ops.contains("fn bg_ops_limit_uses_the_configured_safe_range"));
+        assert!(tree.contains("fn lazy_child_load_is_requested_once_until_it_is_settled"));
+        assert!(props.contains("fn props_window_alt_enter_reuses_existing_dialog"));
+        assert!(zip_ui.contains("fn zip_multi_member_publish_failure_reports_partial_output"));
+        assert!(zip_platform.contains("fn cancelled_zip_work_does_not_leave_a_final_output"));
     }
 }
