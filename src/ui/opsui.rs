@@ -184,7 +184,6 @@ fn creation_operation(parent: &std::path::Path, input: &str, is_dir: bool) -> Op
 
 pub struct JobUi {
     pub id: u64,
-    pub label: String,
     pub verb: &'static str,
     pub stage: OpStage,
     pub file: PathBuf,
@@ -193,7 +192,6 @@ pub struct JobUi {
     pub done_f: usize,
     pub total_f: usize,
     pub cancel: Arc<AtomicBool>,
-    pub failed: usize,
     /// Папки, чей кэш списка надо сбросить, когда операция закончится.
     pub touched_dirs: Vec<PathBuf>,
 }
@@ -242,7 +240,6 @@ impl FileManagerApp {
         }
         self.ops_ui.jobs.push(JobUi {
             id,
-            label: String::new(),
             verb,
             stage: OpStage::Scanning,
             file: PathBuf::new(),
@@ -251,7 +248,6 @@ impl FileManagerApp {
             done_f: 0,
             total_f: 0,
             cancel: job.cancel,
-            failed: 0,
             touched_dirs,
         });
     }

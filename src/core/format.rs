@@ -37,8 +37,8 @@ pub fn format_datetime_parts(
     }
 }
 
-/// Formats a Unix timestamp (seconds since epoch) as `YYYY-MM-DD HH:MM`
-/// in UTC. Used by callers that explicitly need the English/default format.
+/// Тестовый адаптер для проверки формата UTC по умолчанию.
+#[cfg(test)]
 pub fn format_unix_utc(secs: u64) -> String {
     format_unix_utc_for_language(secs, Language::En)
 }
