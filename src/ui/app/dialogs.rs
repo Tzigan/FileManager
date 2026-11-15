@@ -159,6 +159,7 @@ impl FileManagerApp {
                     ui.add_space(style::SPACE_SM);
                     let can_check = !self.update_busy
                         && !self.update_check.busy
+                        && !self.update_check_inflight.load(Ordering::Acquire)
                         && self.pending_update.is_none()
                         && self.update_ready.is_none();
                     if ui
@@ -168,9 +169,13 @@ impl FileManagerApp {
                         )
                         .clicked()
                     {
-                        if let Some(request_id) = self.update_check.begin_manual() {
+                        if let Some(request_id) = self
+                            .update_check
+                            .begin_manual(&self.update_check_inflight, Instant::now())
+                        {
                             self.update_status = Some(self.t("update.checking").to_owned());
                             self.update_err = None;
+                            ctx.request_repaint_after(MANUAL_UPDATE_CHECK_TIMEOUT);
                             self.spawn_update_check(&viewport_ctx, request_id);
                         }
                     }
@@ -219,6 +224,19 @@ impl FileManagerApp {
                     }
                     if let Some(status) = &self.update_status {
                         ui.add(egui::Label::new(status.as_str()).wrap());
+                    }
+                    if !self.update_check.busy
+                        && self.update_check_inflight.load(Ordering::Acquire)
+                        && self.update_status.is_none()
+                    {
+                        if self.update_err.is_none()
+                            && self.update_check.timed_out_request_id.is_some()
+                        {
+                            ui.add(
+                                egui::Label::new(self.t("update.check_timeout").to_owned()).wrap(),
+                            );
+                        }
+                        ui.add(egui::Label::new(self.t("update.previous_check").to_owned()).wrap());
                     }
                     if self.update_busy
                         || (self.update_err.is_some() && self.update_total > 0)
@@ -826,7 +844,9 @@ impl FileManagerApp {
     fn spawn_update_check(&self, ctx: &egui::Context, request_id: u64) {
         let tx = self.msg_tx.clone();
         let ctx = ctx.clone();
+        let in_flight = self.update_check_inflight.clone();
         thread::spawn(move || {
+            let in_flight_guard = UpdateCheckInFlightGuard(in_flight);
             let msg = match crate::core::update::check_latest() {
                 Ok(manifest)
                     if crate::core::update::version_newer(
@@ -845,6 +865,7 @@ impl FileManagerApp {
                     error: e.to_string(),
                 },
             };
+            drop(in_flight_guard);
             let _ = tx.send(msg);
             ctx.request_repaint();
         });
@@ -1834,6 +1855,14 @@ mod tests {
             assert_ne!(found, "update.found");
             let checking = labels["update.checking"].as_str().unwrap();
             assert_ne!(checking, "update.checking");
+            assert_ne!(
+                labels["update.check_timeout"].as_str().unwrap(),
+                "update.check_timeout"
+            );
+            assert_ne!(
+                labels["update.previous_check"].as_str().unwrap(),
+                "update.previous_check"
+            );
             assert!(!failed.contains("HRESULT"));
             assert!(!failed.contains("stack trace"));
         }

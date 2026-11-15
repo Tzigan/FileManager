@@ -47,21 +47,31 @@ const DISK_USAGE_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 pub(crate) const THUMBNAIL_QUEUE_CAPACITY: usize = 24;
 /// Ноль зарезервирован за автопроверкой при запуске.
 const STARTUP_UPDATE_CHECK_ID: u64 = 0;
+/// Завершает ожидание интерфейса, не прерывая сетевой поток.
+const MANUAL_UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Отбрасывает поздний ответ, если проверка About уже закрыта или заменена новой.
 #[derive(Default)]
 struct UpdateCheckState {
     generation: u64,
     busy: bool,
+    deadline: Option<(u64, Instant)>,
+    timed_out_request_id: Option<u64>,
 }
 
 impl UpdateCheckState {
-    fn begin_manual(&mut self) -> Option<u64> {
-        if self.busy {
+    fn begin_manual(&mut self, in_flight: &AtomicBool, now: Instant) -> Option<u64> {
+        if self.busy
+            || in_flight
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+        {
             return None;
         }
         self.generation = self.generation.wrapping_add(1).max(1);
         self.busy = true;
+        self.deadline = Some((self.generation, now + MANUAL_UPDATE_CHECK_TIMEOUT));
+        self.timed_out_request_id = None;
         Some(self.generation)
     }
 
@@ -74,13 +84,53 @@ impl UpdateCheckState {
             return false;
         }
         self.busy = false;
+        self.deadline = None;
         true
+    }
+
+    fn expire(&mut self, now: Instant) -> Option<(u64, bool)> {
+        let (request_id, deadline) = self.deadline?;
+        if now < deadline {
+            return None;
+        }
+        self.deadline = None;
+        self.timed_out_request_id = Some(request_id);
+        let was_current = self.busy && self.generation == request_id;
+        if was_current {
+            self.generation = self.generation.wrapping_add(1).max(1);
+            self.busy = false;
+        }
+        Some((request_id, was_current))
+    }
+
+    fn worker_finished(&mut self, request_id: u64) {
+        if self
+            .deadline
+            .is_some_and(|(active_id, _)| active_id == request_id)
+        {
+            self.deadline = None;
+        }
+        if self.timed_out_request_id == Some(request_id) {
+            self.timed_out_request_id = None;
+        }
     }
 
     fn close_about(&mut self) {
         // Ответ, пришедший после закрытия, не должен менять состояние следующего окна.
-        self.generation = self.generation.wrapping_add(1).max(1);
+        // Без ручной проверки поколение 0 остаётся актуальным для автопроверки приложения.
+        if self.generation != STARTUP_UPDATE_CHECK_ID {
+            self.generation = self.generation.wrapping_add(1).max(1);
+        }
         self.busy = false;
+    }
+}
+
+/// Освобождает слот после фактического завершения ручной проверки.
+struct UpdateCheckInFlightGuard(Arc<AtomicBool>);
+
+impl Drop for UpdateCheckInFlightGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
     }
 }
 
@@ -233,6 +283,7 @@ pub struct FileManagerApp {
     pending_update: Option<UpdateManifest>,
     update_busy: bool,
     update_check: UpdateCheckState,
+    update_check_inflight: Arc<AtomicBool>,
     update_downloaded: u64,
     update_total: u64,
     update_ready: Option<PathBuf>,
@@ -517,6 +568,7 @@ impl FileManagerApp {
             pending_update: None,
             update_busy: false,
             update_check: UpdateCheckState::default(),
+            update_check_inflight: Arc::new(AtomicBool::new(false)),
             update_downloaded: 0,
             update_total: 0,
             update_ready: None,
@@ -1173,6 +1225,7 @@ impl FileManagerApp {
                     request_id,
                     manifest,
                 } => {
+                    self.update_check.worker_finished(request_id);
                     if !self
                         .update_check
                         .accept_result(request_id, self.show_about)
@@ -1202,6 +1255,7 @@ impl FileManagerApp {
                     ctx.request_repaint();
                 }
                 WorkerMsg::UpdateLatest { request_id } => {
+                    self.update_check.worker_finished(request_id);
                     if !self
                         .update_check
                         .accept_result(request_id, self.show_about)
@@ -1219,6 +1273,7 @@ impl FileManagerApp {
                 }
                 WorkerMsg::UpdateFailed { check_id, error } => {
                     if let Some(request_id) = check_id {
+                        self.update_check.worker_finished(request_id);
                         if !self
                             .update_check
                             .accept_result(request_id, self.show_about)
@@ -1456,6 +1511,16 @@ impl eframe::App for FileManagerApp {
         }
         self.drain_bg_op_events();
         self.drain_messages(&ctx);
+        if let Some((request_id, was_current)) = self.update_check.expire(Instant::now()) {
+            tracing::warn!(request_id, "manual update check timed out");
+            if was_current && self.show_about {
+                self.update_status = None;
+                self.update_err = Some(self.t("update.check_timeout").to_owned());
+            }
+        }
+        if let Some((_, deadline)) = self.update_check.deadline {
+            ctx.request_repaint_after(deadline.saturating_duration_since(Instant::now()));
+        }
         self.sync_entry_details(&ctx);
         self.sync_dir_watch(&ctx);
         self.schedule_disk_usage_refresh(&ctx);

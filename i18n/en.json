@@ -363,6 +363,8 @@
   "update.downloading": "Downloading update...",
   "update.check": "Check for updates",
   "update.checking": "Checking for updates...",
+  "update.check_timeout": "The update check timed out.",
+  "update.previous_check": "A previous update check is still running. Retrying is available when it finishes.",
   "update.latest": "You are on the latest version",
   "update.ready": "Ready to install",
   "update.install": "Install",

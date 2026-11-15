@@ -1,10 +1,13 @@
 //! Тесты расположения вкладок, навигации и окон.
 use super::{
-    PreviewState, breadcrumb_segments, configure_tab_scroll_style, dialogs, dropped_paths,
+    MANUAL_UPDATE_CHECK_TIMEOUT, PreviewState, STARTUP_UPDATE_CHECK_ID, UpdateCheckState,
+    breadcrumb_segments, configure_tab_scroll_style, dialogs, dropped_paths,
     floating_dialog_viewport, parse_archive_address, persisted_tab_path, tab_close_button_hovered,
-    tab_scroll_source, tab_strip_content_margin, UpdateCheckState, STARTUP_UPDATE_CHECK_ID,
+    tab_scroll_source, tab_strip_content_margin,
 };
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 #[derive(Debug)]
 struct MockDrop(PathBuf);
@@ -41,28 +44,31 @@ fn update_install_respects_auto_restart_and_busy_work() {
 #[test]
 fn update_check_result_ignores_stale_response_after_about_close() {
     let mut state = UpdateCheckState::default();
-    let request_id = state.begin_manual().unwrap();
+    let in_flight = AtomicBool::new(false);
+    let request_id = state.begin_manual(&in_flight, Instant::now()).unwrap();
 
     state.close_about();
 
     assert!(!state.accept_result(request_id, false));
     assert!(!state.accept_result(request_id, true));
     assert!(!state.busy);
+    assert!(state.deadline.is_some());
+    assert!(in_flight.load(Ordering::Acquire));
 
-    let mut startup_check = UpdateCheckState::default();
-    startup_check.close_about();
-    assert!(!startup_check.accept_result(STARTUP_UPDATE_CHECK_ID, false));
-    assert!(!startup_check.accept_result(STARTUP_UPDATE_CHECK_ID, true));
+    state.worker_finished(request_id);
+    in_flight.store(false, Ordering::Release);
 }
 
 #[test]
 fn manual_update_check_supersedes_startup_auto_check() {
     let mut state = UpdateCheckState::default();
-    let manual_id = state.begin_manual().unwrap();
+    let in_flight = AtomicBool::new(false);
+    let manual_id = state.begin_manual(&in_flight, Instant::now()).unwrap();
 
     assert_ne!(manual_id, STARTUP_UPDATE_CHECK_ID);
     assert!(!state.accept_result(STARTUP_UPDATE_CHECK_ID, true));
     assert!(state.busy);
+    state.worker_finished(manual_id);
     assert!(state.accept_result(manual_id, true));
     assert!(!state.busy);
 
@@ -93,21 +99,25 @@ fn manual_update_check_supersedes_startup_auto_check() {
 #[test]
 fn repeated_update_clicks_do_not_spawn_parallel_checks_or_break_status() {
     let mut state = UpdateCheckState::default();
-    let active_id = state.begin_manual().unwrap();
+    let in_flight = AtomicBool::new(false);
+    let now = Instant::now();
+    let active_id = state.begin_manual(&in_flight, now).unwrap();
 
-    assert_eq!(state.begin_manual(), None);
+    assert_eq!(state.begin_manual(&in_flight, now), None);
     assert_eq!(state.generation, active_id);
     assert!(state.busy);
+    assert!(in_flight.load(Ordering::Acquire));
     let about = include_str!("dialogs.rs");
     assert!(about.contains("&& !self.update_check.busy"));
-    assert!(about.contains("self.update_check.begin_manual()"));
+    assert!(about.contains(".begin_manual(&self.update_check_inflight, Instant::now())"));
     assert!(about.contains("self.spawn_update_check(&viewport_ctx, request_id)"));
 }
 
 #[test]
 fn reopening_about_does_not_show_stale_update_result() {
     let mut state = UpdateCheckState::default();
-    let old_request_id = state.begin_manual().unwrap();
+    let in_flight = AtomicBool::new(false);
+    let old_request_id = state.begin_manual(&in_flight, Instant::now()).unwrap();
 
     state.close_about();
 
@@ -121,6 +131,112 @@ fn reopening_about_does_not_show_stale_update_result() {
     assert!(close.contains("self.update_check.close_about()"));
     assert!(close.contains("self.update_status = None"));
     assert!(close.contains("self.update_err = None"));
+}
+
+#[test]
+fn startup_auto_update_result_preserved_or_explicitly_cancelled_by_about_close() {
+    let mut state = UpdateCheckState::default();
+    state.close_about();
+
+    assert!(state.accept_result(STARTUP_UPDATE_CHECK_ID, false));
+
+    let app = include_str!("mod.rs");
+    assert!(app.contains("request_id: STARTUP_UPDATE_CHECK_ID"));
+    let dialogs = include_str!("dialogs.rs");
+    let close_start = dialogs.find("if close_requested {").unwrap();
+    let close_end = dialogs[close_start..].find("\n        }").unwrap() + close_start;
+    let close = &dialogs[close_start..close_end];
+    assert!(!close.contains("self.pending_update = None"));
+}
+
+#[test]
+fn about_close_clears_manual_display_not_global_auto_state_if_expected() {
+    let mut state = UpdateCheckState::default();
+    let in_flight = AtomicBool::new(false);
+    let manual_id = state.begin_manual(&in_flight, Instant::now()).unwrap();
+
+    state.close_about();
+
+    assert!(!state.busy);
+    assert_ne!(state.generation, manual_id);
+    assert!(!state.accept_result(manual_id, true));
+    assert!(!state.accept_result(STARTUP_UPDATE_CHECK_ID, false));
+
+    let dialogs = include_str!("dialogs.rs");
+    let close_start = dialogs.find("if close_requested {").unwrap();
+    let close_end = dialogs[close_start..].find("\n        }").unwrap() + close_start;
+    let close = &dialogs[close_start..close_end];
+    assert!(close.contains("self.update_status = None"));
+    assert!(close.contains("self.update_err = None"));
+    assert!(!close.contains("self.pending_update = None"));
+}
+
+#[test]
+fn manual_update_check_has_final_timeout_or_failure_not_stuck_checking() {
+    let mut state = UpdateCheckState::default();
+    let in_flight = AtomicBool::new(false);
+    let started = Instant::now();
+    let request_id = state.begin_manual(&in_flight, started).unwrap();
+
+    assert_eq!(
+        state.expire(started + MANUAL_UPDATE_CHECK_TIMEOUT + Duration::from_millis(1)),
+        Some((request_id, true))
+    );
+    assert!(!state.busy);
+    assert!(!state.accept_result(request_id, true));
+    assert!(in_flight.load(Ordering::Acquire));
+
+    let app = include_str!("mod.rs");
+    assert!(app.contains("self.update_check.expire(Instant::now())"));
+    assert!(
+        app.contains(
+            "ctx.request_repaint_after(deadline.saturating_duration_since(Instant::now()))"
+        )
+    );
+    assert!(app.contains("self.t(\"update.check_timeout\")"));
+    assert!(
+        include_str!("dialogs.rs")
+            .contains("ctx.request_repaint_after(MANUAL_UPDATE_CHECK_TIMEOUT)")
+    );
+}
+
+#[test]
+fn rapid_about_reopen_does_not_spawn_unbounded_update_requests() {
+    let mut state = UpdateCheckState::default();
+    let in_flight = AtomicBool::new(false);
+    let now = Instant::now();
+    let first_id = state.begin_manual(&in_flight, now).unwrap();
+
+    state.close_about();
+    assert_eq!(
+        state.begin_manual(&in_flight, now + Duration::from_secs(1)),
+        None
+    );
+    assert!(in_flight.load(Ordering::Acquire));
+
+    state.worker_finished(first_id);
+    in_flight.store(false, Ordering::Release);
+    let next_id = state
+        .begin_manual(&in_flight, now + Duration::from_secs(2))
+        .unwrap();
+    assert_ne!(first_id, next_id);
+    assert!(in_flight.load(Ordering::Acquire));
+
+    let about = include_str!("dialogs.rs");
+    assert!(about.contains("self.update_check_inflight.load(Ordering::Acquire)"));
+}
+
+#[test]
+fn existing_update_guard_tests_not_regressed() {
+    let tests = include_str!("tests.rs");
+    for test_name in [
+        "update_check_result_ignores_stale_response_after_about_close",
+        "manual_update_check_supersedes_startup_auto_check",
+        "repeated_update_clicks_do_not_spawn_parallel_checks_or_break_status",
+        "reopening_about_does_not_show_stale_update_result",
+    ] {
+        assert!(tests.contains(&format!("fn {test_name}")));
+    }
 }
 
 #[test]
