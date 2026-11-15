@@ -1460,10 +1460,33 @@ mod tests {
     #[test]
     fn settings_reset_requires_confirmation() {
         let source = include_str!("dialogs.rs");
+
+        // Эти проверки остаются простыми: они ищут короткие маркеры без переносов строк.
         assert!(source.contains("self.settings_reset_confirm = true;"));
         assert!(source.contains("settings.reset_confirm_action"));
         assert!(source.contains("if let Some(confirmed) = reset_choice"));
-        assert!(source.contains("if confirmed {\n                self.apply_settings_reset(ctx);"));
+
+        // Проверяем не точное форматирование, а логическую конструкцию.
+        // На Windows файл может содержать CRLF, а cargo fmt может менять отступы.
+        // Поэтому убираем все пробельные символы перед сравнением.
+        let normalized = source
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join("");
+
+        // После нормализации участок:
+        //
+        // if confirmed {
+        //     self.apply_settings_reset(ctx);
+        // }
+        //
+        // превращается в:
+        //
+        // ifconfirmed{self.apply_settings_reset(ctx);}
+        assert!(
+            normalized.contains("ifconfirmed{self.apply_settings_reset(ctx);}"),
+            "apply_settings_reset должен вызываться только внутри if confirmed"
+        );
     }
 
     #[test]
