@@ -41,11 +41,11 @@ enum ZipDialogValidationError {
 
 impl FileManagerApp {
     pub(crate) fn can_start_zip_operation(&self) -> bool {
-        !self.zip_busy && self.zip_create_dialog.is_none()
+        !self.shutdown_active() && !self.zip_busy && self.zip_create_dialog.is_none()
     }
 
     pub(crate) fn create_zip_from_selection(&mut self, sources: Vec<PathBuf>, ctx: &egui::Context) {
-        if sources.is_empty() || self.zip_busy {
+        if self.shutdown_active() || sources.is_empty() || self.zip_busy {
             return;
         }
         let tab = &self.tabs[self.active];
@@ -70,6 +70,9 @@ impl FileManagerApp {
 
     /// «Извлечь в...» для открытого архива: пустое выделение — весь архив, иначе только выбранные элементы.
     pub(crate) fn prompt_zip_extract_to(&mut self, ctx: &egui::Context) {
+        if self.shutdown_active() {
+            return;
+        }
         let archive = self.tabs[self.active].path.clone();
         let initial = archive.parent().map(Path::to_path_buf);
         let plan = plan_zip_extract_to(&selected_zip_members(self));
@@ -78,6 +81,9 @@ impl FileManagerApp {
 
     /// «Извлечь в...» для ZIP-файла в обычной папке: всегда весь архив.
     pub(crate) fn prompt_zip_file_extract_to(&mut self, archive: PathBuf, ctx: &egui::Context) {
+        if self.shutdown_active() {
+            return;
+        }
         let initial = archive.parent().map(Path::to_path_buf);
         self.prompt_zip_extract_plan(
             archive,
@@ -183,7 +189,7 @@ impl FileManagerApp {
         extraction: impl FnOnce(&AtomicBool) -> std::io::Result<PathBuf> + Send + 'static,
         ctx: &egui::Context,
     ) {
-        if self.zip_busy {
+        if self.shutdown_active() || self.zip_busy {
             return;
         }
         self.zip_generation = self.zip_generation.wrapping_add(1);
@@ -234,7 +240,7 @@ impl FileManagerApp {
         options: ZipCreateOptions,
         ctx: &egui::Context,
     ) {
-        if self.zip_busy {
+        if self.shutdown_active() || self.zip_busy {
             return;
         }
         self.zip_generation = self.zip_generation.wrapping_add(1);
@@ -413,6 +419,9 @@ impl FileManagerApp {
         behavior: Option<ZipExistingBehavior>,
         ctx: &egui::Context,
     ) {
+        if self.shutdown_active() {
+            return;
+        }
         if let Some(behavior) = behavior {
             dialog.existing_behavior = behavior;
         }

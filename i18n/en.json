@@ -438,6 +438,7 @@
   "trash.err.conflict": "An item already exists at the original path",
   "trash.err.io": "The operation did not complete",
   "shutdown.waiting": "Finishing background operations…",
+  "shutdown.awaiting_response": "Waiting for your response to continue a file operation.",
   "shutdown.pending": "Waiting for",
   "shutdown.searches": "Searches",
   "shutdown.zip_operations": "ZIP operations",

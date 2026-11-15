@@ -440,6 +440,7 @@
   "trash.err.conflict": "По исходному пути уже есть объект",
   "trash.err.io": "Операция не выполнена",
   "shutdown.waiting": "Завершение фоновых операций…",
+  "shutdown.awaiting_response": "Ожидается ваш ответ, чтобы продолжить файловую операцию.",
   "shutdown.pending": "Ожидают завершения",
   "shutdown.searches": "Поиск",
   "shutdown.zip_operations": "Операции ZIP",

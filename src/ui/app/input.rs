@@ -299,6 +299,9 @@ impl FileManagerApp {
     }
 
     fn handle_keys_impl(&mut self, ctx: &egui::Context, allow_tab_management: bool) {
+        if self.shutdown_active() {
+            return;
+        }
         self.handle_side_mouse_navigation(ctx);
         let text_edit_focused = ctx.text_edit_focused();
         let mods = ctx.input(|i| i.modifiers);

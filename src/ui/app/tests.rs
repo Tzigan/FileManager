@@ -7,6 +7,8 @@ use super::{
     floating_dialog_viewport, parse_archive_address, persisted_tab_path, tab_close_button_hovered,
     tab_scroll_source, tab_strip_content_margin,
 };
+use crate::core::bg_ops::{BgOpEvent, BgOpKind, BgOpPool};
+use crate::core::ops::{ConflictAction, OpEvent, OpReply};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -705,6 +707,10 @@ fn shutdown_fixture() -> ShutdownSnapshot {
     }
 }
 
+fn normalized_source(source: &str) -> String {
+    source.replace("\r\n", "\n")
+}
+
 #[test]
 fn shutdown_with_pending_ops_shows_waiting_status_not_silent() {
     let now = Instant::now();
@@ -902,8 +908,10 @@ fn shutdown_observer_does_not_deadlock_with_worker_channel() {
     let source = include_str!("mod.rs");
     let start = source.find("fn drain_shutdown_ops").unwrap();
     let drain = &source[start..];
-    assert!(drain.contains("self.ops_evt.try_recv()"));
-    assert!(!drain.contains("self.ops_evt.recv()"));
+    assert!(drain.contains("self.drain_ops_events(ctx)"));
+    let event_drain = include_str!("../opsui.rs");
+    assert!(event_drain.contains("while let Ok(ev) = self.ops_evt.try_recv()"));
+    assert!(!event_drain.contains("while let Ok(ev) = self.ops_evt.recv()"));
 }
 
 #[test]
@@ -951,6 +959,271 @@ fn domain3_1_2_3_4_5_not_regressed() {
 
 #[test]
 fn settings_structure_and_json_schema_unchanged_if_constant_used() {
+    let app = include_str!("mod.rs");
+    let settings = include_str!("../../core/settings.rs");
+    assert!(app.contains("const SHUTDOWN_NOTICE_DELAY"));
+    assert!(!settings.contains("shutdown_notice_delay"));
+    assert!(!include_str!("../../../i18n/ru.json").contains("shutdown_notice_delay"));
+    assert!(!include_str!("../../../i18n/en.json").contains("shutdown_notice_delay"));
+}
+
+#[test]
+fn conflict_dialog_shown_and_answerable_during_shutdown_phase() {
+    let app = normalized_source(include_str!("mod.rs"));
+    let shutdown_frame = app
+        .split("fn shutdown_frame")
+        .nth(1)
+        .unwrap()
+        .split("fn search_bg_op_queued")
+        .next()
+        .unwrap();
+    assert!(shutdown_frame.contains("self.drain_shutdown_ops(ctx)"));
+    assert!(shutdown_frame.contains("self.ops_dialogs(ctx)"));
+    let prepare = app
+        .split("fn prepare_shutdown")
+        .nth(1)
+        .unwrap()
+        .split("fn drain_shutdown_ops")
+        .next()
+        .unwrap();
+    assert!(!prepare.contains("self.op_reply.take()"));
+
+    let ops_ui = normalized_source(include_str!("../opsui.rs"));
+    assert!(ops_ui.contains("OpEvent::AskConflict { id, src, dst }"));
+    assert!(ops_ui.contains("self.reply_conflict(id, act)"));
+    let dialogs = ops_ui
+        .split("pub(crate) fn ops_dialogs")
+        .nth(1)
+        .unwrap()
+        .split("fn delete_dialog")
+        .next()
+        .unwrap();
+    assert!(dialogs.contains("self.shutdown_active()"));
+    assert!(dialogs.contains("self.conflict_dialog(ctx)"));
+    assert!(dialogs.contains("self.error_dialog(ctx)"));
+
+    let (event_tx, event_rx) = std::sync::mpsc::channel();
+    let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let id = 17;
+        event_tx
+            .send(OpEvent::AskConflict {
+                id,
+                src: PathBuf::from("source.txt"),
+                dst: PathBuf::from("destination.txt"),
+            })
+            .unwrap();
+        assert!(matches!(
+            reply_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            OpReply::Conflict {
+                id: reply_id,
+                action: ConflictAction::Overwrite
+            } if reply_id == id
+        ));
+        event_tx.send(OpEvent::Done { id, failed: 0 }).unwrap();
+    });
+    assert!(matches!(
+        event_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+        OpEvent::AskConflict { id: 17, .. }
+    ));
+    reply_tx
+        .send(OpReply::Conflict {
+            id: 17,
+            action: ConflictAction::Overwrite,
+        })
+        .unwrap();
+    assert!(matches!(
+        event_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+        OpEvent::Done { id: 17, failed: 0 }
+    ));
+    worker.join().unwrap();
+}
+
+#[test]
+fn conflict_unanswered_shows_user_response_expected_not_fs_unresponsive() {
+    let now = Instant::now();
+    let mut progress = ShutdownProgress::default();
+    assert!(progress.begin(now, shutdown_fixture()));
+    progress.set_awaiting_user_response(true, now + Duration::from_secs(1));
+    assert!(!progress.take_warning(now + SHUTDOWN_NOTICE_DELAY * 3));
+    assert!(progress.awaiting_user_response);
+    assert!(include_str!("mod.rs").contains("shutdown.awaiting_response"));
+
+    for (json, expected) in [
+        (include_str!("../../../i18n/ru.json"), "Ожидается ваш ответ"),
+        (
+            include_str!("../../../i18n/en.json"),
+            "Waiting for your response",
+        ),
+    ] {
+        let labels: serde_json::Value = serde_json::from_str(json).unwrap();
+        assert!(
+            labels["shutdown.awaiting_response"]
+                .as_str()
+                .unwrap()
+                .contains(expected)
+        );
+    }
+
+    let resumed_at = now + Duration::from_secs(40);
+    progress.set_awaiting_user_response(false, resumed_at);
+    assert!(!progress.take_warning(resumed_at + SHUTDOWN_NOTICE_DELAY - Duration::from_millis(1)));
+    assert!(progress.take_warning(resumed_at + SHUTDOWN_NOTICE_DELAY));
+}
+
+#[test]
+fn new_operations_rejected_during_shutdown_phase() {
+    let app = normalized_source(include_str!("mod.rs"));
+    let shutdown_branch = app
+        .find(
+            "if self.shutdown.is_active() {\n            self.shutdown_frame(ui, &ctx, close_requested);\n            return;\n        }",
+        )
+        .unwrap();
+    assert!(shutdown_branch < app.find("self.handle_keys(&ctx)").unwrap());
+    assert!(app.contains("self.ops_dialogs(ctx);"));
+    let ops_ui = normalized_source(include_str!("../opsui.rs"));
+    let dialogs = ops_ui
+        .split("pub(crate) fn ops_dialogs")
+        .nth(1)
+        .unwrap()
+        .split("fn delete_dialog")
+        .next()
+        .unwrap();
+    let shutdown_dialogs = dialogs.split("return;").next().unwrap();
+    assert!(shutdown_dialogs.contains("self.conflict_dialog(ctx)"));
+    assert!(shutdown_dialogs.contains("self.error_dialog(ctx)"));
+    assert!(!shutdown_dialogs.contains("self.delete_dialog(ctx)"));
+    assert!(!shutdown_dialogs.contains("self.create_dialog(ctx)"));
+    assert!(!shutdown_dialogs.contains("self.rename_dialog(ctx)"));
+}
+
+#[test]
+fn shutdown_active_flag_blocks_act_delete_copy_move_search_zip() {
+    let ops_ui = normalized_source(include_str!("../opsui.rs"));
+    for guard in [
+        "pub(crate) fn enqueue(&mut self, verb: &'static str, kind: OpKind) {\n        if self.shutdown_active()",
+        "pub(crate) fn act_delete(&mut self, permanent: bool) {\n        if self.shutdown_active()",
+        "pub(crate) fn act_copy(&mut self) {\n        if self.shutdown_active()",
+        "pub(crate) fn act_cut(&mut self) {\n        if self.shutdown_active()",
+        "pub(crate) fn act_paste(&mut self) {\n        if self.shutdown_active()",
+        "pub(crate) fn act_rename(&mut self) {\n        if self.shutdown_active()",
+    ] {
+        assert!(ops_ui.contains(guard), "missing shutdown guard: {guard}");
+    }
+
+    let input = normalized_source(include_str!("input.rs"));
+    assert!(input.contains(
+        "fn handle_keys_impl(&mut self, ctx: &egui::Context, allow_tab_management: bool) {\n        if self.shutdown_active()"
+    ));
+    let search = normalized_source(include_str!("search.rs"));
+    assert!(search.contains("fn schedule_search(&mut self) {\n        if self.shutdown_active()"));
+    assert!(search.contains(
+        "pub(super) fn start_search(&mut self, tab: usize, ctx: &egui::Context) {\n        if self.shutdown_active()"
+    ));
+    let archive = normalized_source(include_str!("archive.rs"));
+    assert!(archive.contains("!self.shutdown_active() && !self.zip_busy"));
+    assert!(archive.contains(
+        "pub(crate) fn create_zip_from_selection(&mut self, sources: Vec<PathBuf>, ctx: &egui::Context) {\n        if self.shutdown_active()"
+    ));
+    assert!(archive.contains(
+        "pub(crate) fn prompt_zip_extract_to(&mut self, ctx: &egui::Context) {\n        if self.shutdown_active()"
+    ));
+    assert!(archive.contains("fn spawn_zip_extraction("));
+    assert!(archive.contains("fn spawn_zip_creation("));
+    assert_eq!(
+        archive
+            .matches("if self.shutdown_active() || self.zip_busy")
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn double_cancel_idempotent() {
+    let app = normalized_source(include_str!("mod.rs"));
+    let prepare = app
+        .split("fn prepare_shutdown")
+        .nth(1)
+        .unwrap()
+        .split("fn drain_shutdown_ops")
+        .next()
+        .unwrap();
+    assert!(
+        prepare.find("if self.shutdown_prepared").unwrap()
+            < prepare.find("self.bg_ops_pool.request_shutdown()").unwrap()
+    );
+    assert!(!prepare.contains("self.op_reply.take()"));
+
+    let (events_tx, events_rx) = std::sync::mpsc::channel();
+    let pool = BgOpPool::new(1, events_tx, || {});
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let cancel = std::sync::Arc::new(AtomicBool::new(false));
+    pool.submit_with_cancel(BgOpKind::Search, cancel, move |cancel| {
+        started_tx.send(()).unwrap();
+        while !cancel.load(Ordering::Relaxed) {
+            std::thread::yield_now();
+        }
+    })
+    .unwrap();
+    started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    pool.request_shutdown();
+    pool.request_shutdown();
+
+    let mut finished = 0;
+    while finished == 0 {
+        if matches!(
+            events_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            BgOpEvent::Finished { .. }
+        ) {
+            finished += 1;
+        }
+    }
+    drop(pool);
+    assert_eq!(finished, 1);
+    assert!(events_rx.try_recv().is_err());
+}
+
+#[test]
+fn watcher_stopped_or_handle_released_during_shutdown_phase() {
+    let app = normalized_source(include_str!("mod.rs"));
+    let prepare = app
+        .split("fn prepare_shutdown")
+        .nth(1)
+        .unwrap()
+        .split("fn drain_shutdown_ops")
+        .next()
+        .unwrap();
+    assert!(prepare.contains("DirWatchCommand::Stop"));
+
+    let watcher = normalized_source(include_str!("../../platform/windows/dir_watch.rs"));
+    assert!(watcher.contains("Ok(DirWatchCommand::Stop) => slot = None"));
+    assert!(watcher.contains("CloseHandle(self.directory)"));
+    assert!(watcher.contains("CloseHandle(self.event)"));
+    assert!(watcher.contains("FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE"));
+    assert!(watcher.contains("const POLL_MS: u32 = 50;"));
+    assert!(watcher.contains("fn notify_handle_released_on_tab_close_or_dir_change()"));
+}
+
+#[test]
+fn existing_3_6_tests_not_regressed() {
+    let tests = include_str!("tests.rs");
+    for name in [
+        "shutdown_with_pending_ops_shows_waiting_status_not_silent",
+        "shutdown_long_wait_shows_fs_unresponsive_warning_localized",
+        "shutdown_warning_does_not_detach_or_force_kill_worker",
+        "shutdown_completes_normally_after_worker_returns",
+        "shutdown_no_warning_when_no_pending_ops",
+        "shutdown_logs_pending_operation_and_elapsed",
+        "shutdown_multiple_ops_reported_honestly",
+        "shutdown_observer_does_not_deadlock_with_worker_channel",
+        "duplicate_close_requests_do_not_spawn_multiple_observers",
+    ] {
+        assert!(tests.contains(name), "missing 3.6 regression test: {name}");
+    }
+}
+
+#[test]
+fn settings_structure_and_json_schema_unchanged() {
     let app = include_str!("mod.rs");
     let settings = include_str!("../../core/settings.rs");
     assert!(app.contains("const SHUTDOWN_NOTICE_DELAY"));
