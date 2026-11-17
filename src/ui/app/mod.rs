@@ -2027,11 +2027,12 @@ impl eframe::App for FileManagerApp {
         egui::Panel::bottom("status_bar").show(ui, |ui| self.show_active_tab_status(ui));
         egui::CentralPanel::default().show(ui, |ui| self.show_active_file_content(&ctx, ui));
 
-        self.finish_file_drop_frame(ui, &ctx);
         self.show_tab_drag_preview(&ctx);
-        self.show_file_drag_preview(&ctx);
         self.flush_pending_open_tabs(&ctx);
         self.show_detached_tab_windows(&ctx);
+        // Не теряем release из detached-viewport: все цели участвуют в общем выборе адресата до enqueue.
+        self.finish_file_drop_frame(ui, &ctx);
+        self.show_file_drag_preview(&ctx);
         self.finish_thumbnail_frame();
         self.about_window(&ctx);
         self.hotkeys_window(&ctx);

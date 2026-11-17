@@ -5,7 +5,7 @@ use std::time::Duration;
 use crate::core::fs::FileEntry;
 use crate::core::ops::OpKind;
 use crate::ui::FileManagerApp;
-use crate::ui::tabs::SelectionKey;
+use crate::ui::tabs::{SelectionKey, Tab};
 
 pub(crate) const FILE_DND_DRAG_THRESHOLD_POINTS: f32 = 6.0;
 pub(crate) const FILE_DND_START_DELAY: Duration = Duration::from_millis(100);
@@ -57,6 +57,7 @@ pub(crate) enum DropSurface {
     Entry,
     Tree,
     Bookmark,
+    Tab,
     Breadcrumb,
     Up,
 }
@@ -70,6 +71,7 @@ impl DropSurface {
             Self::Tree | Self::Bookmark => 3,
             Self::Breadcrumb => 4,
             Self::Up => 5,
+            Self::Tab => 6,
         }
     }
 }
@@ -439,6 +441,41 @@ pub(crate) fn plan_file_drop(
     }
 }
 
+fn modifiers_for_surface(surface: DropSurface, mut modifiers: egui::Modifiers) -> egui::Modifiers {
+    if surface == DropSurface::Tab {
+        // Отпускание на вкладке — осознанный адресат, поэтому Move здесь предсказуем; Ctrl копирует.
+        modifiers.shift = !modifiers.ctrl;
+    }
+    modifiers
+}
+
+pub(crate) fn plan_file_drop_for_surface(
+    sources: &[DragSource],
+    destination: &Path,
+    target_is_folder: bool,
+    target_allowed: bool,
+    shutdown_active: bool,
+    destination_volume: Option<&str>,
+    surface: DropSurface,
+    modifiers: egui::Modifiers,
+) -> DropFeedback {
+    let mut feedback = plan_file_drop(
+        sources,
+        destination,
+        target_is_folder,
+        target_allowed,
+        shutdown_active,
+        destination_volume,
+        modifiers_for_surface(surface, modifiers),
+    );
+    feedback.surface = surface;
+    feedback
+}
+
+pub(crate) fn tab_drop_destination(tab: &Tab) -> Option<&Path> {
+    (tab.archive_prefix.is_none() && !tab.secure_trash).then_some(tab.path.as_path())
+}
+
 fn drop_hint_lines(
     count_label: &str,
     count: usize,
@@ -718,6 +755,39 @@ impl FileManagerApp {
         );
     }
 
+    pub(crate) fn handle_tab_drop_response(
+        &mut self,
+        response: &egui::Response,
+        tab_id: u64,
+        ui: &egui::Ui,
+        ctx: &egui::Context,
+    ) {
+        let payload_active = egui::DragAndDrop::has_payload_of_type::<FileDragPayload>(ctx)
+            || response.dnd_hover_payload::<FileDragPayload>().is_some()
+            || response.dnd_release_payload::<FileDragPayload>().is_some();
+        if !payload_active {
+            return;
+        }
+
+        let Some(tab) = self.tabs.iter().find(|tab| tab.id == tab_id) else {
+            return;
+        };
+        let Some(destination) = tab_drop_destination(tab).map(Path::to_path_buf) else {
+            return;
+        };
+        let target_allowed = !crate::platform::is_wsl_path(&destination);
+        self.handle_file_drop_response_with_reason(
+            response,
+            Some(&destination),
+            true,
+            target_allowed,
+            DropSurface::Tab,
+            None,
+            ui,
+            ctx,
+        );
+    }
+
     pub(crate) fn handle_file_drop_response_with_reason(
         &mut self,
         response: &egui::Response,
@@ -747,6 +817,7 @@ impl FileManagerApp {
             .get(self.active)
             .map(|tab| tab.path.as_path())
             .unwrap_or_else(|| Path::new(""));
+        let effective_modifiers = modifiers_for_surface(surface, modifiers);
         let destination_volume = destination
             .map(crate::platform::volume_id)
             .unwrap_or_else(|| crate::platform::volume_id(fallback));
@@ -755,8 +826,8 @@ impl FileManagerApp {
                 mode: mode_for_volumes(
                     &source_volumes(&payload.sources),
                     destination_volume.as_deref(),
-                    modifiers.ctrl,
-                    modifiers.shift,
+                    effective_modifiers.ctrl,
+                    effective_modifiers.shift,
                 ),
                 plan: None,
                 reason: None,
@@ -766,13 +837,14 @@ impl FileManagerApp {
                 layer_id: None,
             },
             |path| {
-                plan_file_drop(
+                plan_file_drop_for_surface(
                     &payload.sources,
                     path,
                     target_is_folder,
                     target_allowed,
                     self.shutdown_active(),
                     destination_volume.as_deref(),
+                    surface,
                     modifiers,
                 )
             },
@@ -1176,6 +1248,166 @@ mod tests {
         assert!(source.contains("ctx.input(|input| input.modifiers)"));
         assert!(source.contains("feedback.plan.take()"));
         assert!(source.contains("plan_file_drop("));
+    }
+
+    #[test]
+    fn tab_is_drop_target_resolving_to_its_folder_path() {
+        let tab = Tab::new(PathBuf::from(r"D:\Target"));
+        assert_eq!(tab_drop_destination(&tab), Some(Path::new(r"D:\Target")));
+
+        let mut archive = Tab::new(PathBuf::from(r"D:\archive.zip"));
+        archive.archive_prefix = Some(String::new());
+        assert_eq!(tab_drop_destination(&archive), None);
+
+        let mut secure_trash = Tab::new(PathBuf::from(r"C:\SecureTrash"));
+        secure_trash.secure_trash = true;
+        assert_eq!(tab_drop_destination(&secure_trash), None);
+    }
+
+    #[test]
+    fn tab_drop_defaults_to_move_even_cross_volume() {
+        let sources = [drag_source(r"F:\Source\report.txt", false, Some("VOL-F"))];
+        let feedback = plan_file_drop_for_surface(
+            &sources,
+            Path::new(r"D:\Target"),
+            true,
+            true,
+            false,
+            Some("VOL-D"),
+            DropSurface::Tab,
+            egui::Modifiers::default(),
+        );
+        assert_eq!(feedback.mode, DropMode::Move);
+        let plan = feedback.plan.unwrap();
+        assert_eq!(plan.mode, DropMode::Move);
+        assert_eq!(plan.destination, PathBuf::from(r"D:\Target"));
+        let operation = plan.into_op_kind();
+        let affected = crate::core::dir_cache::affected_dirs(&operation);
+        assert!(affected.contains(&PathBuf::from(r"F:\Source")));
+        assert!(affected.contains(&PathBuf::from(r"D:\Target")));
+
+        let shift_feedback = plan_file_drop_for_surface(
+            &sources,
+            Path::new(r"D:\Target"),
+            true,
+            true,
+            false,
+            Some("VOL-D"),
+            DropSurface::Tab,
+            egui::Modifiers::SHIFT,
+        );
+        assert_eq!(shift_feedback.mode, DropMode::Move);
+    }
+
+    #[test]
+    fn ctrl_on_tab_drop_forces_copy() {
+        let sources = [drag_source(r"F:\Source\report.txt", false, Some("VOL-F"))];
+        let feedback = plan_file_drop_for_surface(
+            &sources,
+            Path::new(r"D:\Target"),
+            true,
+            true,
+            false,
+            Some("VOL-D"),
+            DropSurface::Tab,
+            egui::Modifiers::CTRL,
+        );
+        assert_eq!(feedback.mode, DropMode::Copy);
+        let operation = feedback.plan.unwrap().into_op_kind();
+        let affected = crate::core::dir_cache::affected_dirs(&operation);
+        assert!(affected.contains(&PathBuf::from(r"D:\Target")));
+        assert!(!affected.contains(&PathBuf::from(r"F:\Source")));
+
+        let mut ctrl_and_shift = egui::Modifiers::CTRL;
+        ctrl_and_shift.shift = true;
+        let combined_feedback = plan_file_drop_for_surface(
+            &sources,
+            Path::new(r"D:\Target"),
+            true,
+            true,
+            false,
+            Some("VOL-D"),
+            DropSurface::Tab,
+            ctrl_and_shift,
+        );
+        assert_eq!(combined_feedback.mode, DropMode::Copy);
+    }
+
+    #[test]
+    fn cross_volume_drop_on_list_row_still_defaults_to_copy() {
+        let feedback = plan_file_drop_for_surface(
+            &[drag_source(r"F:\Source\report.txt", false, Some("VOL-F"))],
+            Path::new(r"D:\Target"),
+            true,
+            true,
+            false,
+            Some("VOL-D"),
+            DropSurface::Entry,
+            egui::Modifiers::default(),
+        );
+        assert_eq!(feedback.mode, DropMode::Copy);
+        assert_eq!(feedback.plan.unwrap().mode, DropMode::Copy);
+    }
+
+    #[test]
+    fn tab_drop_on_active_tab_is_noop_with_reason() {
+        let feedback = plan_file_drop_for_surface(
+            &[drag_source(r"D:\Target\report.txt", false, Some("VOL-D"))],
+            Path::new(r"D:\Target"),
+            true,
+            true,
+            false,
+            Some("VOL-D"),
+            DropSurface::Tab,
+            egui::Modifiers::default(),
+        );
+        assert_eq!(feedback.mode, DropMode::Move);
+        assert!(feedback.plan.is_none());
+        assert_eq!(
+            feedback.reason,
+            Some(DropInvalidReason::FileAlreadyInFolder)
+        );
+    }
+
+    #[test]
+    fn drop_folder_on_tab_pointing_inside_itself_rejected_with_reason() {
+        let feedback = plan_file_drop_for_surface(
+            &[drag_source(r"F:\Source\Folder", true, Some("VOL-F"))],
+            Path::new(r"F:\Source\Folder\Child"),
+            true,
+            true,
+            false,
+            Some("VOL-F"),
+            DropSurface::Tab,
+            egui::Modifiers::default(),
+        );
+        assert_eq!(feedback.mode, DropMode::Move);
+        assert!(feedback.plan.is_none());
+        assert_eq!(
+            feedback.reason,
+            Some(DropInvalidReason::FolderIntoSubfolder)
+        );
+    }
+
+    #[test]
+    fn tab_hint_shows_move_on_cross_volume_hover() {
+        let feedback = plan_file_drop_for_surface(
+            &[drag_source(r"F:\Source\report.txt", false, Some("VOL-F"))],
+            Path::new(r"D:\Target"),
+            true,
+            true,
+            false,
+            Some("VOL-D"),
+            DropSurface::Tab,
+            egui::Modifiers::default(),
+        );
+        assert_eq!(feedback.mode, DropMode::Move);
+        let preview = include_str!("file_dnd.rs")
+            .split("pub(crate) fn show_file_drag_preview")
+            .nth(1)
+            .unwrap();
+        assert!(preview.contains(".map(|feedback| feedback.mode)"));
+        assert!(preview.contains("DropMode::Move => \"dnd.move\""));
     }
 
     #[test]
@@ -1699,6 +1931,27 @@ mod tests {
     }
 
     #[test]
+    fn tab_surface_priority_specific_and_order_independent() {
+        assert!(DropSurface::Tab.priority() > DropSurface::Background.priority());
+        assert!(DropSurface::Tab.priority() > DropSurface::Other.priority());
+        assert!(DropSurface::Tab.priority() > DropSurface::Up.priority());
+
+        let tab = feedback(DropSurface::Tab, Some("D:\\Target"), true);
+        let background = feedback(DropSurface::Background, Some("C:\\"), false);
+        let other = feedback(DropSurface::Other, None, false);
+        let mut first = None;
+        for candidate in [background.clone(), other.clone(), tab.clone()] {
+            register_drop_feedback(&mut first, candidate);
+        }
+        let mut reversed = None;
+        for candidate in [tab, other, background] {
+            register_drop_feedback(&mut reversed, candidate);
+        }
+        assert_eq!(first, reversed);
+        assert_eq!(first.unwrap().surface, DropSurface::Tab);
+    }
+
+    #[test]
     fn bookmark_highlight_and_cursor_tooltip_consistent_with_other_targets() {
         let mut target = feedback(DropSurface::Bookmark, Some("C:\\Pinned"), true);
         target.target_rect = Some(egui::Rect::from_min_size(
@@ -2192,6 +2445,110 @@ mod tests {
         assert!(file_row_sense().senses_drag());
         assert!(include_str!("list/mod.rs").contains("egui::Sense::click_and_drag()"));
         assert!(include_str!("app/toolbar.rs").contains("fn tab_drag_sense()"));
+    }
+
+    #[test]
+    fn new_tab_button_is_not_a_target() {
+        let toolbar = include_str!("app/toolbar.rs");
+        let plus = toolbar
+            .split("let plus_galley")
+            .nth(1)
+            .unwrap()
+            .split("let drag_width")
+            .next()
+            .unwrap();
+        assert!(!plus.contains("handle_tab_drop_response"));
+    }
+
+    #[test]
+    fn tab_strip_empty_space_is_not_a_target() {
+        let toolbar = include_str!("app/toolbar.rs");
+        let empty = toolbar
+            .split("let (drag_id, drag_rect)")
+            .nth(1)
+            .unwrap()
+            .split("self.window_controls(ctx, ui)")
+            .next()
+            .unwrap();
+        assert!(!empty.contains("handle_tab_drop_response"));
+    }
+
+    #[test]
+    fn file_payload_on_tab_does_not_start_tab_fsm() {
+        let toolbar = include_str!("app/toolbar.rs");
+        let tab_bar = toolbar.split("pub(super) fn tab_bar").nth(1).unwrap();
+        assert!(tab_bar.contains("button_pressed(egui::PointerButton::Primary)"));
+        assert!(tab_bar.contains("ctx.layer_id_at(press_origin) == Some(resp.layer_id)"));
+        assert!(tab_bar.contains("tab_drag_press_hits_body"));
+        let handler = include_str!("file_dnd.rs")
+            .split("pub(crate) fn handle_tab_drop_response")
+            .nth(1)
+            .unwrap()
+            .split("pub(crate) fn handle_file_drop_response_with_reason")
+            .next()
+            .unwrap();
+        assert!(handler.contains("has_payload_of_type::<FileDragPayload>(ctx)"));
+        assert!(
+            handler.find("if !payload_active").unwrap() < handler.find("DropSurface::Tab").unwrap()
+        );
+    }
+
+    #[test]
+    fn tab_reorder_and_detach_still_work_without_payload() {
+        let preview = include_str!("app/tab_drag_preview.rs");
+        let app_tests = include_str!("app/tests.rs");
+        let input = include_str!("app/input.rs");
+        assert!(preview.contains("tab_drop_slot_at"));
+        assert!(preview.contains("self.request_detach_tab"));
+        assert!(app_tests.contains("tab_drag_fsm_distinguishes_click_drag_and_close_hitbox"));
+        assert!(
+            include_str!("app/toolbar.rs").contains("tab_drag_still_works_after_file_dnd_added")
+        );
+        assert!(input.contains("allow_tab_management && !self.tab_drag_state.is_active()"));
+    }
+
+    #[test]
+    fn detached_window_tab_drop_uses_same_rule() {
+        let window = include_str!("app/window_frame.rs");
+        let detached = window
+            .split("pub(super) fn detached_titlebar")
+            .nth(1)
+            .unwrap()
+            .split("pub(super) fn detached_viewport_builder_at")
+            .next()
+            .unwrap();
+        assert!(detached.contains("self.handle_tab_drop_response(&response, tab_id, ui, ctx)"));
+
+        let app = include_str!("app/mod.rs");
+        assert!(
+            app.find("self.show_detached_tab_windows(&ctx)").unwrap()
+                < app.find("self.finish_file_drop_frame(ui, &ctx)").unwrap()
+        );
+        let feedback = plan_file_drop_for_surface(
+            &[drag_source(r"F:\Source\report.txt", false, Some("VOL-F"))],
+            Path::new(r"D:\Target"),
+            true,
+            true,
+            false,
+            Some("VOL-D"),
+            DropSurface::Tab,
+            egui::Modifiers::default(),
+        );
+        assert_eq!(feedback.mode, DropMode::Move);
+    }
+
+    #[test]
+    fn existing_bookmark_and_tooltip_and_attribution_tests_not_regressed() {
+        let source = include_str!("file_dnd.rs");
+        for name in [
+            "bookmark_row_is_drop_target_resolving_to_its_folder_path",
+            "bookmark_highlight_and_cursor_tooltip_consistent_with_other_targets",
+            "tooltip_anchors_to_cursor_for_any_target_size",
+            "release_plan_belongs_to_surface_that_received_payload",
+            "higher_priority_surface_does_not_steal_release_destination",
+        ] {
+            assert!(source.contains(name), "missing preserved DnD test {name}");
+        }
     }
 
     #[test]

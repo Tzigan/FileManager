@@ -577,6 +577,7 @@ impl FileManagerApp {
             let size = egui::vec2(desired_size.x.min(max_tab_width), desired_size.y);
             let (tab_rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
             let response = response.on_hover_text(title);
+            self.handle_tab_drop_response(&response, tab_id, ui, ctx);
             let close_rect = egui::Rect::from_min_max(
                 egui::pos2(tab_rect.max.x - close_width, tab_rect.min.y),
                 tab_rect.max,
