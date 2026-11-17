@@ -254,6 +254,7 @@ const HOTKEY_BINDINGS: &[HotkeyBinding] = &[
     },
 ];
 
+// Жесты не входят в ShortcutId: отдельный список справки не меняет обработку клавиш.
 const HOTKEY_DND_GESTURES: &[HotkeyGesture] = &[
     HotkeyGesture {
         gesture_key: "help.hotkeys.gesture.drag",
