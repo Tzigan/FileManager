@@ -31,6 +31,8 @@ impl SystemBookmarkKind {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SystemBookmarkTarget {
     Folder(PathBuf),
+    /// Известная папка ОС не вернула путь; строка остаётся видимой, но недоступной.
+    UnavailableFolder,
     RecycleBin,
     /// Не папка хранения. Вкладка читает карточки, а не readdir.
     SecureTrash,
@@ -57,20 +59,34 @@ pub fn system_bookmarks() -> Vec<SystemBookmark> {
         target: SystemBookmarkTarget::SecureTrash,
     });
 
-    let Some(dirs) = directories::UserDirs::new() else {
-        return bookmarks;
-    };
+    let dirs = directories::UserDirs::new();
     for (kind, path) in [
-        (SystemBookmarkKind::Downloads, dirs.download_dir()),
-        (SystemBookmarkKind::Desktop, dirs.desktop_dir()),
-        (SystemBookmarkKind::Documents, dirs.document_dir()),
-        (SystemBookmarkKind::Pictures, dirs.picture_dir()),
-        (SystemBookmarkKind::Music, dirs.audio_dir()),
-        (SystemBookmarkKind::Videos, dirs.video_dir()),
+        (
+            SystemBookmarkKind::Downloads,
+            dirs.as_ref().and_then(|dirs| dirs.download_dir()),
+        ),
+        (
+            SystemBookmarkKind::Desktop,
+            dirs.as_ref().and_then(|dirs| dirs.desktop_dir()),
+        ),
+        (
+            SystemBookmarkKind::Documents,
+            dirs.as_ref().and_then(|dirs| dirs.document_dir()),
+        ),
+        (
+            SystemBookmarkKind::Pictures,
+            dirs.as_ref().and_then(|dirs| dirs.picture_dir()),
+        ),
+        (
+            SystemBookmarkKind::Music,
+            dirs.as_ref().and_then(|dirs| dirs.audio_dir()),
+        ),
+        (
+            SystemBookmarkKind::Videos,
+            dirs.as_ref().and_then(|dirs| dirs.video_dir()),
+        ),
     ] {
-        if let Some(bookmark) = folder_bookmark(kind, path) {
-            bookmarks.push(bookmark);
-        }
+        bookmarks.push(folder_bookmark(kind, path));
     }
     bookmarks
 }
@@ -81,12 +97,13 @@ pub fn bookmark_forces_new_tab(target: &SystemBookmarkTarget) -> bool {
     matches!(target, SystemBookmarkTarget::SecureTrash)
 }
 
-fn folder_bookmark(kind: SystemBookmarkKind, path: Option<&Path>) -> Option<SystemBookmark> {
-    let path = path.filter(|path| path.is_dir())?;
-    Some(SystemBookmark {
+fn folder_bookmark(kind: SystemBookmarkKind, path: Option<&Path>) -> SystemBookmark {
+    SystemBookmark {
         kind,
-        target: SystemBookmarkTarget::Folder(path.to_path_buf()),
-    })
+        target: path.map_or(SystemBookmarkTarget::UnavailableFolder, |path| {
+            SystemBookmarkTarget::Folder(path.to_path_buf())
+        }),
+    }
 }
 
 #[cfg(test)]
@@ -94,21 +111,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn absent_known_folder_is_omitted_without_creating_it() {
-        let parent =
-            std::env::temp_dir().join(format!("filemanager-known-folder-{}", std::process::id()));
-        std::fs::create_dir_all(&parent).unwrap();
-        let absent = parent.join("not-created");
-        assert!(folder_bookmark(SystemBookmarkKind::Downloads, Some(&absent)).is_none());
-        std::fs::create_dir_all(&absent).unwrap();
+    fn unavailable_known_folder_keeps_a_non_creating_bookmark_target() {
+        let known_path = Path::new(r"C:\Users\Example\Downloads");
         assert_eq!(
-            folder_bookmark(SystemBookmarkKind::Downloads, Some(&absent)),
-            Some(SystemBookmark {
+            folder_bookmark(SystemBookmarkKind::Downloads, Some(known_path)),
+            SystemBookmark {
                 kind: SystemBookmarkKind::Downloads,
-                target: SystemBookmarkTarget::Folder(absent.clone()),
-            })
+                target: SystemBookmarkTarget::Folder(known_path.to_path_buf()),
+            }
         );
-        std::fs::remove_dir_all(parent).unwrap();
+        assert_eq!(
+            folder_bookmark(SystemBookmarkKind::Downloads, None).target,
+            SystemBookmarkTarget::UnavailableFolder
+        );
     }
 
     #[cfg(windows)]
