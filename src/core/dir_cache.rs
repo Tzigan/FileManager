@@ -61,7 +61,7 @@ fn raw_subtree_root(path: &Path) -> Option<PathBuf> {
 
 /// `C:\Work` накрывает `C:\Work` и `C:\Work\sub`, но не `C:\Workplace`.
 /// `Path::starts_with` режет по компонентам, поэтому сырой префикс строки не нужен.
-fn path_is_inside(root: &Path, candidate: &Path) -> bool {
+pub(crate) fn path_is_inside(root: &Path, candidate: &Path) -> bool {
     candidate.starts_with(root)
 }
 
