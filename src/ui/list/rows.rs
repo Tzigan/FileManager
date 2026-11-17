@@ -24,8 +24,13 @@ impl FileManagerApp {
             return;
         };
         let width = ui.available_width();
-        let (rect, resp) =
-            ui.allocate_exact_size(egui::vec2(width, ROW_HEIGHT), egui::Sense::click());
+        let size = egui::vec2(width, ROW_HEIGHT);
+        let (_, rect) = ui.allocate_space(size);
+        let resp = ui.interact(
+            rect,
+            crate::ui::file_dnd::file_row_id(self.tabs[self.active].id, &entry),
+            crate::ui::file_dnd::file_row_sense(),
+        );
 
         if marquee_rect.is_some_and(|marquee| marquee.intersects(rect)) {
             let tab = &mut self.tabs[self.active];
@@ -188,8 +193,13 @@ impl FileManagerApp {
             return;
         };
         let width = ui.available_width();
-        let (rect, resp) =
-            ui.allocate_exact_size(egui::vec2(width, ROW_HEIGHT), egui::Sense::click());
+        let size = egui::vec2(width, ROW_HEIGHT);
+        let (_, rect) = ui.allocate_space(size);
+        let resp = ui.interact(
+            rect,
+            crate::ui::file_dnd::file_row_id(self.tabs[self.active].id, &entry),
+            crate::ui::file_dnd::file_row_sense(),
+        );
         let selected = self.tabs[self.active].is_selected(&entry);
         let focused = self.tabs[self.active].cursor == index;
         let painter = ui.painter();

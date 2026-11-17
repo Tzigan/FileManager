@@ -201,6 +201,10 @@ pub(super) fn group_drag_threshold_crossed(press: egui::Pos2, pointer: egui::Pos
     pointer.distance(press) > 5.0
 }
 
+fn group_header_sense() -> egui::Sense {
+    egui::Sense::click()
+}
+
 impl FileManagerApp {
     /// Table rows: either a flat item index list, or group headers + items
     /// (folders first, then per-extension, name-sorted inside a group).
@@ -233,7 +237,8 @@ impl FileManagerApp {
     ) {
         let width = ui.available_width();
         let (rect, response) =
-            ui.allocate_exact_size(egui::vec2(width, ROW_HEIGHT), egui::Sense::click());
+            ui.allocate_exact_size(egui::vec2(width, ROW_HEIGHT), group_header_sense());
+        self.handle_file_drop_response(&response, None, false, false, ui, ui.ctx());
         let painter = ui.painter();
         let font = egui::TextStyle::Body.resolve(ui.style());
         let y = rect.center().y;
@@ -285,5 +290,16 @@ impl FileManagerApp {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod dnd_tests {
+    use super::*;
+
+    #[test]
+    fn group_header_is_not_draggable() {
+        assert!(group_header_sense().senses_click());
+        assert!(!group_header_sense().senses_drag());
     }
 }

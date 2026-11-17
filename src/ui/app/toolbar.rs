@@ -191,7 +191,7 @@ impl FileManagerApp {
                                 // Обычный клик сохраняет работу глобальных сочетаний клавиш.
                                 // Drag-ответ остаётся активным, даже если указатель вышел за вкладку.
                                 let (rect, resp) =
-                                    ui.allocate_exact_size(size, egui::Sense::click_and_drag());
+                                    ui.allocate_exact_size(size, tab_drag_sense());
                                 tab_rects.push((display_index, rect));
                                 if scroll_target == Some(self.tabs[*i].id) {
                                     scroll_target_rect = Some(rect);
@@ -532,16 +532,29 @@ impl FileManagerApp {
             {
                 self.go_forward(ctx);
             }
-            if icon_button(
+            let up_response = icon_button(
                 ui,
                 has_parent,
                 self.t("toolbar.up").to_owned(),
                 |p, r, c| {
                     icon_arrow(p, r, egui::vec2(0.0, -1.0), c);
                 },
-            )
-            .clicked()
-            {
+            );
+            let parent_folder = self.tabs[self.active]
+                .path
+                .parent()
+                .map(Path::to_path_buf);
+            self.handle_file_drop_response(
+                &up_response,
+                parent_folder.as_deref(),
+                parent_folder.is_some(),
+                parent_folder
+                    .as_deref()
+                    .is_some_and(|path| self.active_folder_accepts_drop(path)),
+                ui,
+                ctx,
+            );
+            if up_response.clicked() {
                 self.go_up(ctx);
             }
             if icon_button(ui, true, self.t("toolbar.refresh").to_owned(), |p, r, c| {
@@ -672,7 +685,16 @@ impl FileManagerApp {
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             for (label, seg_path) in &breadcrumbs {
-                                if ui.selectable_label(false, label).clicked() {
+                                let response = ui.selectable_label(false, label);
+                                self.handle_file_drop_response(
+                                    &response,
+                                    Some(seg_path),
+                                    true,
+                                    self.active_folder_accepts_drop(seg_path),
+                                    ui,
+                                    ctx,
+                                );
+                                if response.clicked() {
                                     self.navigate(self.active, seg_path.clone(), ctx);
                                 }
                                 ui.label("›");
@@ -742,5 +764,20 @@ fn primary_button_held(ctx: &egui::Context) -> bool {
         crate::platform::left_mouse_button_down()
     } else {
         ctx.input(|input| input.pointer.button_down(egui::PointerButton::Primary))
+    }
+}
+
+fn tab_drag_sense() -> egui::Sense {
+    egui::Sense::click_and_drag()
+}
+
+#[cfg(test)]
+mod file_dnd_regression_tests {
+    use super::*;
+
+    #[test]
+    fn tab_drag_still_works_after_file_dnd_added() {
+        assert!(tab_drag_sense().senses_click());
+        assert!(tab_drag_sense().senses_drag());
     }
 }

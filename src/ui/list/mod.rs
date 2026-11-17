@@ -23,6 +23,15 @@ use crate::ui::style;
 
 pub(crate) const ROW_HEIGHT: f32 = 24.0;
 pub(crate) const ICON_WIDTH: f32 = 26.0;
+
+fn empty_list_sense(table_view: bool) -> egui::Sense {
+    if table_view {
+        egui::Sense::click_and_drag()
+    } else {
+        egui::Sense::click()
+    }
+}
+
 impl FileManagerApp {
     /// Заголовок и виртуализированные строки выбранного режима отображения.
     pub(crate) fn file_list(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
@@ -36,11 +45,7 @@ impl FileManagerApp {
         // Background hit-test under the whole list: rows drawn later win their
         // rects, empty space falls through to this response.
         let bg = ui.available_rect_before_wrap();
-        let bg_sense = if table_view {
-            egui::Sense::click_and_drag()
-        } else {
-            egui::Sense::click()
-        };
+        let bg_sense = empty_list_sense(table_view);
         let bg_resp = ui.interact(bg, ui.scope_id().with("empty_list_area"), bg_sense);
         let mut group_drop: Option<(Vec<String>, String, bool)> = None;
         let mut marquee_rect = None;
@@ -109,9 +114,11 @@ impl FileManagerApp {
                     .collect();
                 let mut drop_target = None;
                 egui::ScrollArea::vertical()
+                    .id_salt("table_file_rows")
                     .auto_shrink([false, false])
                     .content_margin(table_rows_content_margin())
                     .show_rows(ui, ROW_HEIGHT, rows.len(), |ui, range| {
+                        self.auto_scroll_file_list(ui, ctx);
                         for index in range {
                             match &rows[index] {
                                 ListRow::Item(i) => {
@@ -136,8 +143,10 @@ impl FileManagerApp {
             }
             ViewMode::List => {
                 egui::ScrollArea::vertical()
+                    .id_salt("list_file_rows")
                     .auto_shrink([false, false])
                     .show_rows(ui, ROW_HEIGHT, count, |ui, range| {
+                        self.auto_scroll_file_list(ui, ctx);
                         for index in range {
                             self.list_row(ui, index, ctx, None);
                         }
@@ -195,6 +204,15 @@ impl FileManagerApp {
                         });
                 });
         }
+        let current_folder = self.tabs[self.active].path.clone();
+        self.handle_file_drop_response(
+            &bg_resp,
+            Some(&current_folder),
+            true,
+            self.active_folder_accepts_drop(&current_folder),
+            ui,
+            ctx,
+        );
         self.empty_area_menu(&bg_resp, ctx);
         self.scroll_to_cursor = false;
     }
@@ -803,5 +821,12 @@ mod tests {
     fn trash_folder_does_not_show_a_size_in_the_list_column() {
         assert!(!super::rows::shows_entry_size(true));
         assert!(super::rows::shows_entry_size(false));
+    }
+
+    #[test]
+    fn marquee_selection_still_works_after_dnd_added() {
+        assert!(empty_list_sense(true).senses_drag());
+        assert!(crate::ui::file_dnd::file_row_sense().senses_click());
+        assert!(crate::ui::file_dnd::file_row_sense().senses_drag());
     }
 }

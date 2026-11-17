@@ -1,4 +1,5 @@
 mod app;
+mod file_dnd;
 mod icons;
 mod list;
 mod opsui;

@@ -501,6 +501,8 @@ pub struct FileManagerApp {
     /// Drag state for reordering grouped table sections.
     pub(crate) group_drag: Option<(String, String)>,
     pub(crate) group_press: Option<(String, String, egui::Pos2)>,
+    pub(crate) file_drop_feedback: Option<crate::ui::file_dnd::DropFeedback>,
+    pub(crate) file_drag_candidate: Option<(egui::Id, Instant)>,
     thumbnail_tx: SyncSender<ThumbnailRequest>,
     thumbnail_jobs: HashMap<ThumbnailKey, Arc<AtomicBool>>,
     thumbnail_visible: HashSet<ThumbnailKey>,
@@ -780,6 +782,8 @@ impl FileManagerApp {
             pending_open_tabs: Vec::new(),
             group_drag: None,
             group_press: None,
+            file_drop_feedback: None,
+            file_drag_candidate: None,
             thumbnail_tx,
             thumbnail_jobs: HashMap::new(),
             thumbnail_visible: HashSet::new(),
@@ -1863,6 +1867,12 @@ fn breadcrumb_segments(path: &Path) -> Vec<(String, PathBuf)> {
 impl eframe::App for FileManagerApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.file_drop_feedback = None;
+        if !ctx.input(|input| input.pointer.button_down(egui::PointerButton::Primary)) {
+            self.file_drag_candidate = None;
+        }
+        let escape_pressed = ctx.input(|input| input.key_pressed(egui::Key::Escape));
+        let _ = crate::ui::file_dnd::cancel_on_escape(&ctx, escape_pressed);
         let close_requested = ctx.input(|input| input.viewport().close_requested());
         ctx.set_theme(match self.store.settings.theme {
             Theme::System => egui::ThemePreference::System,
@@ -1941,6 +1951,7 @@ impl eframe::App for FileManagerApp {
         egui::CentralPanel::default().show(ui, |ui| self.show_active_file_content(&ctx, ui));
 
         self.show_tab_drag_preview(&ctx);
+        self.show_file_drag_preview(&ctx);
         self.flush_pending_open_tabs(&ctx);
         self.show_detached_tab_windows(&ctx);
         self.finish_thumbnail_frame();
