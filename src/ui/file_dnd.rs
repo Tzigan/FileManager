@@ -476,6 +476,18 @@ pub(crate) fn tab_drop_destination(tab: &Tab) -> Option<&Path> {
     (tab.archive_prefix.is_none() && !tab.secure_trash).then_some(tab.path.as_path())
 }
 
+pub(crate) fn file_drag_payload_active(
+    ctx: &egui::Context,
+    response: Option<&egui::Response>,
+) -> bool {
+    // Общая проверка синхронизирует hover таб-бара с регистрацией drop-цели.
+    egui::DragAndDrop::has_payload_of_type::<FileDragPayload>(ctx)
+        || response.is_some_and(|response| {
+            response.dnd_hover_payload::<FileDragPayload>().is_some()
+                || response.dnd_release_payload::<FileDragPayload>().is_some()
+        })
+}
+
 fn drop_hint_lines(
     count_label: &str,
     count: usize,
@@ -573,6 +585,16 @@ fn register_release_feedback(release: &mut Option<DropFeedback>, candidate: Drop
 
 fn feedback_paints_target(feedback: &DropFeedback) -> bool {
     feedback.surface != DropSurface::Other && feedback.target_rect.is_some()
+}
+
+fn drop_cursor_icon(feedback: &DropFeedback) -> egui::CursorIcon {
+    if feedback.plan.is_some() && feedback.surface != DropSurface::Tab {
+        egui::CursorIcon::PointingHand
+    } else if feedback.reason.is_some() {
+        egui::CursorIcon::NotAllowed
+    } else {
+        egui::CursorIcon::Default
+    }
 }
 
 fn paint_drop_feedback(ui: &egui::Ui, layer_id: egui::LayerId, rect: egui::Rect, valid: bool) {
@@ -759,12 +781,10 @@ impl FileManagerApp {
         &mut self,
         response: &egui::Response,
         tab_id: u64,
+        payload_active: bool,
         ui: &egui::Ui,
         ctx: &egui::Context,
     ) {
-        let payload_active = egui::DragAndDrop::has_payload_of_type::<FileDragPayload>(ctx)
-            || response.dnd_hover_payload::<FileDragPayload>().is_some()
-            || response.dnd_release_payload::<FileDragPayload>().is_some();
         if !payload_active {
             return;
         }
@@ -868,13 +888,7 @@ impl FileManagerApp {
 
     pub(crate) fn finish_file_drop_frame(&mut self, ui: &egui::Ui, ctx: &egui::Context) {
         if let Some(feedback) = self.file_drop_feedback.as_ref() {
-            ctx.set_cursor_icon(if feedback.plan.is_some() {
-                egui::CursorIcon::PointingHand
-            } else if feedback.reason.is_some() {
-                egui::CursorIcon::NotAllowed
-            } else {
-                egui::CursorIcon::Default
-            });
+            ctx.set_cursor_icon(drop_cursor_icon(feedback));
             if feedback_paints_target(feedback)
                 && let (Some(rect), Some(layer_id)) = (feedback.target_rect, feedback.layer_id)
             {
@@ -2487,10 +2501,9 @@ mod tests {
             .split("pub(crate) fn handle_file_drop_response_with_reason")
             .next()
             .unwrap();
-        assert!(handler.contains("has_payload_of_type::<FileDragPayload>(ctx)"));
-        assert!(
-            handler.find("if !payload_active").unwrap() < handler.find("DropSurface::Tab").unwrap()
-        );
+        assert!(handler.contains("payload_active: bool"));
+        assert!(handler.contains("if !payload_active"));
+        assert!(handler.find("if !payload_active").unwrap() < handler.find("DropSurface::Tab").unwrap());
     }
 
     #[test]
@@ -2517,7 +2530,9 @@ mod tests {
             .split("pub(super) fn detached_viewport_builder_at")
             .next()
             .unwrap();
-        assert!(detached.contains("self.handle_tab_drop_response(&response, tab_id, ui, ctx)"));
+        assert!(detached.contains(
+            "self.handle_tab_drop_response(&response, tab_id, file_payload_active, ui, ctx)"
+        ));
 
         let app = include_str!("app/mod.rs");
         assert!(
@@ -2877,5 +2892,105 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn tab_drop_target_highlight_not_suppressed_while_payload_active() {
+        let mut tab = feedback(DropSurface::Tab, Some("C:\\Target"), true);
+        tab.target_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(100.0, 24.0),
+        ));
+        let ctx = {
+            let ctx = egui::Context::default();
+            egui::DragAndDrop::set_payload(
+                &ctx,
+                FileDragPayload {
+                    sources: vec![DragSource {
+                        key: key(&entry(r"C:\Source\a.txt", false)),
+                        path: PathBuf::from(r"C:\Source\a.txt"),
+                        is_dir: false,
+                        volume: Some("VOL".into()),
+                    }],
+                },
+            );
+            ctx
+        };
+        assert!(file_drag_payload_active(&ctx, None));
+        assert!(feedback_paints_target(&tab));
+        assert_eq!(drop_cursor_icon(&tab), egui::CursorIcon::Default);
+    }
+
+    #[test]
+    fn drop_on_close_area_still_routes_to_tab_target() {
+        let toolbar = include_str!("app/toolbar.rs");
+        let tab_bar = toolbar.split("pub(super) fn tab_bar").nth(1).unwrap();
+        assert!(tab_bar.contains("let x_rect = egui::Rect::from_min_max"));
+        assert!(tab_bar.contains("self.handle_tab_drop_response("));
+        assert!(tab_bar.contains("tab_file_payload_active"));
+        let dnd = include_str!("file_dnd.rs");
+        let handler = dnd
+            .split("pub(crate) fn handle_tab_drop_response")
+            .nth(1)
+            .unwrap()
+            .split("pub(crate) fn handle_file_drop_response_with_reason")
+            .next()
+            .unwrap();
+        assert!(handler.contains("DropSurface::Tab"));
+    }
+
+    #[test]
+    fn hover_suppression_uses_same_payload_check_as_tab_surface() {
+        let toolbar = include_str!("app/toolbar.rs");
+        assert!(toolbar.contains("file_drag_payload_active(ctx, Some(&resp))"));
+        assert!(toolbar.contains("tab_file_payload_active,\n                                    ui"));
+        let handler = include_str!("file_dnd.rs")
+            .split("pub(crate) fn handle_tab_drop_response")
+            .nth(1)
+            .unwrap()
+            .split("pub(crate) fn handle_file_drop_response_with_reason")
+            .next()
+            .unwrap();
+        assert!(handler.contains("if !payload_active"));
+    }
+
+    #[test]
+    fn tab_reorder_and_detach_unaffected_by_hover_suppression() {
+        let toolbar = include_str!("app/toolbar.rs");
+        assert!(toolbar.contains("self.advance_tab_drag_state(ctx)"));
+        assert!(toolbar.contains("let (rect, resp) ="));
+        assert!(toolbar.contains("if !suppress_tab_clicks && resp.clicked()"));
+        let preview = include_str!("app/tab_drag_preview.rs");
+        assert!(preview.contains("pub(super) fn advance_tab_drag_state"));
+        let detached = include_str!("app/window_frame.rs");
+        assert!(detached.contains("ViewportCommand::StartDrag"));
+        assert!(detached.contains("let close_hovered = !file_payload_active"));
+    }
+
+    #[test]
+    fn existing_tab_and_dnd_tests_not_regressed() {
+        let tests = include_str!("app/tests.rs");
+        for name in [
+            "tab_drag_fsm_distinguishes_click_drag_and_close_hitbox",
+        ] {
+            assert!(tests.contains(name));
+        }
+        let dnd_tests = include_str!("file_dnd.rs");
+        for name in [
+            "tab_drop_target_highlight_not_suppressed_while_payload_active",
+            "file_payload_on_tab_does_not_start_tab_fsm",
+            "tab_drop_defaults_to_move_even_cross_volume",
+            "tab_reorder_and_detach_unaffected_by_hover_suppression",
+        ] {
+            assert!(dnd_tests.contains(name));
+        }
+    }
+
+    #[test]
+    fn existing_hotkey_docs_tests_not_regressed() {
+        let dialogs = include_str!("app/dialogs.rs");
+        assert!(dialogs.contains("hotkey_registry_includes_dnd_gestures"));
+        assert!(dialogs.contains("hotkey_window_displays_all_dnd_entries"));
+        assert!(dialogs.contains("existing_hotkey_tests_not_regressed"));
     }
 }

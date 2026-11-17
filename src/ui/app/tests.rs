@@ -1,4 +1,5 @@
 //! Тесты расположения вкладок, навигации и окон.
+use super::chrome::tab_hover_affordances_enabled;
 use super::{
     MANUAL_UPDATE_CHECK_TIMEOUT, PreviewState, STARTUP_UPDATE_CHECK_ID, UpdateCheckState,
     SHUTDOWN_NOTICE_DELAY, ShutdownOperation, ShutdownOperationKind, ShutdownProgress,
@@ -360,11 +361,13 @@ fn tab_drag_fsm_distinguishes_click_drag_and_close_hitbox() {
     assert!(tab_close_button_hovered(
         false,
         false,
+        false,
         close_rect,
         Some(close_rect.center())
     ));
     assert!(!tab_close_button_hovered(
         true,
+        false,
         false,
         close_rect,
         Some(close_rect.center())
@@ -409,6 +412,28 @@ fn tab_drag_fsm_distinguishes_click_drag_and_close_hitbox() {
         TabDragState::Cancelled
     );
     assert!(TabDragState::Cancelled.is_active());
+}
+
+#[test]
+fn tab_close_hover_suppressed_while_file_payload_active() {
+    let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(24.0, 24.0));
+    assert!(!tab_close_button_hovered(false, true, false, rect, Some(rect.center())));
+}
+
+#[test]
+fn tab_close_hover_and_click_normal_without_payload() {
+    let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(24.0, 24.0));
+    assert!(tab_close_button_hovered(false, false, false, rect, Some(rect.center())));
+    let toolbar = include_str!("toolbar.rs");
+    assert!(toolbar.contains("if in_x"));
+    assert!(toolbar.contains("act = Some((\"close\", *i))"));
+}
+
+#[test]
+fn plus_button_hover_suppressed_while_file_payload_active() {
+    assert!(!tab_hover_affordances_enabled(true));
+    assert!(tab_hover_affordances_enabled(false));
+    assert!(include_str!("toolbar.rs").contains("add_enabled_ui(plus_hover_affordances_enabled"));
 }
 
 #[test]

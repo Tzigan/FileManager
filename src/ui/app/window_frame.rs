@@ -576,8 +576,14 @@ impl FileManagerApp {
                 .max(DETACHED_TAB_MIN_WIDTH);
             let size = egui::vec2(desired_size.x.min(max_tab_width), desired_size.y);
             let (tab_rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
-            let response = response.on_hover_text(title);
-            self.handle_tab_drop_response(&response, tab_id, ui, ctx);
+            let file_payload_active =
+                crate::ui::file_dnd::file_drag_payload_active(ctx, Some(&response));
+            let response = if file_payload_active {
+                response
+            } else {
+                response.on_hover_text(title)
+            };
+            self.handle_tab_drop_response(&response, tab_id, file_payload_active, ui, ctx);
             let close_rect = egui::Rect::from_min_max(
                 egui::pos2(tab_rect.max.x - close_width, tab_rect.min.y),
                 tab_rect.max,
@@ -615,9 +621,10 @@ impl FileManagerApp {
                 );
             } else {
                 let cross = TAB_CLOSE_CROSS_RADIUS;
-                let close_hovered = response
-                    .interact_pointer_pos()
-                    .is_some_and(|position| close_rect.contains(position));
+                let close_hovered = !file_payload_active
+                    && response
+                        .interact_pointer_pos()
+                        .is_some_and(|position| close_rect.contains(position));
                 if close_hovered {
                     ui.painter().rect_filled(
                         close_rect.shrink(TAB_CLOSE_HIGHLIGHT_INSET),
