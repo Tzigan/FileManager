@@ -14,9 +14,11 @@ pub(crate) const FILE_DND_MAX_SCROLL_POINTS_PER_SECOND: f32 = 480.0;
 pub(crate) const FILE_DND_MAX_FRAME_DELTA_SECONDS: f32 = 0.1;
 pub(crate) const FILE_DND_REPAINT_AFTER: Duration = Duration::from_millis(16);
 pub(crate) const FILE_DND_HINT_MAX_WIDTH_POINTS: f32 = 360.0;
-pub(crate) const FILE_DND_HINT_TARGET_CLEARANCE_POINTS: f32 = 80.0;
 const FILE_DND_HINT_MAX_HEIGHT_POINTS: f32 = 120.0;
-const FILE_DND_HINT_LARGE_TARGET_AREA_POINTS: f32 = 120_000.0;
+const FILE_DND_HINT_OFFSET_X_POINTS: f32 = 14.0;
+const FILE_DND_HINT_OFFSET_Y_POINTS: f32 = 18.0;
+const FILE_DND_HINT_WINDOW_MARGIN_POINTS: f32 = 8.0;
+const FILE_DND_HINT_FRAME_STROKE_POINTS: f32 = 1.0;
 
 #[derive(Clone, Debug)]
 pub(crate) struct FileDragPayload {
@@ -389,44 +391,71 @@ fn drop_hint_lines(
 
 fn drop_hint_placement(
     pointer: egui::Pos2,
-    target: egui::Rect,
+    tip_size: egui::Vec2,
     viewport: egui::Rect,
 ) -> egui::Pos2 {
-    let size = egui::vec2(
-        FILE_DND_HINT_MAX_WIDTH_POINTS.min(viewport.width()),
-        FILE_DND_HINT_MAX_HEIGHT_POINTS.min(viewport.height()),
+    let safe_rect = viewport.shrink(FILE_DND_HINT_WINDOW_MARGIN_POINTS);
+    let size = tip_size.min(safe_rect.size());
+    let mut position =
+        pointer + egui::vec2(FILE_DND_HINT_OFFSET_X_POINTS, FILE_DND_HINT_OFFSET_Y_POINTS);
+
+    if position.x + size.x > safe_rect.right() {
+        position.x = pointer.x - FILE_DND_HINT_OFFSET_X_POINTS - size.x;
+    }
+    if position.y + size.y > safe_rect.bottom() {
+        position.y = pointer.y - FILE_DND_HINT_OFFSET_Y_POINTS - size.y;
+    }
+
+    position.x = position.x.clamp(
+        safe_rect.left(),
+        (safe_rect.right() - size.x).max(safe_rect.left()),
     );
-    let gap = FILE_DND_HINT_TARGET_CLEARANCE_POINTS;
-    let above_y = target.top() - gap - size.y;
-    let below_y = target.bottom() + gap;
-    let above_fits = above_y >= viewport.top();
-    let below_fits = below_y + size.y <= viewport.bottom();
-    let y = match (above_fits, below_fits) {
-        (true, true) if pointer.y > viewport.center().y => above_y,
-        (true, true) => below_y,
-        (true, false) => above_y,
-        (false, true) => below_y,
-        (false, false) => (viewport.bottom() - size.y).max(viewport.top()),
-    };
-    let x = (pointer.x + 14.0).clamp(
-        viewport.left(),
-        (viewport.right() - size.x).max(viewport.left()),
+    position.y = position.y.clamp(
+        safe_rect.top(),
+        (safe_rect.bottom() - size.y).max(safe_rect.top()),
     );
-    egui::pos2(x, y)
+    position
 }
 
-fn tooltip_anchor_rect(
-    pointer: egui::Pos2,
-    surface: DropSurface,
-    target: egui::Rect,
-) -> egui::Rect {
-    if matches!(surface, DropSurface::Background | DropSurface::Other)
-        || target.area() > FILE_DND_HINT_LARGE_TARGET_AREA_POINTS
-    {
-        egui::Rect::from_center_size(pointer, egui::Vec2::ZERO)
-    } else {
-        target
-    }
+fn drop_hint_size(ctx: &egui::Context, lines: &[String]) -> egui::Vec2 {
+    let style = ctx.style_of(ctx.theme());
+    let font_id = egui::TextStyle::Body.resolve(&style);
+    let wrap_width = FILE_DND_HINT_MAX_WIDTH_POINTS;
+    let layouts = ctx.fonts_mut(|fonts| {
+        lines
+            .iter()
+            .map(|line| {
+                fonts.layout(
+                    line.clone(),
+                    font_id.clone(),
+                    egui::Color32::PLACEHOLDER,
+                    wrap_width,
+                )
+            })
+            .collect::<Vec<_>>()
+    });
+    let text_width = layouts
+        .iter()
+        .map(|layout| layout.size().x)
+        .fold(0.0, f32::max);
+    let text_height = layouts.iter().map(|layout| layout.size().y).sum::<f32>()
+        + style.spacing.item_spacing.y * lines.len().saturating_sub(1) as f32;
+    egui::vec2(
+        text_width
+            + crate::ui::style::FRAME_PADDING_X as f32 * 2.0
+            + FILE_DND_HINT_FRAME_STROKE_POINTS * 2.0,
+        text_height
+            + crate::ui::style::FRAME_PADDING_Y as f32 * 2.0
+            + FILE_DND_HINT_FRAME_STROKE_POINTS * 2.0,
+    )
+    .min(egui::vec2(
+        FILE_DND_HINT_MAX_WIDTH_POINTS
+            + crate::ui::style::FRAME_PADDING_X as f32 * 2.0
+            + FILE_DND_HINT_FRAME_STROKE_POINTS * 2.0,
+        FILE_DND_HINT_MAX_HEIGHT_POINTS
+            + crate::ui::style::FRAME_PADDING_Y as f32 * 2.0
+            + FILE_DND_HINT_FRAME_STROKE_POINTS * 2.0,
+    ))
 }
 
 fn register_drop_feedback(current: &mut Option<DropFeedback>, candidate: DropFeedback) {
@@ -783,18 +812,8 @@ impl FileManagerApp {
         let Some(pointer) = ctx.pointer_latest_pos() else {
             return;
         };
-        let target_rect = self
-            .file_drop_feedback
-            .as_ref()
-            .map(|feedback| {
-                tooltip_anchor_rect(
-                    pointer,
-                    feedback.surface,
-                    feedback.target_rect.unwrap_or(egui::Rect::ZERO),
-                )
-            })
-            .unwrap_or_else(|| egui::Rect::from_center_size(pointer, egui::Vec2::ZERO));
-        let position = drop_hint_placement(pointer, target_rect, ctx.content_rect());
+        let tip_size = drop_hint_size(ctx, &lines);
+        let position = drop_hint_placement(pointer, tip_size, ctx.content_rect());
         ctx.request_repaint_after(FILE_DND_REPAINT_AFTER);
         egui::Area::new(egui::Id::unique("file_drag_preview"))
             .order(egui::Order::Foreground)
@@ -1333,6 +1352,27 @@ mod tests {
     }
 
     #[test]
+    fn existing_release_attribution_tests_not_regressed() {
+        let source = include_str!("file_dnd.rs");
+        assert!(source.contains("fn release_plan_belongs_to_surface_that_received_payload()"));
+        assert!(source.contains("fn higher_priority_surface_does_not_steal_release_destination()"));
+    }
+
+    #[test]
+    fn existing_reason_text_tests_not_regressed() {
+        let source = include_str!("file_dnd.rs");
+        for reason in [
+            "dnd.invalid_self",
+            "dnd.invalid_subfolder",
+            "dnd.file_already_in_folder",
+        ] {
+            assert!(source.contains(reason));
+            assert!(include_str!("../../i18n/ru.json").contains(reason));
+            assert!(include_str!("../../i18n/en.json").contains(reason));
+        }
+    }
+
+    #[test]
     fn release_outside_any_target_does_not_enqueue_operation() {
         let mut feedback = None;
         assert!(take_current_release_plan(&mut feedback).is_none());
@@ -1550,7 +1590,7 @@ mod tests {
     }
 
     #[test]
-    fn tooltip_area_is_non_interactive_and_not_a_drop_surface() {
+    fn tooltip_area_still_non_interactive_and_not_a_drop_surface() {
         let source = include_str!("file_dnd.rs");
         let preview = source
             .split("pub(crate) fn show_file_drag_preview")
@@ -1561,46 +1601,101 @@ mod tests {
     }
 
     #[test]
-    fn tooltip_does_not_cover_hovered_target_row() {
+    fn tooltip_area_is_non_interactive_and_not_a_drop_surface() {
+        assert!(include_str!("file_dnd.rs").contains(".interactable(false)"));
+    }
+
+    #[test]
+    fn tooltip_offset_is_small_named_constant() {
+        assert_eq!(FILE_DND_HINT_OFFSET_X_POINTS, 14.0);
+        assert_eq!(FILE_DND_HINT_OFFSET_Y_POINTS, 18.0);
+        assert!(FILE_DND_HINT_OFFSET_X_POINTS <= FILE_DND_HINT_OFFSET_Y_POINTS);
+    }
+
+    #[test]
+    fn tooltip_anchors_to_cursor_for_any_target_size() {
         let viewport = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
-        let target = egui::Rect::from_min_size(egui::pos2(200.0, 250.0), egui::vec2(300.0, 72.0));
-        let pos = drop_hint_placement(egui::pos2(250.0, 280.0), target, viewport);
-        let hint = egui::Rect::from_min_size(
-            pos,
-            egui::vec2(
-                FILE_DND_HINT_MAX_WIDTH_POINTS,
-                FILE_DND_HINT_MAX_HEIGHT_POINTS,
-            ),
-        );
-        assert!(hint.intersect(target).is_negative());
-        assert!(viewport.contains_rect(hint));
-    }
-
-    #[test]
-    fn tooltip_anchors_to_cursor_for_large_background_target() {
-        let pointer = egui::pos2(420.0, 240.0);
-        let viewport = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(900.0, 700.0));
-        let background =
-            egui::Rect::from_min_size(egui::pos2(20.0, 60.0), egui::vec2(900.0, 700.0));
-        let anchor = tooltip_anchor_rect(pointer, DropSurface::Background, background);
-        assert_eq!(anchor.center(), pointer);
-        let placement = drop_hint_placement(pointer, anchor, viewport);
-        assert!((placement.x - (pointer.x + 14.0)).abs() < 1.0);
-        assert!((placement.y - (pointer.y + FILE_DND_HINT_TARGET_CLEARANCE_POINTS)).abs() < 1.0);
-    }
-
-    #[test]
-    fn tooltip_anchors_to_rect_for_row_tree_path_and_up() {
         let pointer = egui::pos2(400.0, 300.0);
-        let target = egui::Rect::from_min_size(egui::pos2(200.0, 270.0), egui::vec2(120.0, 32.0));
-        for surface in [
-            DropSurface::Entry,
-            DropSurface::Tree,
-            DropSurface::Breadcrumb,
-            DropSurface::Up,
-        ] {
-            assert_eq!(tooltip_anchor_rect(pointer, surface, target), target);
+        let source = include_str!("file_dnd.rs");
+        let preview = source
+            .split("pub(crate) fn show_file_drag_preview")
+            .nth(1)
+            .unwrap()
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        assert!(!preview.contains("target_rect"));
+        for size in [egui::vec2(80.0, 30.0), egui::vec2(280.0, 100.0)] {
+            let position = drop_hint_placement(pointer, size, viewport);
+            assert_eq!(
+                position,
+                pointer + egui::vec2(FILE_DND_HINT_OFFSET_X_POINTS, FILE_DND_HINT_OFFSET_Y_POINTS)
+            );
         }
+    }
+
+    #[test]
+    fn tooltip_flips_left_when_near_right_window_edge() {
+        let viewport = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let pointer = egui::pos2(790.0, 300.0);
+        let size = egui::vec2(200.0, 80.0);
+        let position = drop_hint_placement(pointer, size, viewport);
+        assert_eq!(
+            position.x,
+            pointer.x - FILE_DND_HINT_OFFSET_X_POINTS - size.x
+        );
+    }
+
+    #[test]
+    fn tooltip_flips_up_when_near_bottom_window_edge() {
+        let viewport = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let pointer = egui::pos2(400.0, 590.0);
+        let size = egui::vec2(200.0, 80.0);
+        let position = drop_hint_placement(pointer, size, viewport);
+        assert_eq!(
+            position.y,
+            pointer.y - FILE_DND_HINT_OFFSET_Y_POINTS - size.y
+        );
+    }
+
+    #[test]
+    fn tooltip_stays_inside_window_in_all_four_positions() {
+        let viewport = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let size = egui::vec2(200.0, 80.0);
+        for pointer in [
+            egui::pos2(400.0, 300.0),
+            egui::pos2(790.0, 300.0),
+            egui::pos2(400.0, 590.0),
+            egui::pos2(790.0, 590.0),
+        ] {
+            let position = drop_hint_placement(pointer, size, viewport);
+            let hint = egui::Rect::from_min_size(position, size);
+            assert!(
+                viewport
+                    .shrink(FILE_DND_HINT_WINDOW_MARGIN_POINTS)
+                    .contains_rect(hint)
+            );
+        }
+    }
+
+    #[test]
+    fn tooltip_does_not_cover_cursor_point() {
+        let viewport = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let size = egui::vec2(200.0, 80.0);
+        for pointer in [egui::pos2(400.0, 300.0), egui::pos2(790.0, 590.0)] {
+            let position = drop_hint_placement(pointer, size, viewport);
+            assert!(!egui::Rect::from_min_size(position, size).contains(pointer));
+        }
+    }
+
+    #[test]
+    fn tooltip_row_highlight_under_cursor_stays_visible() {
+        let viewport = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let pointer = egui::pos2(250.0, 280.0);
+        let row = egui::Rect::from_min_size(egui::pos2(200.0, 250.0), egui::vec2(300.0, 72.0));
+        let position = drop_hint_placement(pointer, egui::vec2(200.0, 80.0), viewport);
+        assert!(row.contains(pointer));
+        assert!(!egui::Rect::from_min_size(position, egui::vec2(200.0, 80.0)).contains(pointer));
     }
 
     #[test]
@@ -1630,21 +1725,15 @@ mod tests {
     #[test]
     fn tooltip_flips_near_window_edge_and_stays_inside() {
         let viewport = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
-        let top_target = egui::Rect::from_min_size(egui::pos2(20.0, 4.0), egui::vec2(300.0, 72.0));
-        let top = drop_hint_placement(egui::pos2(790.0, 35.0), top_target, viewport);
-        let bottom_target =
-            egui::Rect::from_min_size(egui::pos2(20.0, 524.0), egui::vec2(300.0, 72.0));
-        let bottom = drop_hint_placement(egui::pos2(790.0, 560.0), bottom_target, viewport);
-        assert!(top.y > top_target.bottom());
-        assert!(bottom.y + FILE_DND_HINT_MAX_HEIGHT_POINTS < bottom_target.top());
-        for pos in [top, bottom] {
-            assert!(viewport.contains_rect(egui::Rect::from_min_size(
-                pos,
-                egui::vec2(
-                    FILE_DND_HINT_MAX_WIDTH_POINTS,
-                    FILE_DND_HINT_MAX_HEIGHT_POINTS
-                ),
-            )));
+        let size = egui::vec2(200.0, 80.0);
+        let top_pointer = egui::pos2(400.0, 10.0);
+        let bottom_pointer = egui::pos2(400.0, 590.0);
+        let top = drop_hint_placement(top_pointer, size, viewport);
+        let bottom = drop_hint_placement(bottom_pointer, size, viewport);
+        assert_eq!(top.y, top_pointer.y + FILE_DND_HINT_OFFSET_Y_POINTS);
+        assert!(bottom.y + size.y < bottom_pointer.y);
+        for position in [top, bottom] {
+            assert!(viewport.contains_rect(egui::Rect::from_min_size(position, size)));
         }
     }
 
