@@ -159,6 +159,10 @@ pub struct Settings {
     pub pinned_tabs: Vec<PathBuf>,
     pub active_tab: usize,
     pub bookmarks: Vec<PathBuf>,
+    #[serde(default)]
+    pub bookmarks_system_collapsed: bool,
+    #[serde(default)]
+    pub bookmarks_personal_collapsed: bool,
     pub show_hidden_files: bool,
     pub show_wsl_in_tree: bool,
     pub view_mode: ViewMode,
@@ -246,6 +250,8 @@ impl Default for Settings {
             pinned_tabs: Vec::new(),
             active_tab: 0,
             bookmarks: Vec::new(),
+            bookmarks_system_collapsed: false,
+            bookmarks_personal_collapsed: false,
             show_hidden_files: false,
             show_wsl_in_tree: true,
             view_mode: ViewMode::default(),
@@ -271,14 +277,16 @@ impl Default for Settings {
 }
 
 impl Settings {
-    /// Сбрасывает поведение, сохраняя `tabs`, `pinned_tabs`, `active_tab`, `bookmarks`
-    /// и `secure_trash_folders`. Эта граница фиксирована и не является переключателем.
+    /// Сбрасывает поведение, сохраняя вкладки, закладки и папки защищённой корзины.
+    /// Сворачивание секций — пользовательская раскладка, поэтому оно тоже сохраняется.
     pub fn reset_behavior_preserving_user_data(&mut self) {
         let tabs = std::mem::take(&mut self.tabs);
         let pinned_tabs = std::mem::take(&mut self.pinned_tabs);
         let active_tab = self.active_tab;
         let bookmarks = std::mem::take(&mut self.bookmarks);
         let secure_trash_folders = std::mem::take(&mut self.secure_trash_folders);
+        let bookmarks_system_collapsed = self.bookmarks_system_collapsed;
+        let bookmarks_personal_collapsed = self.bookmarks_personal_collapsed;
 
         *self = Self::default();
         self.tabs = tabs;
@@ -286,6 +294,8 @@ impl Settings {
         self.active_tab = active_tab;
         self.bookmarks = bookmarks;
         self.secure_trash_folders = secure_trash_folders;
+        self.bookmarks_system_collapsed = bookmarks_system_collapsed;
+        self.bookmarks_personal_collapsed = bookmarks_personal_collapsed;
     }
 }
 
@@ -556,6 +566,35 @@ mod tests {
     }
 
     #[test]
+    fn bookmark_collapse_fields_default_to_false_when_missing_in_settings() {
+        let dir = temp_config();
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("settings.json"), r#"{"bookmarks":["C:\\saved"]}"#).unwrap();
+
+        let loaded = SettingsStore::load(&dir);
+        assert_eq!(loaded.load_issue, None);
+        assert!(!loaded.settings.bookmarks_system_collapsed);
+        assert!(!loaded.settings.bookmarks_personal_collapsed);
+        assert_eq!(loaded.settings.bookmarks, vec![PathBuf::from("C:\\saved")]);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn bookmark_collapse_roundtrip_persists_values() {
+        let dir = temp_config();
+        let mut store = SettingsStore::load(&dir);
+        store.settings.bookmarks_system_collapsed = true;
+        store.settings.bookmarks_personal_collapsed = false;
+        store.save().unwrap();
+
+        let loaded = SettingsStore::load(&dir);
+        assert_eq!(loaded.load_issue, None);
+        assert!(loaded.settings.bookmarks_system_collapsed);
+        assert!(!loaded.settings.bookmarks_personal_collapsed);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn legacy_settings_keep_existing_values_and_default_new_preferences() {
         let dir = temp_config();
         std::fs::create_dir_all(&dir).unwrap();
@@ -580,6 +619,8 @@ mod tests {
         assert!(loaded.settings.enable_mouse_side_navigation);
         assert!(loaded.settings.auto_restart_after_update);
         assert_eq!(loaded.settings.update_restart_delay_secs, 3);
+        assert!(!loaded.settings.bookmarks_system_collapsed);
+        assert!(!loaded.settings.bookmarks_personal_collapsed);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -641,6 +682,22 @@ mod tests {
     }
 
     #[test]
+    fn bookmark_collapse_preserved_by_settings_reset() {
+        let mut settings = Settings {
+            bookmarks_system_collapsed: true,
+            bookmarks_personal_collapsed: true,
+            show_hidden_files: true,
+            ..Settings::default()
+        };
+
+        settings.reset_behavior_preserving_user_data();
+
+        assert!(settings.bookmarks_system_collapsed);
+        assert!(settings.bookmarks_personal_collapsed);
+        assert!(!settings.show_hidden_files);
+    }
+
+    #[test]
     fn settings_reset_clears_behavior_params_only() {
         let mut settings = Settings {
             language: Language::En,
@@ -649,6 +706,8 @@ mod tests {
             pinned_tabs: vec![PathBuf::from("C:\\work")],
             active_tab: 0,
             bookmarks: vec![PathBuf::from("D:\\docs")],
+            bookmarks_system_collapsed: false,
+            bookmarks_personal_collapsed: false,
             show_hidden_files: true,
             show_wsl_in_tree: false,
             view_mode: ViewMode::Grid,
@@ -760,6 +819,8 @@ mod tests {
             "active_tab",
             "auto_restart_after_update",
             "bookmarks",
+            "bookmarks_personal_collapsed",
+            "bookmarks_system_collapsed",
             "col_modified",
             "col_size",
             "col_type",
@@ -787,6 +848,19 @@ mod tests {
         actual.sort_unstable();
         expected.sort_unstable();
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn existing_settings_save_and_reset_tests_not_regressed() {
+        let source = include_str!("settings.rs");
+        for test in [
+            "settings_store_persists_user_preferences_and_open_tabs",
+            "settings_store_atomically_replaces_existing_file",
+            "settings_reset_preserves_user_bookmarks_and_tabs",
+            "settings_reset_save_failure_states_session_only",
+        ] {
+            assert!(source.contains(test));
+        }
     }
 
     #[test]
