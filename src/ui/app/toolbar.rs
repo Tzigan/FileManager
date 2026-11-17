@@ -192,6 +192,7 @@ impl FileManagerApp {
                                 // Drag-ответ остаётся активным, даже если указатель вышел за вкладку.
                                 let (rect, resp) =
                                     ui.allocate_exact_size(size, tab_drag_sense());
+                                let tab_id = self.tabs[*i].id;
                                 tab_rects.push((display_index, rect));
                                 if scroll_target == Some(self.tabs[*i].id) {
                                     scroll_target_rect = Some(rect);
@@ -383,6 +384,7 @@ impl FileManagerApp {
                                         ),
                                     );
                                 }
+                                self.handle_tab_drop_response(&resp, tab_id, ui, ctx);
                             });
                         }
                     });
