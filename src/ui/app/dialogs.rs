@@ -1877,6 +1877,8 @@ mod tests {
             "active_tab",
             "auto_restart_after_update",
             "bookmarks",
+            "bookmarks_personal_collapsed",
+            "bookmarks_system_collapsed",
             "col_modified",
             "col_size",
             "col_type",

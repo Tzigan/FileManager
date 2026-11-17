@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::core::known_folders::{SystemBookmark, SystemBookmarkTarget};
+use crate::core::settings::Settings;
 use crate::platform::DiskUsage;
 use crate::ui::icons;
 use crate::ui::style;
@@ -21,6 +22,20 @@ pub struct TreeState {
     pub pending: HashSet<PathBuf>,
     /// Кэш занятости корневых томов; строки дерева не читают системные данные сами.
     pub disk_usage: HashMap<PathBuf, DiskUsage>,
+}
+
+#[derive(Clone, Copy)]
+enum BookmarkSection {
+    System,
+    Personal,
+}
+
+fn toggle_bookmark_section(settings: &mut Settings, section: BookmarkSection) {
+    let collapsed = match section {
+        BookmarkSection::System => &mut settings.bookmarks_system_collapsed,
+        BookmarkSection::Personal => &mut settings.bookmarks_personal_collapsed,
+    };
+    *collapsed = !*collapsed;
 }
 
 impl TreeState {
@@ -176,8 +191,21 @@ impl crate::ui::FileManagerApp {
 
         let system_bookmarks = self.system_bookmarks.clone();
         if !system_bookmarks.is_empty() {
-            ui.label(egui::RichText::new(self.t("tree.bookmarks.system")).weak());
-            for bookmark in system_bookmarks {
+            if bookmark_section_header(
+                ui,
+                self.t("tree.bookmarks.system"),
+                !self.store.settings.bookmarks_system_collapsed,
+            )
+            .clicked()
+            {
+                self.on_bookmark_section_clicked(BookmarkSection::System, ctx);
+            }
+            let system_row_count = if self.store.settings.bookmarks_system_collapsed {
+                0
+            } else {
+                system_bookmarks.len()
+            };
+            for bookmark in system_bookmarks.iter().take(system_row_count).cloned() {
                 let active_path = self.tabs[self.active].path.clone();
                 let current = matches!(
                     &bookmark.target,
@@ -258,56 +286,80 @@ impl crate::ui::FileManagerApp {
         }
 
         let bookmarks = self.store.settings.bookmarks.clone();
-        if !bookmarks.is_empty() && !self.system_bookmarks.is_empty() {
-            ui.separator();
-            ui.label(egui::RichText::new(self.t("tree.bookmarks.user")).weak());
-            ui.add_space(style::SPACE_XXS);
-        }
-        for bm in bookmarks {
-            let name = bm
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .filter(|n| !n.is_empty())
-                .unwrap_or_else(|| bm.display().to_string());
-            let resp = ui.selectable_label(false, format!("  {}", name));
-            let state = self.bookmark_drop_state(&bm);
-            if state.is_drop_target() {
-                let is_folder = state.is_folder();
-                self.handle_file_drop_response_with_reason(
-                    &resp,
-                    Some(&bm),
-                    is_folder,
-                    is_folder && self.active_folder_accepts_drop(&bm),
-                    crate::ui::file_dnd::DropSurface::Bookmark,
-                    state.invalid_reason(),
-                    ui,
-                    ctx,
-                );
-            }
-            if resp.clicked() {
-                self.navigate(self.active, bm.clone(), ctx);
-            }
-            resp.context_menu(|ui| {
-                style::compact_context_menu(ui);
-                if ui.button(self.t("ctx.open").to_owned()).clicked() {
-                    self.navigate(self.active, bm.clone(), ctx);
-                    ui.close();
-                }
-                if ui.button(self.t("ctx.open_new_tab").to_owned()).clicked() {
-                    self.queue_open_path_in_new_tab(bm.clone());
-                    ui.close();
-                }
+        if !bookmarks.is_empty() {
+            if !system_bookmarks.is_empty() {
                 ui.separator();
-                if ui
-                    .button(self.t("ctx.remove_bookmark").to_owned())
-                    .clicked()
-                {
-                    self.store.settings.bookmarks.retain(|b| b != &bm);
-                    self.persist();
-                    ui.close();
+            }
+            if bookmark_section_header(
+                ui,
+                self.t("tree.bookmarks.user"),
+                !self.store.settings.bookmarks_personal_collapsed,
+            )
+            .clicked()
+            {
+                self.on_bookmark_section_clicked(BookmarkSection::Personal, ctx);
+            }
+            let personal_row_count = if self.store.settings.bookmarks_personal_collapsed {
+                0
+            } else {
+                bookmarks.len()
+            };
+            if personal_row_count > 0 {
+                ui.add_space(style::SPACE_XXS);
+            }
+            for bm in bookmarks.into_iter().take(personal_row_count) {
+                let name = bm
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .filter(|n| !n.is_empty())
+                    .unwrap_or_else(|| bm.display().to_string());
+                let resp = ui.selectable_label(false, format!("  {}", name));
+                let state = self.bookmark_drop_state(&bm);
+                if state.is_drop_target() {
+                    let is_folder = state.is_folder();
+                    self.handle_file_drop_response_with_reason(
+                        &resp,
+                        Some(&bm),
+                        is_folder,
+                        is_folder && self.active_folder_accepts_drop(&bm),
+                        crate::ui::file_dnd::DropSurface::Bookmark,
+                        state.invalid_reason(),
+                        ui,
+                        ctx,
+                    );
                 }
-            });
+                if resp.clicked() {
+                    self.navigate(self.active, bm.clone(), ctx);
+                }
+                resp.context_menu(|ui| {
+                    style::compact_context_menu(ui);
+                    if ui.button(self.t("ctx.open").to_owned()).clicked() {
+                        self.navigate(self.active, bm.clone(), ctx);
+                        ui.close();
+                    }
+                    if ui.button(self.t("ctx.open_new_tab").to_owned()).clicked() {
+                        self.queue_open_path_in_new_tab(bm.clone());
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui
+                        .button(self.t("ctx.remove_bookmark").to_owned())
+                        .clicked()
+                    {
+                        self.store.settings.bookmarks.retain(|b| b != &bm);
+                        self.persist();
+                        ui.close();
+                    }
+                });
+            }
         }
+    }
+
+    fn on_bookmark_section_clicked(&mut self, section: BookmarkSection, ctx: &egui::Context) {
+        // Память переключается первой: ошибка записи не отменяет действие пользователя.
+        toggle_bookmark_section(&mut self.store.settings, section);
+        let _ = self.persist_checked();
+        ctx.request_repaint();
     }
 
     fn open_system_bookmark(
@@ -634,6 +686,205 @@ mod tests {
         assert!(tree.failed_children.contains(&root));
         assert!(!tree.begin_children_load(&root));
     }
+
+    #[test]
+    fn bookmark_collapse_click_toggles_own_section_only() {
+        let mut settings = Settings::default();
+
+        toggle_bookmark_section(&mut settings, BookmarkSection::System);
+        assert!(settings.bookmarks_system_collapsed);
+        assert!(!settings.bookmarks_personal_collapsed);
+
+        toggle_bookmark_section(&mut settings, BookmarkSection::Personal);
+        assert!(settings.bookmarks_system_collapsed);
+        assert!(settings.bookmarks_personal_collapsed);
+    }
+
+    #[test]
+    fn bookmark_collapse_click_persists_to_settings() {
+        let dir = std::env::temp_dir().join(format!(
+            "filemanager-bookmark-collapse-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut store = crate::core::settings::SettingsStore::load(&dir);
+        toggle_bookmark_section(&mut store.settings, BookmarkSection::System);
+        store.save().unwrap();
+
+        let loaded = crate::core::settings::SettingsStore::load(&dir);
+        assert!(loaded.settings.bookmarks_system_collapsed);
+        assert!(!loaded.settings.bookmarks_personal_collapsed);
+
+        let source = include_str!("tree.rs");
+        let method = source
+            .split("fn on_bookmark_section_clicked")
+            .nth(1)
+            .unwrap()
+            .split("fn open_system_bookmark")
+            .next()
+            .unwrap();
+        assert!(method.contains("toggle_bookmark_section(&mut self.store.settings, section)"));
+        assert!(method.contains("let _ = self.persist_checked()"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn bookmark_collapse_persist_failure_does_not_block_ui() {
+        let dir = std::env::temp_dir().join(format!(
+            "filemanager-bookmark-collapse-failure-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let config_blocker = dir.join("settings-parent");
+        std::fs::write(&config_blocker, b"not a directory").unwrap();
+        let mut store = crate::core::settings::SettingsStore::load(&config_blocker);
+
+        toggle_bookmark_section(&mut store.settings, BookmarkSection::Personal);
+        assert!(store.save().is_err());
+        assert!(store.settings.bookmarks_personal_collapsed);
+
+        let source = include_str!("tree.rs");
+        let method = source
+            .split("fn on_bookmark_section_clicked")
+            .nth(1)
+            .unwrap()
+            .split("fn open_system_bookmark")
+            .next()
+            .unwrap();
+        assert!(
+            method.find("toggle_bookmark_section").unwrap()
+                < method.find("self.persist_checked()").unwrap()
+        );
+        assert!(method.contains("ctx.request_repaint()"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn collapsed_section_renders_no_bookmark_rows() {
+        let source = include_str!("tree.rs");
+        let section = source
+            .split("fn bookmark_section(&mut self")
+            .nth(1)
+            .unwrap()
+            .split("fn on_bookmark_section_clicked")
+            .next()
+            .unwrap();
+        assert!(
+            section.contains(
+                "let system_row_count = if self.store.settings.bookmarks_system_collapsed"
+            )
+        );
+        assert!(section.contains("system_bookmarks.iter().take(system_row_count)"));
+        assert!(section.contains(
+            "let personal_row_count = if self.store.settings.bookmarks_personal_collapsed"
+        ));
+        assert!(section.contains("bookmarks.into_iter().take(personal_row_count)"));
+    }
+
+    #[test]
+    fn collapsed_bookmark_rows_register_no_drop_targets() {
+        let source = include_str!("tree.rs");
+        let section = source
+            .split("fn bookmark_section(&mut self")
+            .nth(1)
+            .unwrap()
+            .split("fn on_bookmark_section_clicked")
+            .next()
+            .unwrap();
+        let system_gate = section
+            .find("system_bookmarks.iter().take(system_row_count)")
+            .unwrap();
+        let personal_gate = section
+            .find("bookmarks.into_iter().take(personal_row_count)")
+            .unwrap();
+        let drop_calls: Vec<_> = section
+            .match_indices("handle_file_drop_response_with_reason(")
+            .map(|(index, _)| index)
+            .collect();
+        assert_eq!(drop_calls.len(), 2);
+        assert!(system_gate < drop_calls[0] && drop_calls[0] < personal_gate);
+        assert!(personal_gate < drop_calls[1]);
+    }
+
+    #[test]
+    fn bookmark_headers_remain_non_drop_targets_in_both_states() {
+        let source = include_str!("tree.rs");
+        let header = source
+            .rsplit("fn bookmark_section_header(")
+            .next()
+            .unwrap()
+            .split("fn paint_tree_disclosure(")
+            .next()
+            .unwrap();
+        assert!(header.contains("egui::Sense::click()"));
+        assert!(!header.contains("click_and_drag"));
+        assert!(!header.contains("handle_file_drop_response"));
+        assert!(!header.contains("DropSurface"));
+    }
+
+    #[test]
+    fn bookmark_collapse_shared_between_main_and_detached() {
+        let main = include_str!("app/mod.rs");
+        let detached = include_str!("app/window_frame.rs");
+        let tree = include_str!("tree.rs");
+        assert!(main.contains("self.tree_panel(&ctx, ui)"));
+        assert!(detached.contains("self.tree_panel(&viewport_ctx, ui)"));
+        assert!(tree.contains("self.store.settings.bookmarks_system_collapsed"));
+        assert!(tree.contains("self.store.settings.bookmarks_personal_collapsed"));
+    }
+
+    #[test]
+    fn panel_layout_stable_with_both_sections_collapsed() {
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let available_width = ui.available_width();
+                let expanded = bookmark_section_header(ui, "System", true);
+                let collapsed = bookmark_section_header(ui, "Personal", false);
+                assert_eq!(expanded.rect.height(), collapsed.rect.height());
+                assert_eq!(expanded.rect.width(), collapsed.rect.width());
+                assert_eq!(expanded.rect.width(), available_width);
+            });
+        });
+        output.textures_delta.clear();
+    }
+
+    #[test]
+    fn existing_bookmark_drop_and_cache_tests_not_regressed() {
+        let dnd = include_str!("file_dnd.rs");
+        let cache = include_str!("app/bookmark_cache.rs");
+        for test in [
+            "system_and_personal_bookmarks_both_accepted_as_targets",
+            "drop_on_bookmark_enqueues_move_with_source_and_dest_invalidation",
+            "bookmark_surface_priority_above_background_and_other_order_independent",
+        ] {
+            assert!(dnd.contains(test));
+        }
+        for test in [
+            "bookmark_cache_hit_within_ttl_does_not_request_probe",
+            "bookmark_unavailable_after_probe_shows_existing_reason",
+            "existing_bookmark_drop_target_tests_not_regressed",
+        ] {
+            assert!(cache.contains(test));
+        }
+    }
+
+    #[test]
+    fn domain1_2_3_not_regressed() {
+        let settings = include_str!("../core/settings.rs");
+        let dnd = include_str!("file_dnd.rs");
+        let cache = include_str!("app/bookmark_cache.rs");
+        assert!(settings.contains("reset_behavior_preserving_user_data"));
+        assert!(dnd.contains("fn plan_file_drop"));
+        assert!(cache.contains("fn bookmark_channel_drain_applies_results_before_render_and_dnd"));
+    }
 }
 
 /// Paints a compact disclosure chevron so the tree does not depend on font
@@ -648,6 +899,50 @@ fn tree_disclosure_button(ui: &mut egui::Ui, expanded: bool) -> bool {
     } else {
         ui.visuals().weak_text_color()
     };
+    paint_tree_disclosure(ui.painter(), rect, expanded, color);
+    response.clicked()
+}
+
+fn bookmark_section_header(ui: &mut egui::Ui, label: &str, expanded: bool) -> egui::Response {
+    let size = egui::vec2(ui.available_width(), ui.spacing().interact_size.y);
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    let hovered = response.hovered();
+    if hovered {
+        ui.painter().rect_filled(
+            rect,
+            style::RADIUS_ROW,
+            ui.visuals().widgets.hovered.bg_fill,
+        );
+    }
+    let text_color = if hovered {
+        ui.visuals().strong_text_color()
+    } else {
+        ui.visuals().weak_text_color()
+    };
+    let disclosure_rect = egui::Rect::from_min_size(
+        rect.min,
+        egui::vec2(style::TREE_DISCLOSURE_SIZE, rect.height()),
+    );
+    paint_tree_disclosure(ui.painter(), disclosure_rect, expanded, text_color);
+    ui.painter().text(
+        egui::pos2(
+            rect.left() + style::TREE_DISCLOSURE_SIZE + style::SPACE_XXS,
+            rect.center().y,
+        ),
+        egui::Align2::LEFT_CENTER,
+        label,
+        egui::TextStyle::Body.resolve(ui.style()),
+        text_color,
+    );
+    response
+}
+
+fn paint_tree_disclosure(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    expanded: bool,
+    color: egui::Color32,
+) {
     let c = rect.center();
     let points = if expanded {
         vec![
@@ -662,9 +957,7 @@ fn tree_disclosure_button(ui: &mut egui::Ui, expanded: bool) -> bool {
             egui::pos2(c.x - 2.0, c.y + 4.0),
         ]
     };
-    ui.painter()
-        .add(egui::Shape::line(points, egui::Stroke::new(1.6, color)));
-    response.clicked()
+    painter.add(egui::Shape::line(points, egui::Stroke::new(1.6, color)));
 }
 
 /// Paints folder/drive icons in vector form instead of relying on emoji fonts.

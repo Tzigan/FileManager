@@ -351,6 +351,39 @@ mod tests {
     }
 
     #[test]
+    fn bookmark_probe_covers_collapsed_sections_paths() {
+        let settings = crate::core::settings::Settings {
+            bookmarks: vec![path("personal")],
+            bookmarks_system_collapsed: true,
+            bookmarks_personal_collapsed: true,
+            ..crate::core::settings::Settings::default()
+        };
+        let system_path = path("system");
+        let mut cache = BookmarkStateCache::new();
+        cache.sync_paths(
+            [system_path.clone()]
+                .into_iter()
+                .chain(settings.bookmarks.iter().cloned()),
+        );
+        let pending = cache.take_pending().unwrap();
+        assert!(pending.contains(&system_path));
+        assert!(pending.contains(&settings.bookmarks[0]));
+
+        let app = include_str!("mod.rs");
+        let probe = app
+            .split("fn pump_bookmark_state_cache")
+            .nth(1)
+            .unwrap()
+            .split("pub(crate) fn t")
+            .next()
+            .unwrap();
+        assert!(probe.contains(".system_bookmarks"));
+        assert!(probe.contains(".chain(self.store.settings.bookmarks.iter().cloned())"));
+        assert!(!probe.contains("bookmarks_system_collapsed"));
+        assert!(!probe.contains("bookmarks_personal_collapsed"));
+    }
+
+    #[test]
     fn bookmark_probe_send_into_closed_channel_does_not_panic() {
         let (tx, rx) = channel();
         drop(rx);
