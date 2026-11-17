@@ -1,4 +1,5 @@
 mod archive;
+mod bookmark_cache;
 mod chrome;
 mod dialogs;
 mod input;
@@ -41,6 +42,7 @@ use crate::platform::{
 use crate::ui::opsui::OpsUi;
 use crate::ui::tabs::{ListStatus, Tab};
 use crate::ui::tree::TreeState;
+use bookmark_cache::{BookmarkProbeBatch, BookmarkStateCache};
 
 const DISK_USAGE_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 /// Канал эскизов остаётся отдельным от пула тяжёлых независимых операций.
@@ -548,6 +550,7 @@ pub struct FileManagerApp {
     pub(crate) active: usize,
     pub(crate) tree: TreeState,
     pub(crate) system_bookmarks: Vec<SystemBookmark>,
+    bookmark_state_cache: BookmarkStateCache,
     /// Scroll the focused row into view next repaint (set by keyboard nav).
     pub(crate) scroll_to_cursor: bool,
     /// `--select` target: select this entry when the listing arrives.
@@ -834,6 +837,7 @@ impl FileManagerApp {
             active,
             tree,
             system_bookmarks: crate::core::known_folders::system_bookmarks(),
+            bookmark_state_cache: BookmarkStateCache::new(),
             scroll_to_cursor: false,
             pending_select: None,
             msg_tx,
@@ -873,7 +877,75 @@ impl FileManagerApp {
             &tab.path
         };
         app.tree.reveal(reveal_path);
+        app.pump_bookmark_state_cache(&cc.egui_ctx);
         app
+    }
+
+    pub(crate) fn bookmark_drop_state(
+        &self,
+        path: &Path,
+    ) -> crate::ui::file_dnd::BookmarkPathState {
+        self.bookmark_state_cache.drop_state(path)
+    }
+
+    fn pump_bookmark_state_cache(&mut self, ctx: &egui::Context) {
+        self.bookmark_state_cache.drain_results();
+        if self.shutdown.is_active() {
+            return;
+        }
+
+        let paths = self
+            .system_bookmarks
+            .iter()
+            .filter_map(|bookmark| match &bookmark.target {
+                crate::core::known_folders::SystemBookmarkTarget::Folder(path) => {
+                    Some(path.clone())
+                }
+                _ => None,
+            })
+            .chain(self.store.settings.bookmarks.iter().cloned());
+        self.bookmark_state_cache.sync_paths(paths);
+        let now = Instant::now();
+        self.bookmark_state_cache
+            .queue_expired(now, bookmark_cache::BOOKMARK_STATE_TTL);
+
+        if let Some(paths) = self.bookmark_state_cache.take_pending() {
+            let sender = self.bookmark_state_cache.sender();
+            let ctx = ctx.clone();
+            // Проверка только читает metadata. Поток намеренно отсоединён: поздний ответ лишь
+            // отправляется в канал и не меняет состояние приложения или файлы, поэтому shutdown
+            // не ждёт его завершения, в отличие от файлового worker-а.
+            thread::spawn(move || {
+                let results = paths
+                    .into_iter()
+                    .map(|path| {
+                        let is_dir = std::fs::metadata(&path)
+                            .ok()
+                            .map(|metadata| metadata.is_dir());
+                        (path, is_dir)
+                    })
+                    .collect();
+                let batch = BookmarkProbeBatch {
+                    results,
+                    checked_at: Instant::now(),
+                };
+                tracing::debug!(
+                    paths = batch.results.len(),
+                    "проверка путей закладок завершена"
+                );
+                let _ = bookmark_cache::send_probe_result(&sender, batch);
+                ctx.request_repaint();
+            });
+        }
+
+        if self.bookmark_state_cache.is_in_flight() {
+            ctx.request_repaint_after(bookmark_cache::BOOKMARK_PROBE_DRAIN_INTERVAL);
+        } else if let Some(delay) = self
+            .bookmark_state_cache
+            .until_next_expiration(now, bookmark_cache::BOOKMARK_STATE_TTL)
+        {
+            ctx.request_repaint_after(delay);
+        }
     }
 
     pub(crate) fn t<'a>(&'a self, key: &'a str) -> &'a str {
@@ -1870,6 +1942,7 @@ fn breadcrumb_segments(path: &Path) -> Vec<(String, PathBuf)> {
 impl eframe::App for FileManagerApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.pump_bookmark_state_cache(&ctx);
         crate::ui::file_dnd::clear_frame_feedback(&mut self.file_drop_feedback);
         crate::ui::file_dnd::clear_frame_feedback(&mut self.file_drop_release);
         if !ctx.input(|input| input.pointer.button_down(egui::PointerButton::Primary)) {

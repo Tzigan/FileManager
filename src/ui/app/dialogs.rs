@@ -591,6 +591,7 @@ impl FileManagerApp {
         let restart_required = settings_reset_requires_restart(previous.single_instance);
 
         self.store.settings.reset_behavior_preserving_user_data();
+        self.bookmark_state_cache.force_refresh();
         self.i18n.set_language(self.store.settings.language);
         crate::core::logging::set_panic_language(self.store.settings.language);
         self.style_configured = false;

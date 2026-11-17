@@ -255,7 +255,7 @@ pub(crate) fn select_drag_entries(
     (!keys.is_empty()).then_some(keys)
 }
 
-fn normalize_drop_path(path: &Path) -> PathBuf {
+pub(crate) fn normalize_drop_path(path: &Path) -> PathBuf {
     std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
