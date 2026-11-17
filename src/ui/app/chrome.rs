@@ -8,11 +8,19 @@ pub(crate) fn tab_scroll_source() -> egui::scroll_area::ScrollSource {
 
 pub(crate) fn tab_close_button_hovered(
     dragging: bool,
+    file_payload_active: bool,
     pinned: bool,
     close_rect: egui::Rect,
     pointer: Option<egui::Pos2>,
 ) -> bool {
-    !dragging && !pinned && pointer.is_some_and(|pos| close_rect.contains(pos))
+    !dragging
+        && !file_payload_active
+        && !pinned
+        && pointer.is_some_and(|pos| close_rect.contains(pos))
+}
+
+pub(crate) fn tab_hover_affordances_enabled(file_payload_active: bool) -> bool {
+    !file_payload_active
 }
 
 pub(crate) fn tab_strip_content_margin() -> egui::Margin {

@@ -122,6 +122,7 @@ impl FileManagerApp {
         .expand2(egui::vec2(style::FRAME_PADDING_X as f32, 0.0));
         self.advance_tab_drag_state(ctx);
         let pointer_pos = self.tab_drag_preview.pointer_pos(ctx);
+        let file_payload_active = crate::ui::file_dnd::file_drag_payload_active(ctx, None);
         let mut tab_rects = Vec::new();
         // Вкладки и кнопку «+» центрируем по вертикали в пределах всей строки.
         ui.horizontal_centered(|ui| {
@@ -193,6 +194,12 @@ impl FileManagerApp {
                                 let (rect, resp) =
                                     ui.allocate_exact_size(size, tab_drag_sense());
                                 let tab_id = self.tabs[*i].id;
+                                let tab_file_payload_active =
+                                    crate::ui::file_dnd::file_drag_payload_active(ctx, Some(&resp));
+                                let hover_affordances_enabled =
+                                    super::chrome::tab_hover_affordances_enabled(
+                                        tab_file_payload_active,
+                                    );
                                 tab_rects.push((display_index, rect));
                                 if scroll_target == Some(self.tabs[*i].id) {
                                     scroll_target_rect = Some(rect);
@@ -238,6 +245,7 @@ impl FileManagerApp {
                                 dragging_tab = self.tab_drag_state.is_dragging();
                                 let over_x = tab_close_button_hovered(
                                     dragging_tab,
+                                    tab_file_payload_active,
                                     *pinned,
                                     x_rect,
                                     pointer_pos,
@@ -250,7 +258,7 @@ impl FileManagerApp {
                                         style::RADIUS_ROW,
                                         visuals.selection.bg_fill,
                                     );
-                                } else if resp.hovered() {
+                                } else if hover_affordances_enabled && resp.hovered() {
                                     painter.rect_filled(
                                         rect,
                                         style::RADIUS_ROW,
@@ -384,7 +392,13 @@ impl FileManagerApp {
                                         ),
                                     );
                                 }
-                                self.handle_tab_drop_response(&resp, tab_id, ui, ctx);
+                                self.handle_tab_drop_response(
+                                    &resp,
+                                    tab_id,
+                                    tab_file_payload_active,
+                                    ui,
+                                    ctx,
+                                );
                             });
                         }
                     });
@@ -414,10 +428,12 @@ impl FileManagerApp {
                 plus_galley.size().y,
                 ui.spacing().interact_size.y,
             );
-            if ui
-                .add_sized(plus_size, egui::Button::new("+").small())
-                .clicked()
-            {
+            let plus_hover_affordances_enabled =
+                super::chrome::tab_hover_affordances_enabled(file_payload_active);
+            let plus_response = ui.add_enabled_ui(plus_hover_affordances_enabled, |ui| {
+                ui.add_sized(plus_size, egui::Button::new("+").small())
+            });
+            if plus_response.inner.clicked() {
                 self.new_tab(ctx);
             }
             let drag_width =
