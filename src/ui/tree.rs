@@ -184,7 +184,7 @@ impl crate::ui::FileManagerApp {
                     SystemBookmarkTarget::Folder(path) if path == &active_path
                 );
                 let mut action = None;
-                ui.horizontal(|ui| {
+                let row = ui.horizontal(|ui| {
                     let (icon_rect, icon_response) = ui.allocate_exact_size(
                         egui::vec2(style::TREE_ICON_WIDTH, style::TREE_ICON_HEIGHT),
                         egui::Sense::click(),
@@ -217,7 +217,46 @@ impl crate::ui::FileManagerApp {
                             ui.close();
                         }
                     });
+                    response
                 });
+                let row_response = row.response;
+
+                let drop_target =
+                    match crate::ui::file_dnd::system_bookmark_drop_destination(&bookmark.target) {
+                        crate::ui::file_dnd::BookmarkDropDestination::Folder(path) => {
+                            let is_directory = std::fs::metadata(path)
+                                .ok()
+                                .map(|metadata| metadata.is_dir());
+                            Some((
+                                Some(path),
+                                crate::ui::file_dnd::bookmark_path_state(is_directory),
+                            ))
+                        }
+                        crate::ui::file_dnd::BookmarkDropDestination::Unavailable => {
+                            Some((None, crate::ui::file_dnd::BookmarkPathState::Unavailable))
+                        }
+                        crate::ui::file_dnd::BookmarkDropDestination::NonTarget => {
+                            // TODO: отдельная задача: drop в корзину означает удаление, а не перенос.
+                            None
+                        }
+                    };
+                if let Some((destination, state)) = drop_target
+                    && state.is_drop_target()
+                {
+                    let is_folder = state.is_folder();
+                    let target_allowed = is_folder
+                        && destination.is_some_and(|path| self.active_folder_accepts_drop(path));
+                    self.handle_file_drop_response_with_reason(
+                        &row_response,
+                        destination,
+                        is_folder,
+                        target_allowed,
+                        crate::ui::file_dnd::DropSurface::Bookmark,
+                        state.invalid_reason(),
+                        ui,
+                        ctx,
+                    );
+                }
                 if let Some(open_new_tab) = action {
                     self.open_system_bookmark(&bookmark, open_new_tab, ctx);
                 }
@@ -237,6 +276,23 @@ impl crate::ui::FileManagerApp {
                 .filter(|n| !n.is_empty())
                 .unwrap_or_else(|| bm.display().to_string());
             let resp = ui.selectable_label(false, format!("  {}", name));
+            let is_directory = std::fs::metadata(&bm)
+                .ok()
+                .map(|metadata| metadata.is_dir());
+            let state = crate::ui::file_dnd::bookmark_path_state(is_directory);
+            if state.is_drop_target() {
+                let is_folder = state.is_folder();
+                self.handle_file_drop_response_with_reason(
+                    &resp,
+                    Some(&bm),
+                    is_folder,
+                    is_folder && self.active_folder_accepts_drop(&bm),
+                    crate::ui::file_dnd::DropSurface::Bookmark,
+                    state.invalid_reason(),
+                    ui,
+                    ctx,
+                );
+            }
             if resp.clicked() {
                 self.navigate(self.active, bm.clone(), ctx);
             }
@@ -281,6 +337,7 @@ impl crate::ui::FileManagerApp {
                 self.system_bookmarks
                     .retain(|entry| entry.kind != bookmark.kind);
             }
+            SystemBookmarkTarget::UnavailableFolder => {}
             SystemBookmarkTarget::SecureTrash
                 if crate::core::known_folders::bookmark_forces_new_tab(&bookmark.target) =>
             {

@@ -265,6 +265,7 @@
   "dnd.move": "Move",
   "dnd.copy": "Copy",
   "dnd.invalid_target": "Can't drop here",
+  "dnd.bookmark_unavailable": "Bookmark folder is unavailable",
   "dnd.invalid_self": "A folder cannot be placed inside itself",
   "dnd.invalid_subfolder": "A folder cannot be placed in its subfolder",
   "dnd.file_already_in_folder": "The file is already in this folder",

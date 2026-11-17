@@ -267,6 +267,7 @@
   "dnd.move": "Переместить",
   "dnd.copy": "Копировать",
   "dnd.invalid_target": "Нельзя поместить сюда",
+  "dnd.bookmark_unavailable": "Папка закладки недоступна",
   "dnd.invalid_self": "Нельзя поместить папку в саму себя",
   "dnd.invalid_subfolder": "Нельзя поместить папку в её подпапку",
   "dnd.file_already_in_folder": "Файл уже в этой папке",

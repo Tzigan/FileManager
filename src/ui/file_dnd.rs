@@ -56,6 +56,7 @@ pub(crate) enum DropSurface {
     Background,
     Entry,
     Tree,
+    Bookmark,
     Breadcrumb,
     Up,
 }
@@ -66,7 +67,7 @@ impl DropSurface {
             Self::Background => 0,
             Self::Other => 1,
             Self::Entry => 2,
-            Self::Tree => 3,
+            Self::Tree | Self::Bookmark => 3,
             Self::Breadcrumb => 4,
             Self::Up => 5,
         }
@@ -117,6 +118,7 @@ pub(crate) enum DropInvalidReason {
     FolderAlreadyInFolder,
     ItemsAlreadyInFolder,
     InvalidTarget,
+    BookmarkUnavailable,
 }
 
 impl DropInvalidReason {
@@ -128,7 +130,68 @@ impl DropInvalidReason {
             Self::FolderAlreadyInFolder => "dnd.folder_already_in_folder",
             Self::ItemsAlreadyInFolder => "dnd.items_already_in_folder",
             Self::InvalidTarget => "dnd.invalid_target",
+            Self::BookmarkUnavailable => "dnd.bookmark_unavailable",
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BookmarkPathState {
+    Folder,
+    File,
+    Unavailable,
+}
+
+impl BookmarkPathState {
+    pub(crate) fn is_drop_target(self) -> bool {
+        self != Self::File
+    }
+
+    pub(crate) fn is_folder(self) -> bool {
+        self == Self::Folder
+    }
+
+    pub(crate) fn invalid_reason(self) -> Option<DropInvalidReason> {
+        (self == Self::Unavailable).then_some(DropInvalidReason::BookmarkUnavailable)
+    }
+}
+
+pub(crate) fn bookmark_path_state(is_directory: Option<bool>) -> BookmarkPathState {
+    match is_directory {
+        Some(true) => BookmarkPathState::Folder,
+        Some(false) => BookmarkPathState::File,
+        None => BookmarkPathState::Unavailable,
+    }
+}
+
+pub(crate) enum BookmarkDropDestination<'a> {
+    Folder(&'a Path),
+    Unavailable,
+    NonTarget,
+}
+
+pub(crate) fn system_bookmark_drop_destination(
+    target: &crate::core::known_folders::SystemBookmarkTarget,
+) -> BookmarkDropDestination<'_> {
+    use crate::core::known_folders::SystemBookmarkTarget;
+
+    match target {
+        SystemBookmarkTarget::Folder(path) => BookmarkDropDestination::Folder(path),
+        SystemBookmarkTarget::UnavailableFolder => BookmarkDropDestination::Unavailable,
+        SystemBookmarkTarget::RecycleBin | SystemBookmarkTarget::SecureTrash => {
+            BookmarkDropDestination::NonTarget
+        }
+    }
+}
+
+fn apply_drop_invalid_reason(
+    feedback: &mut DropFeedback,
+    invalid_reason: Option<DropInvalidReason>,
+) {
+    if feedback.plan.is_none()
+        && let Some(reason) = invalid_reason
+    {
+        feedback.reason = Some(reason);
     }
 }
 
@@ -643,6 +706,29 @@ impl FileManagerApp {
         _ui: &egui::Ui,
         ctx: &egui::Context,
     ) {
+        self.handle_file_drop_response_with_reason(
+            response,
+            destination,
+            target_is_folder,
+            target_allowed,
+            surface,
+            None,
+            _ui,
+            ctx,
+        );
+    }
+
+    pub(crate) fn handle_file_drop_response_with_reason(
+        &mut self,
+        response: &egui::Response,
+        destination: Option<&Path>,
+        target_is_folder: bool,
+        target_allowed: bool,
+        surface: DropSurface,
+        invalid_reason: Option<DropInvalidReason>,
+        _ui: &egui::Ui,
+        ctx: &egui::Context,
+    ) {
         let modifiers = ctx.input(|input| input.modifiers);
         let hover_payload = response.dnd_hover_payload::<FileDragPayload>();
         let release_payload = response.dnd_release_payload::<FileDragPayload>();
@@ -691,10 +777,11 @@ impl FileManagerApp {
                 )
             },
         );
+        apply_drop_invalid_reason(&mut feedback, invalid_reason);
         feedback.surface = if destination.is_some() {
             surface
-        } else if surface == DropSurface::Background {
-            DropSurface::Background
+        } else if matches!(surface, DropSurface::Background | DropSurface::Bookmark) {
+            surface
         } else {
             DropSurface::Other
         };
@@ -1338,10 +1425,13 @@ mod tests {
     #[test]
     fn existing_surface_priority_tests_not_regressed() {
         let source = include_str!("file_dnd.rs");
-        assert!(source.contains("fn surface_priority_is_explicit_and_independent_of_draw_order()"));
-        assert!(source.contains(
-            "fn two_specific_surfaces_in_one_frame_do_not_clobber_by_registration_order()"
-        ));
+        for name in [
+            "fn surface_priority_is_explicit_and_independent_of_draw_order()",
+            "fn two_specific_surfaces_in_one_frame_do_not_clobber_by_registration_order()",
+            "fn bookmark_surface_priority_above_background_and_other_order_independent()",
+        ] {
+            assert!(source.contains(name));
+        }
     }
 
     #[test]
@@ -1365,10 +1455,286 @@ mod tests {
             "dnd.invalid_self",
             "dnd.invalid_subfolder",
             "dnd.file_already_in_folder",
+            "dnd.bookmark_unavailable",
         ] {
             assert!(source.contains(reason));
             assert!(include_str!("../../i18n/ru.json").contains(reason));
             assert!(include_str!("../../i18n/en.json").contains(reason));
+        }
+    }
+
+    #[test]
+    fn bookmark_row_is_drop_target_resolving_to_its_folder_path() {
+        let destination = PathBuf::from(r"C:\Users\Example\Desktop");
+        let bookmark = crate::core::known_folders::SystemBookmark {
+            kind: crate::core::known_folders::SystemBookmarkKind::Desktop,
+            target: crate::core::known_folders::SystemBookmarkTarget::Folder(destination.clone()),
+        };
+        let crate::core::known_folders::SystemBookmarkTarget::Folder(path) = bookmark.target else {
+            panic!("папочная закладка должна разрешаться в свой путь");
+        };
+        let mut feedback = plan_file_drop(
+            &[drag_source(r"C:\Work\report.txt", false, Some("VOL"))],
+            &path,
+            true,
+            true,
+            false,
+            Some("VOL"),
+            egui::Modifiers::default(),
+        );
+        feedback.surface = DropSurface::Bookmark;
+        assert_eq!(feedback.plan.unwrap().destination, destination);
+        assert_eq!(feedback.surface, DropSurface::Bookmark);
+    }
+
+    #[test]
+    fn system_and_personal_bookmarks_both_accepted_as_targets() {
+        let system_path = PathBuf::from(r"C:\Users\Example\Documents");
+        let system_target =
+            crate::core::known_folders::SystemBookmarkTarget::Folder(system_path.clone());
+        let personal_path = PathBuf::from(r"D:\Pinned\Projects");
+        let sources = [drag_source(r"C:\Work\report.txt", false, Some("VOL"))];
+        let system_destination = match system_bookmark_drop_destination(&system_target) {
+            BookmarkDropDestination::Folder(path) => path,
+            _ => panic!("системная папочная закладка должна быть целью"),
+        };
+        for destination in [system_destination, personal_path.as_path()] {
+            let feedback = plan_file_drop(
+                &sources,
+                destination,
+                true,
+                true,
+                false,
+                None,
+                egui::Modifiers::default(),
+            );
+            assert!(feedback.plan.is_some());
+            assert_eq!(
+                feedback.plan.unwrap().destination,
+                destination.to_path_buf()
+            );
+        }
+    }
+
+    #[test]
+    fn drop_on_bookmark_enqueues_move_with_source_and_dest_invalidation() {
+        let source = drag_source(r"C:\Work\report.txt", false, Some("VOL"));
+        let destination = Path::new(r"C:\Users\Example\Downloads");
+        let feedback = plan_file_drop(
+            &[source],
+            destination,
+            true,
+            true,
+            false,
+            Some("VOL"),
+            egui::Modifiers::default(),
+        );
+        assert_eq!(feedback.mode, DropMode::Move);
+        let mut release = None;
+        let mut bookmark_feedback = feedback;
+        bookmark_feedback.surface = DropSurface::Bookmark;
+        register_release_feedback(&mut release, bookmark_feedback);
+        let plan = take_current_release_plan(&mut release).unwrap();
+        let mut queued = None;
+        enqueue_drop(plan.into_op_kind(), DropMode::Move, |verb, kind| {
+            queued = Some((verb, kind));
+        });
+        let (verb, operation) = queued.unwrap();
+        assert_eq!(verb, "ops.moving");
+        assert!(matches!(&operation, OpKind::Move { .. }));
+        let invalidated = crate::core::dir_cache::affected_dirs(&operation);
+        assert!(invalidated.contains(&PathBuf::from(r"C:\Work")));
+        assert!(invalidated.contains(&destination.to_path_buf()));
+    }
+
+    #[test]
+    fn cross_volume_bookmark_drop_defaults_to_copy_and_invalidates_dest_only() {
+        let source = drag_source(r"C:\Work\report.txt", false, Some("VOL-C"));
+        let destination = Path::new(r"D:\Pinned\Projects");
+        let feedback = plan_file_drop(
+            &[source],
+            destination,
+            true,
+            true,
+            false,
+            Some("VOL-D"),
+            egui::Modifiers::default(),
+        );
+        assert_eq!(feedback.mode, DropMode::Copy);
+        let operation = feedback.plan.unwrap().into_op_kind();
+        assert!(matches!(&operation, OpKind::Copy { .. }));
+        let invalidated = crate::core::dir_cache::affected_dirs(&operation);
+        assert!(invalidated.contains(&destination.to_path_buf()));
+        assert!(!invalidated.contains(&PathBuf::from(r"C:\Work")));
+    }
+
+    #[test]
+    fn drop_on_bookmark_of_current_folder_is_noop_for_move() {
+        let feedback = plan_file_drop(
+            &[drag_source(
+                r"C:\Users\Example\Downloads\report.txt",
+                false,
+                Some("VOL"),
+            )],
+            Path::new(r"C:\Users\Example\Downloads"),
+            true,
+            true,
+            false,
+            Some("VOL"),
+            egui::Modifiers::default(),
+        );
+        assert!(feedback.plan.is_none());
+        assert_eq!(
+            feedback.reason,
+            Some(DropInvalidReason::FileAlreadyInFolder)
+        );
+    }
+
+    #[test]
+    fn drop_folder_on_bookmark_pointing_inside_itself_rejected_with_reason() {
+        let feedback = plan_file_drop(
+            &[drag_source(r"C:\Work\Folder", true, Some("VOL"))],
+            Path::new(r"C:\Work\Folder\Child"),
+            true,
+            true,
+            false,
+            Some("VOL"),
+            egui::Modifiers::default(),
+        );
+        assert!(feedback.plan.is_none());
+        assert_eq!(
+            feedback.reason,
+            Some(DropInvalidReason::FolderIntoSubfolder)
+        );
+    }
+
+    #[test]
+    fn unavailable_bookmark_path_shows_specific_reason_not_silent_invalid() {
+        let state = bookmark_path_state(None);
+        assert_eq!(state, BookmarkPathState::Unavailable);
+        assert!(state.is_drop_target());
+        let mut feedback = plan_file_drop(
+            &[drag_source(r"C:\Work\report.txt", false, Some("VOL"))],
+            Path::new(r"D:\Offline\Downloads"),
+            false,
+            false,
+            false,
+            None,
+            egui::Modifiers::default(),
+        );
+        apply_drop_invalid_reason(&mut feedback, state.invalid_reason());
+        assert_eq!(feedback.plan, None);
+        assert_eq!(
+            feedback.reason,
+            Some(DropInvalidReason::BookmarkUnavailable)
+        );
+        assert_eq!(
+            feedback.reason.unwrap().translation_key(),
+            "dnd.bookmark_unavailable"
+        );
+        assert!(include_str!("../../i18n/ru.json").contains("Папка закладки недоступна"));
+        assert!(include_str!("../../i18n/en.json").contains("Bookmark folder is unavailable"));
+    }
+
+    #[test]
+    fn bookmark_pointing_to_file_is_not_a_target() {
+        let state = bookmark_path_state(Some(false));
+        assert_eq!(state, BookmarkPathState::File);
+        assert!(!state.is_drop_target());
+        assert_eq!(state.invalid_reason(), None);
+    }
+
+    #[test]
+    fn trash_and_secure_trash_bookmarks_remain_non_targets_without_invalid_highlight() {
+        for target in [
+            crate::core::known_folders::SystemBookmarkTarget::RecycleBin,
+            crate::core::known_folders::SystemBookmarkTarget::SecureTrash,
+        ] {
+            assert!(matches!(
+                system_bookmark_drop_destination(&target),
+                BookmarkDropDestination::NonTarget
+            ));
+        }
+        let source = include_str!("tree.rs");
+        assert!(source.contains("BookmarkDropDestination::NonTarget"));
+        assert!(source.contains("TODO: отдельная задача: drop в корзину означает удаление"));
+    }
+
+    #[test]
+    fn bookmarks_panel_background_is_not_a_target() {
+        let source = include_str!("tree.rs");
+        let panel = source
+            .split("pub(crate) fn tree_panel")
+            .nth(1)
+            .unwrap()
+            .split("fn wsl_tree_section")
+            .next()
+            .unwrap();
+        assert!(!panel.contains("DropSurface::Background"));
+        assert!(source.contains("DropSurface::Bookmark"));
+    }
+
+    #[test]
+    fn bookmark_surface_priority_above_background_and_other_order_independent() {
+        assert!(DropSurface::Bookmark.priority() > DropSurface::Background.priority());
+        assert!(DropSurface::Bookmark.priority() > DropSurface::Other.priority());
+        assert_eq!(
+            DropSurface::Bookmark.priority(),
+            DropSurface::Tree.priority()
+        );
+
+        let bookmark = feedback(DropSurface::Bookmark, Some("C:\\Pinned"), true);
+        let background = feedback(DropSurface::Background, Some("C:\\"), false);
+        let other = feedback(DropSurface::Other, None, false);
+        let mut first = None;
+        for candidate in [background.clone(), other.clone(), bookmark.clone()] {
+            register_drop_feedback(&mut first, candidate);
+        }
+        let mut reversed = None;
+        for candidate in [bookmark, other, background] {
+            register_drop_feedback(&mut reversed, candidate);
+        }
+        assert_eq!(first, reversed);
+        assert_eq!(first.unwrap().surface, DropSurface::Bookmark);
+    }
+
+    #[test]
+    fn bookmark_highlight_and_cursor_tooltip_consistent_with_other_targets() {
+        let mut target = feedback(DropSurface::Bookmark, Some("C:\\Pinned"), true);
+        target.target_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(120.0, 28.0),
+        ));
+        target.layer_id = Some(egui::LayerId::new(
+            egui::Order::Middle,
+            egui::Id::unique("bookmark-target"),
+        ));
+        assert!(feedback_paints_target(&target));
+        let source = include_str!("file_dnd.rs");
+        assert!(source.contains("ctx.pointer_latest_pos()"));
+        assert!(source.contains("drop_hint_placement(pointer, tip_size, ctx.content_rect())"));
+        assert!(source.contains(".interactable(false)"));
+    }
+
+    #[test]
+    fn detached_window_without_bookmarks_panel_unaffected() {
+        let detached = include_str!("app/window_frame.rs");
+        let tree = include_str!("tree.rs");
+        assert!(detached.contains("self.tree_panel(&viewport_ctx, ui)"));
+        assert!(tree.contains("self.bookmark_section(ctx, ui)"));
+    }
+
+    #[test]
+    fn existing_tooltip_anchor_tests_not_regressed() {
+        let source = include_str!("file_dnd.rs");
+        for name in [
+            "tooltip_anchors_to_cursor_for_any_target_size",
+            "tooltip_flips_left_when_near_right_window_edge",
+            "tooltip_flips_up_when_near_bottom_window_edge",
+            "tooltip_stays_inside_window_in_all_four_positions",
+            "tooltip_does_not_cover_cursor_point",
+        ] {
+            assert!(source.contains(name));
         }
     }
 
@@ -1482,6 +1848,12 @@ mod tests {
         assert!(DropSurface::Up.priority() > DropSurface::Breadcrumb.priority());
         assert!(DropSurface::Other.priority() > DropSurface::Background.priority());
         assert!(DropSurface::Entry.priority() > DropSurface::Other.priority());
+        assert!(DropSurface::Bookmark.priority() > DropSurface::Background.priority());
+        assert!(DropSurface::Bookmark.priority() > DropSurface::Other.priority());
+        assert_eq!(
+            DropSurface::Bookmark.priority(),
+            DropSurface::Tree.priority()
+        );
     }
 
     #[test]
