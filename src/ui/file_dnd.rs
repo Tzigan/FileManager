@@ -36,19 +36,67 @@ pub(crate) enum DropMode {
     Copy,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct DropFeedback {
     pub mode: DropMode,
     pub plan: Option<DropPlan>,
     pub reason: Option<DropInvalidReason>,
     pub surface: DropSurface,
+    pub target_key: Option<PathBuf>,
+    pub target_rect: Option<egui::Rect>,
+    pub layer_id: Option<egui::LayerId>,
+    pub release_requested: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DropSurface {
-    Entry,
-    Background,
     Other,
+    Background,
+    Entry,
+    Tree,
+    Breadcrumb,
+    Up,
+}
+
+impl DropSurface {
+    fn priority(self) -> u8 {
+        match self {
+            Self::Background => 0,
+            Self::Other => 1,
+            Self::Entry => 2,
+            Self::Tree => 3,
+            Self::Breadcrumb => 4,
+            Self::Up => 5,
+        }
+    }
+}
+
+fn feedback_precedes(candidate: &DropFeedback, current: &DropFeedback) -> bool {
+    match candidate
+        .surface
+        .priority()
+        .cmp(&current.surface.priority())
+    {
+        std::cmp::Ordering::Greater => true,
+        std::cmp::Ordering::Less => false,
+        std::cmp::Ordering::Equal => match (&candidate.target_key, &current.target_key) {
+            (Some(candidate), Some(current)) => candidate < current,
+            (Some(_), None) => true,
+            _ => false,
+        },
+    }
+}
+
+pub(crate) fn clear_frame_feedback(feedback: &mut Option<DropFeedback>) {
+    *feedback = None;
+}
+
+fn take_current_release_plan(feedback: &mut Option<DropFeedback>) -> Option<DropPlan> {
+    let feedback = feedback.as_mut()?;
+    feedback
+        .release_requested
+        .then(|| feedback.plan.take())
+        .flatten()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -302,12 +350,20 @@ pub(crate) fn plan_file_drop(
             plan: Some(plan),
             reason: None,
             surface: DropSurface::Entry,
+            target_key: None,
+            target_rect: None,
+            layer_id: None,
+            release_requested: false,
         },
         Err(reason) => DropFeedback {
             mode,
             plan: None,
             reason: Some(reason),
             surface: DropSurface::Entry,
+            target_key: None,
+            target_rect: None,
+            layer_id: None,
+            release_requested: false,
         },
     }
 }
@@ -325,24 +381,72 @@ fn drop_hint_lines(
     lines
 }
 
-fn drop_hint_placement(pointer: egui::Pos2, viewport: egui::Rect) -> (egui::Align2, egui::Pos2) {
-    let below = pointer.y - viewport.top()
-        < FILE_DND_HINT_MAX_HEIGHT_POINTS + FILE_DND_HINT_TARGET_CLEARANCE_POINTS;
-    if below {
-        (
-            egui::Align2::LEFT_TOP,
-            pointer + egui::vec2(14.0, FILE_DND_HINT_TARGET_CLEARANCE_POINTS),
-        )
-    } else {
-        (
-            egui::Align2::LEFT_BOTTOM,
-            pointer + egui::vec2(14.0, -FILE_DND_HINT_TARGET_CLEARANCE_POINTS),
-        )
+fn drop_hint_placement(
+    pointer: egui::Pos2,
+    target: egui::Rect,
+    viewport: egui::Rect,
+) -> egui::Pos2 {
+    let size = egui::vec2(
+        FILE_DND_HINT_MAX_WIDTH_POINTS.min(viewport.width()),
+        FILE_DND_HINT_MAX_HEIGHT_POINTS.min(viewport.height()),
+    );
+    let gap = FILE_DND_HINT_TARGET_CLEARANCE_POINTS;
+    let above_y = target.top() - gap - size.y;
+    let below_y = target.bottom() + gap;
+    let above_fits = above_y >= viewport.top();
+    let below_fits = below_y + size.y <= viewport.bottom();
+    let y = match (above_fits, below_fits) {
+        (true, true) if pointer.y > viewport.center().y => above_y,
+        (true, true) => below_y,
+        (true, false) => above_y,
+        (false, true) => below_y,
+        (false, false) => (viewport.bottom() - size.y).max(viewport.top()),
+    };
+    let x = (pointer.x + 14.0).clamp(
+        viewport.left(),
+        (viewport.right() - size.x).max(viewport.left()),
+    );
+    egui::pos2(x, y)
+}
+
+fn register_drop_feedback(current: &mut Option<DropFeedback>, mut candidate: DropFeedback) {
+    let already_released = current
+        .as_ref()
+        .is_some_and(|feedback| feedback.release_requested);
+    candidate.release_requested |= already_released;
+    let replace = current
+        .as_ref()
+        .is_none_or(|feedback| feedback_precedes(&candidate, feedback));
+    if replace {
+        *current = Some(candidate);
+    } else if let Some(feedback) = current {
+        feedback.release_requested |= candidate.release_requested;
     }
 }
 
-fn background_can_apply_feedback(existing: Option<&DropFeedback>) -> bool {
-    existing.is_none_or(|feedback| feedback.surface == DropSurface::Background)
+fn feedback_paints_target(feedback: &DropFeedback) -> bool {
+    feedback.surface != DropSurface::Other && feedback.target_rect.is_some()
+}
+
+fn paint_drop_feedback(ui: &egui::Ui, layer_id: egui::LayerId, rect: egui::Rect, valid: bool) {
+    let visuals = ui.visuals();
+    let color = if valid {
+        visuals.selection.stroke.color
+    } else {
+        visuals.error_fg_color
+    };
+    let painter = ui.ctx().layer_painter(layer_id);
+    painter.rect_filled(
+        rect.shrink(1.0),
+        crate::ui::style::RADIUS_ROW,
+        color.gamma_multiply(if valid { 0.16 } else { 0.12 }),
+    );
+    painter.rect_stroke(
+        rect.shrink(1.0),
+        crate::ui::style::RADIUS_ROW,
+        egui::Stroke::new(1.5, color),
+        egui::StrokeKind::Inside,
+    );
 }
 
 #[cfg(test)]
@@ -410,26 +514,6 @@ pub(crate) fn cancel_on_escape(ctx: &egui::Context, escape_pressed: bool) -> boo
     } else {
         false
     }
-}
-
-pub(crate) fn paint_drop_feedback(ui: &egui::Ui, rect: egui::Rect, valid: bool) {
-    let color = if valid {
-        ui.visuals().selection.stroke.color
-    } else {
-        ui.visuals().error_fg_color
-    };
-    let painter = ui.painter();
-    painter.rect_filled(
-        rect.shrink(1.0),
-        crate::ui::style::RADIUS_ROW,
-        color.gamma_multiply(if valid { 0.16 } else { 0.12 }),
-    );
-    painter.rect_stroke(
-        rect.shrink(1.0),
-        crate::ui::style::RADIUS_ROW,
-        egui::Stroke::new(1.5, color),
-        egui::StrokeKind::Inside,
-    );
 }
 
 impl FileManagerApp {
@@ -509,19 +593,13 @@ impl FileManagerApp {
         target_is_folder: bool,
         target_allowed: bool,
         surface: DropSurface,
-        ui: &egui::Ui,
+        _ui: &egui::Ui,
         ctx: &egui::Context,
     ) {
         let modifiers = ctx.input(|input| input.modifiers);
         let hover_payload = response.dnd_hover_payload::<FileDragPayload>();
         let release_payload = response.dnd_release_payload::<FileDragPayload>();
         if hover_payload.is_none() && release_payload.is_none() {
-            return;
-        }
-
-        if surface == DropSurface::Background
-            && !background_can_apply_feedback(self.file_drop_feedback.as_ref())
-        {
             return;
         }
 
@@ -550,6 +628,10 @@ impl FileManagerApp {
                 plan: None,
                 reason: None,
                 surface,
+                target_key: None,
+                target_rect: None,
+                layer_id: None,
+                release_requested: false,
             },
             |path| {
                 plan_file_drop(
@@ -563,25 +645,37 @@ impl FileManagerApp {
                 )
             },
         );
-        feedback.surface = surface;
-        self.file_drop_feedback = Some(feedback.clone());
+        feedback.surface = if destination.is_some() {
+            surface
+        } else if surface == DropSurface::Background {
+            DropSurface::Background
+        } else {
+            DropSurface::Other
+        };
+        feedback.target_key = destination.map(Path::to_path_buf);
+        feedback.target_rect = Some(response.rect);
+        feedback.layer_id = Some(response.layer_id);
+        feedback.release_requested = release_payload.is_some();
+        register_drop_feedback(&mut self.file_drop_feedback, feedback);
+    }
 
-        if hover_payload.is_some() {
-            if destination.is_some() {
-                paint_drop_feedback(ui, response.rect, feedback.plan.is_some());
-                ctx.set_cursor_icon(if feedback.plan.is_some() {
-                    egui::CursorIcon::PointingHand
-                } else {
-                    egui::CursorIcon::NotAllowed
-                });
+    pub(crate) fn finish_file_drop_frame(&mut self, ui: &egui::Ui, ctx: &egui::Context) {
+        if let Some(feedback) = self.file_drop_feedback.as_ref() {
+            ctx.set_cursor_icon(if feedback.plan.is_some() {
+                egui::CursorIcon::PointingHand
+            } else if feedback.reason.is_some() {
+                egui::CursorIcon::NotAllowed
             } else {
-                ctx.set_cursor_icon(egui::CursorIcon::Default);
+                egui::CursorIcon::Default
+            });
+            if feedback_paints_target(feedback)
+                && let (Some(rect), Some(layer_id)) = (feedback.target_rect, feedback.layer_id)
+            {
+                paint_drop_feedback(ui, layer_id, rect, feedback.plan.is_some());
             }
         }
 
-        if release_payload.is_some()
-            && let Some(plan) = feedback.plan.take()
-        {
+        if let Some(plan) = take_current_release_plan(&mut self.file_drop_feedback) {
             let mode = plan.mode;
             enqueue_drop(plan.into_op_kind(), mode, |verb, kind| {
                 self.enqueue(verb, kind)
@@ -666,12 +760,23 @@ impl FileManagerApp {
         let Some(pointer) = ctx.pointer_latest_pos() else {
             return;
         };
-        let (pivot, position) = drop_hint_placement(pointer, ctx.content_rect());
+        let target_rect = self
+            .file_drop_feedback
+            .as_ref()
+            .filter(|feedback| {
+                !matches!(
+                    feedback.surface,
+                    DropSurface::Background | DropSurface::Other
+                )
+            })
+            .and_then(|feedback| feedback.target_rect)
+            .unwrap_or_else(|| egui::Rect::from_center_size(pointer, egui::Vec2::ZERO));
+        let position = drop_hint_placement(pointer, target_rect, ctx.content_rect());
         ctx.request_repaint_after(FILE_DND_REPAINT_AFTER);
         egui::Area::new(egui::Id::unique("file_drag_preview"))
             .order(egui::Order::Foreground)
-            // Подсказка находится над или под целью с запасом на высоту плитки.
-            .pivot(pivot)
+            // Неинтерактивный слой не может перехватить hover у строки.
+            .pivot(egui::Align2::LEFT_TOP)
             .fixed_pos(position)
             .constrain(true)
             .interactable(false)
@@ -686,6 +791,7 @@ impl FileManagerApp {
                     .stroke(egui::Stroke::new(1.0, ui.visuals().selection.stroke.color))
                     .show(ui, |ui| {
                         ui.set_max_width(FILE_DND_HINT_MAX_WIDTH_POINTS);
+                        ui.set_max_height(FILE_DND_HINT_MAX_HEIGHT_POINTS);
                         ui.vertical(|ui| {
                             for line in &lines {
                                 ui.label(line);
@@ -1092,36 +1198,245 @@ mod tests {
         }
     }
 
+    fn feedback(surface: DropSurface, key: Option<&str>, valid: bool) -> DropFeedback {
+        DropFeedback {
+            mode: DropMode::Move,
+            plan: valid.then(|| DropPlan {
+                mode: DropMode::Move,
+                sources: vec![PathBuf::from(r"C:\Parent\1")],
+                destination: PathBuf::from(key.unwrap_or(r"C:\Parent")),
+            }),
+            reason: (!valid && surface != DropSurface::Other)
+                .then_some(DropInvalidReason::InvalidTarget),
+            surface,
+            target_key: key.map(PathBuf::from),
+            target_rect: None,
+            layer_id: None,
+            release_requested: false,
+        }
+    }
+
+    #[test]
+    fn feedback_cleared_when_no_surface_registered_this_frame() {
+        let mut feedback = Some(feedback(
+            DropSurface::Entry,
+            Some("C:\\Parent\\AEGIS"),
+            true,
+        ));
+        clear_frame_feedback(&mut feedback);
+        assert!(feedback.is_none());
+    }
+
+    #[test]
+    fn release_does_not_enqueue_plan_from_previous_frame() {
+        let mut feedback = Some(feedback(
+            DropSurface::Entry,
+            Some("C:\\Parent\\AEGIS"),
+            true,
+        ));
+        clear_frame_feedback(&mut feedback);
+        assert!(take_current_release_plan(&mut feedback).is_none());
+    }
+
+    #[test]
+    fn release_mode_matches_modifiers_at_release_moment() {
+        let sources = [drag_source(r"C:\Parent\1", true, Some("VOL"))];
+        for (modifiers, expected) in [
+            (egui::Modifiers::CTRL, DropMode::Copy),
+            (egui::Modifiers::SHIFT, DropMode::Move),
+        ] {
+            let feedback = plan_file_drop(
+                &sources,
+                Path::new(r"C:\Parent\AEGIS"),
+                true,
+                true,
+                false,
+                Some("VOL"),
+                modifiers,
+            );
+            assert_eq!(feedback.mode, expected);
+        }
+    }
+
+    #[test]
+    fn existing_hover_release_parity_tests_not_regressed() {
+        let source = include_str!("file_dnd.rs");
+        assert!(source.contains("fn hover_validity_matches_release_plan_for_same_target()"));
+        assert!(source.contains("fn hovering_other_folder_in_same_parent_is_valid()"));
+        assert!(source.contains("fn release_mode_matches_modifiers_at_release_moment()"));
+    }
+
+    #[test]
+    fn existing_grouped_mapping_and_view_mode_tests_not_regressed() {
+        let source = include_str!("list/mod.rs");
+        for name in [
+            "grouped_list_hover_resolves_entry_under_cursor",
+            "hover_resolution_correct_in_table_list_and_grid",
+            "hover_resolution_correct_with_sort_filter_and_search_active",
+            "group_header_is_not_a_drop_target_and_does_not_shift_mapping",
+        ] {
+            assert!(
+                source.contains(name),
+                "missing mapping regression test {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn release_outside_any_target_does_not_enqueue_operation() {
+        let mut feedback = None;
+        assert!(take_current_release_plan(&mut feedback).is_none());
+    }
+
+    #[test]
+    fn release_uses_the_selected_current_frame_surface_plan() {
+        let mut selected = None;
+        let mut candidate = feedback(DropSurface::Entry, Some("C:\\Parent\\AEGIS"), true);
+        candidate.release_requested = true;
+        register_drop_feedback(&mut selected, candidate);
+        assert_eq!(
+            take_current_release_plan(&mut selected)
+                .unwrap()
+                .destination,
+            PathBuf::from(r"C:\Parent\AEGIS")
+        );
+    }
+
+    #[test]
+    fn surface_priority_is_explicit_and_independent_of_draw_order() {
+        assert!(DropSurface::Entry.priority() > DropSurface::Background.priority());
+        assert!(DropSurface::Tree.priority() > DropSurface::Entry.priority());
+        assert!(DropSurface::Breadcrumb.priority() > DropSurface::Tree.priority());
+        assert!(DropSurface::Up.priority() > DropSurface::Breadcrumb.priority());
+        assert!(DropSurface::Other.priority() > DropSurface::Background.priority());
+        assert!(DropSurface::Entry.priority() > DropSurface::Other.priority());
+    }
+
+    #[test]
+    fn two_specific_surfaces_in_one_frame_do_not_clobber_by_registration_order() {
+        let entry = feedback(DropSurface::Entry, Some("C:\\Parent\\AEGIS"), true);
+        let tree = feedback(DropSurface::Tree, Some("C:\\Other"), false);
+        let mut first = None;
+        register_drop_feedback(&mut first, entry.clone());
+        register_drop_feedback(&mut first, tree.clone());
+        let mut reversed = None;
+        register_drop_feedback(&mut reversed, tree);
+        register_drop_feedback(&mut reversed, entry);
+        assert_eq!(first, reversed);
+        assert_eq!(first.unwrap().surface, DropSurface::Tree);
+    }
+
+    #[test]
+    fn group_and_table_headers_remain_other_and_do_not_suppress_target() {
+        assert!(include_str!("list/grouping.rs").contains("DropSurface::Other"));
+        assert!(include_str!("list/columns.rs").contains("DropSurface::Other"));
+        let mut header = feedback(DropSurface::Other, None, false);
+        header.target_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(100.0, 24.0),
+        ));
+        assert!(header.plan.is_none());
+        assert_eq!(header.reason, None);
+        assert!(!feedback_paints_target(&header));
+        let background = feedback(DropSurface::Background, Some("C:\\Parent"), false);
+        let entry = feedback(DropSurface::Entry, Some("C:\\Parent\\AEGIS"), true);
+        let mut selected = None;
+        register_drop_feedback(&mut selected, background);
+        register_drop_feedback(&mut selected, header);
+        register_drop_feedback(&mut selected, entry);
+        let selected = selected.unwrap();
+        assert_eq!(selected.surface, DropSurface::Entry);
+        assert!(selected.plan.is_some());
+    }
+
+    #[test]
+    fn background_does_not_paint_invalid_while_specific_valid_target_hovered() {
+        let mut selected = None;
+        register_drop_feedback(
+            &mut selected,
+            feedback(DropSurface::Entry, Some("C:\\Parent\\AEGIS"), true),
+        );
+        register_drop_feedback(
+            &mut selected,
+            feedback(DropSurface::Background, Some("C:\\Parent"), false),
+        );
+        let selected = selected.unwrap();
+        assert_eq!(selected.surface, DropSurface::Entry);
+        assert!(selected.plan.is_some());
+    }
+
     #[test]
     fn no_global_invalid_frame_when_valid_row_target_hovered() {
-        let mut feedback = plan_file_drop(
-            &[drag_source(r"C:\Parent\1", true, Some("VOL"))],
-            Path::new(r"C:\Parent\AEGIS"),
-            true,
-            true,
-            false,
-            Some("VOL"),
-            egui::Modifiers::default(),
+        let mut selected = None;
+        register_drop_feedback(
+            &mut selected,
+            feedback(DropSurface::Entry, Some("C:\\Parent\\AEGIS"), true),
         );
-        feedback.surface = DropSurface::Entry;
-        assert!(feedback.plan.is_some());
-        assert!(!background_can_apply_feedback(Some(&feedback)));
+        register_drop_feedback(
+            &mut selected,
+            feedback(DropSurface::Background, Some("C:\\Parent"), false),
+        );
+        assert!(selected.unwrap().plan.is_some());
     }
 
     #[test]
     fn background_target_highlighted_only_when_pointer_on_background() {
-        assert!(background_can_apply_feedback(None));
-        let mut row = DropFeedback {
-            mode: DropMode::Move,
-            plan: None,
-            reason: Some(DropInvalidReason::InvalidTarget),
-            surface: DropSurface::Entry,
-        };
-        assert!(!background_can_apply_feedback(Some(&row)));
-        row.surface = DropSurface::Other;
-        assert!(!background_can_apply_feedback(Some(&row)));
-        row.surface = DropSurface::Background;
-        assert!(background_can_apply_feedback(Some(&row)));
+        let background = feedback(DropSurface::Background, Some("C:\\Parent"), false);
+        let entry = feedback(DropSurface::Entry, Some("C:\\Parent\\AEGIS"), true);
+        let mut selected = None;
+        register_drop_feedback(&mut selected, background.clone());
+        assert_eq!(selected.as_ref().unwrap().surface, DropSurface::Background);
+        selected = Some(entry);
+        register_drop_feedback(&mut selected, background);
+        assert_eq!(selected.unwrap().surface, DropSurface::Entry);
+    }
+
+    #[test]
+    fn tooltip_area_is_non_interactive_and_not_a_drop_surface() {
+        let source = include_str!("file_dnd.rs");
+        let preview = source
+            .split("pub(crate) fn show_file_drag_preview")
+            .nth(1)
+            .unwrap();
+        assert!(preview.contains(".interactable(false)"));
+        assert!(!preview.contains("handle_file_drop_response("));
+    }
+
+    #[test]
+    fn tooltip_does_not_cover_hovered_target_row() {
+        let viewport = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let target = egui::Rect::from_min_size(egui::pos2(200.0, 250.0), egui::vec2(300.0, 72.0));
+        let pos = drop_hint_placement(egui::pos2(250.0, 280.0), target, viewport);
+        let hint = egui::Rect::from_min_size(
+            pos,
+            egui::vec2(
+                FILE_DND_HINT_MAX_WIDTH_POINTS,
+                FILE_DND_HINT_MAX_HEIGHT_POINTS,
+            ),
+        );
+        assert!(hint.intersect(target).is_negative());
+        assert!(viewport.contains_rect(hint));
+    }
+
+    #[test]
+    fn tooltip_flips_near_window_edge_and_stays_inside() {
+        let viewport = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let top_target = egui::Rect::from_min_size(egui::pos2(20.0, 4.0), egui::vec2(300.0, 72.0));
+        let top = drop_hint_placement(egui::pos2(790.0, 35.0), top_target, viewport);
+        let bottom_target =
+            egui::Rect::from_min_size(egui::pos2(20.0, 524.0), egui::vec2(300.0, 72.0));
+        let bottom = drop_hint_placement(egui::pos2(790.0, 560.0), bottom_target, viewport);
+        assert!(top.y > top_target.bottom());
+        assert!(bottom.y + FILE_DND_HINT_MAX_HEIGHT_POINTS < bottom_target.top());
+        for pos in [top, bottom] {
+            assert!(viewport.contains_rect(egui::Rect::from_min_size(
+                pos,
+                egui::vec2(
+                    FILE_DND_HINT_MAX_WIDTH_POINTS,
+                    FILE_DND_HINT_MAX_HEIGHT_POINTS
+                ),
+            )));
+        }
     }
 
     #[test]
@@ -1135,19 +1450,6 @@ mod tests {
         assert_eq!(FILE_DND_HINT_MAX_WIDTH_POINTS, 360.0);
         assert_eq!(lines.len(), 3);
         assert_eq!(lines[0], "Объектов: 1");
-        let viewport = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(640.0, 480.0));
-        let (top_pivot, below_position) = drop_hint_placement(egui::pos2(80.0, 50.0), viewport);
-        assert_eq!(top_pivot, egui::Align2::LEFT_TOP);
-        assert_eq!(
-            below_position.y,
-            50.0 + FILE_DND_HINT_TARGET_CLEARANCE_POINTS
-        );
-        let (bottom_pivot, above_position) = drop_hint_placement(egui::pos2(80.0, 300.0), viewport);
-        assert_eq!(bottom_pivot, egui::Align2::LEFT_BOTTOM);
-        assert_eq!(
-            above_position.y,
-            300.0 - FILE_DND_HINT_TARGET_CLEARANCE_POINTS
-        );
         assert!(
             include_str!("file_dnd.rs")
                 .contains("ui.set_max_width(FILE_DND_HINT_MAX_WIDTH_POINTS)")

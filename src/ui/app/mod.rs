@@ -1867,7 +1867,7 @@ fn breadcrumb_segments(path: &Path) -> Vec<(String, PathBuf)> {
 impl eframe::App for FileManagerApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        self.file_drop_feedback = None;
+        crate::ui::file_dnd::clear_frame_feedback(&mut self.file_drop_feedback);
         if !ctx.input(|input| input.pointer.button_down(egui::PointerButton::Primary)) {
             self.file_drag_candidate = None;
         }
@@ -1950,6 +1950,7 @@ impl eframe::App for FileManagerApp {
         egui::Panel::bottom("status_bar").show(ui, |ui| self.show_active_tab_status(ui));
         egui::CentralPanel::default().show(ui, |ui| self.show_active_file_content(&ctx, ui));
 
+        self.finish_file_drop_frame(ui, &ctx);
         self.show_tab_drag_preview(&ctx);
         self.show_file_drag_preview(&ctx);
         self.flush_pending_open_tabs(&ctx);
