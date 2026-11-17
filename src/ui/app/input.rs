@@ -48,6 +48,11 @@ pub(super) struct HotkeyBinding {
     pub(super) shift_action_key: Option<&'static str>,
 }
 
+pub(super) struct HotkeyGesture {
+    pub(super) gesture_key: &'static str,
+    pub(super) action_key: &'static str,
+}
+
 const HOTKEY_BINDINGS: &[HotkeyBinding] = &[
     HotkeyBinding {
         id: ShortcutId::Copy,
@@ -249,8 +254,39 @@ const HOTKEY_BINDINGS: &[HotkeyBinding] = &[
     },
 ];
 
+const HOTKEY_DND_GESTURES: &[HotkeyGesture] = &[
+    HotkeyGesture {
+        gesture_key: "help.hotkeys.gesture.drag",
+        action_key: "help.hotkeys.action.dnd.drag",
+    },
+    HotkeyGesture {
+        gesture_key: "help.hotkeys.gesture.ctrl_drag",
+        action_key: "help.hotkeys.action.dnd.ctrl",
+    },
+    HotkeyGesture {
+        gesture_key: "help.hotkeys.gesture.shift_drag",
+        action_key: "help.hotkeys.action.dnd.shift",
+    },
+    HotkeyGesture {
+        gesture_key: "help.hotkeys.gesture.escape_drag",
+        action_key: "help.hotkeys.action.dnd.escape",
+    },
+    HotkeyGesture {
+        gesture_key: "help.hotkeys.gesture.tab_drop",
+        action_key: "help.hotkeys.action.dnd.tab",
+    },
+    HotkeyGesture {
+        gesture_key: "help.hotkeys.gesture.bookmark_drop",
+        action_key: "help.hotkeys.action.dnd.bookmark",
+    },
+];
+
 pub(super) fn hotkey_bindings() -> &'static [HotkeyBinding] {
     HOTKEY_BINDINGS
+}
+
+pub(super) fn hotkey_dnd_gestures() -> &'static [HotkeyGesture] {
+    HOTKEY_DND_GESTURES
 }
 
 fn hotkey_binding(id: ShortcutId) -> Option<&'static HotkeyBinding> {
