@@ -9,6 +9,15 @@ pub(super) enum ListRow {
     Item(usize),
 }
 
+impl ListRow {
+    pub(super) fn item_index(&self) -> Option<usize> {
+        match self {
+            Self::Header { .. } => None,
+            Self::Item(index) => Some(*index),
+        }
+    }
+}
+
 pub(super) fn item_order(rows: &[ListRow]) -> Vec<usize> {
     rows.iter()
         .filter_map(|row| match row {
@@ -238,7 +247,15 @@ impl FileManagerApp {
         let width = ui.available_width();
         let (rect, response) =
             ui.allocate_exact_size(egui::vec2(width, ROW_HEIGHT), group_header_sense());
-        self.handle_file_drop_response(&response, None, false, false, ui, ui.ctx());
+        self.handle_file_drop_response(
+            &response,
+            None,
+            false,
+            false,
+            crate::ui::file_dnd::DropSurface::Other,
+            ui,
+            ui.ctx(),
+        );
         let painter = ui.painter();
         let font = egui::TextStyle::Body.resolve(ui.style());
         let y = rect.center().y;

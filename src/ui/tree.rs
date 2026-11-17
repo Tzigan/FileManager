@@ -362,6 +362,7 @@ impl crate::ui::FileManagerApp {
                 Some(path),
                 true,
                 !crate::platform::is_wsl_path(path),
+                crate::ui::file_dnd::DropSurface::Other,
                 ui,
                 ctx,
             );

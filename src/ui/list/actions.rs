@@ -97,14 +97,14 @@ impl FileManagerApp {
         ctx: &egui::Context,
     ) {
         self.begin_file_drag(resp, index, entry, ctx);
-        let drop_path = entry.is_dir.then_some(entry.path.as_path());
-        let target_allowed = drop_path
-            .is_some_and(|path| self.active_folder_accepts_drop(path));
+        let drop_path = crate::ui::file_dnd::entry_drop_destination(entry);
+        let target_allowed = drop_path.is_some_and(|path| self.active_folder_accepts_drop(path));
         self.handle_file_drop_response(
             resp,
             drop_path,
             entry.is_dir,
             target_allowed,
+            crate::ui::file_dnd::DropSurface::Entry,
             ui,
             ctx,
         );
