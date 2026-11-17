@@ -376,6 +376,18 @@ impl FileManagerApp {
                             }
                             ui.separator();
                         }
+                        ui.heading(self.t("help.hotkeys.group.drag"));
+                        for gesture in super::input::hotkey_dnd_gestures() {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new(self.t(gesture.gesture_key))
+                                        .monospace()
+                                        .strong(),
+                                );
+                                ui.add(egui::Label::new(self.t(gesture.action_key)).wrap());
+                            });
+                            ui.separator();
+                        }
                     });
                 if ui.button(self.t("help.hotkeys.close")).clicked() {
                     close_requested = true;
@@ -1608,6 +1620,150 @@ mod tests {
         assert!(window.contains("binding.action_key"));
         assert!(window.contains("binding.condition_key"));
         assert!(!window.contains("\"Ctrl+"));
+    }
+
+    #[test]
+    fn hotkey_registry_includes_dnd_gestures() {
+        let gestures = super::super::input::hotkey_dnd_gestures();
+        assert_eq!(gestures.len(), 6);
+        let keys: Vec<_> = gestures.iter().map(|gesture| gesture.gesture_key).collect();
+        assert_eq!(
+            keys,
+            [
+                "help.hotkeys.gesture.drag",
+                "help.hotkeys.gesture.ctrl_drag",
+                "help.hotkeys.gesture.shift_drag",
+                "help.hotkeys.gesture.escape_drag",
+                "help.hotkeys.gesture.tab_drop",
+                "help.hotkeys.gesture.bookmark_drop",
+            ]
+        );
+    }
+
+    #[test]
+    fn hotkey_registry_dnd_modifiers_described() {
+        let gestures = super::super::input::hotkey_dnd_gestures();
+        assert_eq!(gestures[1].action_key, "help.hotkeys.action.dnd.ctrl");
+        assert_eq!(gestures[2].action_key, "help.hotkeys.action.dnd.shift");
+        assert_eq!(gestures[0].action_key, "help.hotkeys.action.dnd.drag");
+
+        let en: serde_json::Value =
+            serde_json::from_str(include_str!("../../../i18n/en.json")).unwrap();
+        let ru: serde_json::Value =
+            serde_json::from_str(include_str!("../../../i18n/ru.json")).unwrap();
+        let base_en = en[gestures[0].action_key].as_str().unwrap();
+        let ctrl_en = en[gestures[1].action_key].as_str().unwrap();
+        let shift_en = en[gestures[2].action_key].as_str().unwrap();
+        let base_ru = ru[gestures[0].action_key].as_str().unwrap();
+        let ctrl_ru = ru[gestures[1].action_key].as_str().unwrap();
+        let shift_ru = ru[gestures[2].action_key].as_str().unwrap();
+        assert!(base_en.contains("copy") && base_en.contains("move"));
+        assert!(ctrl_en.contains("copy"));
+        assert!(shift_en.contains("move"));
+        assert!(base_ru.contains("копируются") && base_ru.contains("перемещаются"));
+        assert!(ctrl_ru.contains("копирует"));
+        assert!(shift_ru.contains("перемещает"));
+    }
+
+    #[test]
+    fn hotkey_registry_dnd_esc_cancel_described() {
+        let gesture = &super::super::input::hotkey_dnd_gestures()[3];
+        assert_eq!(gesture.gesture_key, "help.hotkeys.gesture.escape_drag");
+        assert_eq!(gesture.action_key, "help.hotkeys.action.dnd.escape");
+        let en: serde_json::Value =
+            serde_json::from_str(include_str!("../../../i18n/en.json")).unwrap();
+        let ru: serde_json::Value =
+            serde_json::from_str(include_str!("../../../i18n/ru.json")).unwrap();
+        assert!(
+            en[gesture.action_key]
+                .as_str()
+                .unwrap()
+                .contains("Cancel")
+        );
+        assert!(
+            ru[gesture.action_key]
+                .as_str()
+                .unwrap()
+                .contains("Отменяет")
+        );
+    }
+
+    #[test]
+    fn hotkey_registry_dnd_tab_drop_described() {
+        let gesture = &super::super::input::hotkey_dnd_gestures()[4];
+        assert_eq!(gesture.gesture_key, "help.hotkeys.gesture.tab_drop");
+        assert_eq!(gesture.action_key, "help.hotkeys.action.dnd.tab");
+        let en: serde_json::Value =
+            serde_json::from_str(include_str!("../../../i18n/en.json")).unwrap();
+        let ru: serde_json::Value =
+            serde_json::from_str(include_str!("../../../i18n/ru.json")).unwrap();
+        let action_en = en[gesture.action_key].as_str().unwrap();
+        let action_ru = ru[gesture.action_key].as_str().unwrap();
+        assert!(action_en.contains("Move") && action_en.contains("Ctrl"));
+        assert!(action_ru.contains("Перемещает") && action_ru.contains("Ctrl"));
+    }
+
+    #[test]
+    fn hotkey_registry_dnd_bookmark_drop_described() {
+        let gesture = &super::super::input::hotkey_dnd_gestures()[5];
+        assert_eq!(gesture.gesture_key, "help.hotkeys.gesture.bookmark_drop");
+        assert_eq!(gesture.action_key, "help.hotkeys.action.dnd.bookmark");
+        let en: serde_json::Value =
+            serde_json::from_str(include_str!("../../../i18n/en.json")).unwrap();
+        let ru: serde_json::Value =
+            serde_json::from_str(include_str!("../../../i18n/ru.json")).unwrap();
+        let action_en = en[gesture.action_key].as_str().unwrap();
+        let action_ru = ru[gesture.action_key].as_str().unwrap();
+        assert!(action_en.contains("bookmarked folder") && action_en.contains("Ctrl"));
+        assert!(action_ru.contains("папку закладки") && action_ru.contains("Ctrl"));
+    }
+
+    #[test]
+    fn hotkey_window_displays_all_dnd_entries() {
+        let dialogs = include_str!("dialogs.rs");
+        let window_start = dialogs.find("pub(super) fn hotkeys_window").unwrap();
+        let window_end = dialogs[window_start..]
+            .find("pub(super) fn request_settings_reset")
+            .unwrap()
+            + window_start;
+        let window = &dialogs[window_start..window_end];
+        assert!(window.contains("help.hotkeys.group.drag"));
+        assert!(window.contains("super::input::hotkey_dnd_gestures()"));
+        assert!(window.contains("gesture.gesture_key"));
+        assert!(window.contains("gesture.action_key"));
+        assert_eq!(super::super::input::hotkey_dnd_gestures().len(), 6);
+    }
+
+    #[test]
+    fn hotkey_localization_ru_en_complete_for_dnd() {
+        let en: serde_json::Value =
+            serde_json::from_str(include_str!("../../../i18n/en.json")).unwrap();
+        let ru: serde_json::Value =
+            serde_json::from_str(include_str!("../../../i18n/ru.json")).unwrap();
+        let mut keys = vec!["help.hotkeys.group.drag"];
+        for gesture in super::super::input::hotkey_dnd_gestures() {
+            keys.push(gesture.gesture_key);
+            keys.push(gesture.action_key);
+        }
+        for key in keys {
+            for labels in [&en, &ru] {
+                let value = labels[key]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("missing localized help string: {key}"));
+                assert!(!value.trim().is_empty());
+                assert_ne!(value, key, "untranslated help string: {key}");
+            }
+        }
+    }
+
+    #[test]
+    fn existing_hotkey_tests_not_regressed() {
+        let input = include_str!("input.rs");
+        let dialogs = include_str!("dialogs.rs");
+        assert!(input.contains("hotkey_registry_covers_real_bindings_from_input_handler"));
+        assert!(dialogs.contains("hotkey_registry_is_source_for_help_list_not_hardcoded_ui_text"));
+        assert!(dialogs.contains("hotkey_window_uses_existing_dialog_style_and_localization"));
+        assert!(dialogs.contains("help_menu_labels_localized_in_ru_and_en"));
     }
 
     #[test]
