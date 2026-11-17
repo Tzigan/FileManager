@@ -502,6 +502,8 @@ pub struct FileManagerApp {
     pub(crate) group_drag: Option<(String, String)>,
     pub(crate) group_press: Option<(String, String, egui::Pos2)>,
     pub(crate) file_drop_feedback: Option<crate::ui::file_dnd::DropFeedback>,
+    // Отдельный получатель отпускания не зависит от приоритета подсветки.
+    pub(crate) file_drop_release: Option<crate::ui::file_dnd::DropFeedback>,
     pub(crate) file_drag_candidate: Option<(egui::Id, Instant)>,
     thumbnail_tx: SyncSender<ThumbnailRequest>,
     thumbnail_jobs: HashMap<ThumbnailKey, Arc<AtomicBool>>,
@@ -783,6 +785,7 @@ impl FileManagerApp {
             group_drag: None,
             group_press: None,
             file_drop_feedback: None,
+            file_drop_release: None,
             file_drag_candidate: None,
             thumbnail_tx,
             thumbnail_jobs: HashMap::new(),
@@ -1868,6 +1871,7 @@ impl eframe::App for FileManagerApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         crate::ui::file_dnd::clear_frame_feedback(&mut self.file_drop_feedback);
+        crate::ui::file_dnd::clear_frame_feedback(&mut self.file_drop_release);
         if !ctx.input(|input| input.pointer.button_down(egui::PointerButton::Primary)) {
             self.file_drag_candidate = None;
         }
