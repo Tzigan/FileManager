@@ -224,13 +224,7 @@ impl crate::ui::FileManagerApp {
                 let drop_target =
                     match crate::ui::file_dnd::system_bookmark_drop_destination(&bookmark.target) {
                         crate::ui::file_dnd::BookmarkDropDestination::Folder(path) => {
-                            let is_directory = std::fs::metadata(path)
-                                .ok()
-                                .map(|metadata| metadata.is_dir());
-                            Some((
-                                Some(path),
-                                crate::ui::file_dnd::bookmark_path_state(is_directory),
-                            ))
+                            Some((Some(path), self.bookmark_drop_state(path)))
                         }
                         crate::ui::file_dnd::BookmarkDropDestination::Unavailable => {
                             Some((None, crate::ui::file_dnd::BookmarkPathState::Unavailable))
@@ -276,10 +270,7 @@ impl crate::ui::FileManagerApp {
                 .filter(|n| !n.is_empty())
                 .unwrap_or_else(|| bm.display().to_string());
             let resp = ui.selectable_label(false, format!("  {}", name));
-            let is_directory = std::fs::metadata(&bm)
-                .ok()
-                .map(|metadata| metadata.is_dir());
-            let state = crate::ui::file_dnd::bookmark_path_state(is_directory);
+            let state = self.bookmark_drop_state(&bm);
             if state.is_drop_target() {
                 let is_folder = state.is_folder();
                 self.handle_file_drop_response_with_reason(
