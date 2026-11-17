@@ -96,6 +96,19 @@ impl FileManagerApp {
         ui: &mut egui::Ui,
         ctx: &egui::Context,
     ) {
+        self.begin_file_drag(resp, index, entry, ctx);
+        let drop_path = entry.is_dir.then_some(entry.path.as_path());
+        let target_allowed = drop_path
+            .is_some_and(|path| self.active_folder_accepts_drop(path));
+        self.handle_file_drop_response(
+            resp,
+            drop_path,
+            entry.is_dir,
+            target_allowed,
+            ui,
+            ctx,
+        );
+
         let archive_member = entry.archive_member.clone();
         let selection_marquee_active = self.tabs[self.active].selection_marquee.is_some();
         let zip_file =

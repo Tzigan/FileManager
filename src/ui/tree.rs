@@ -357,6 +357,14 @@ impl crate::ui::FileManagerApp {
             } else {
                 ui.selectable_label(is_current, name)
             };
+            self.handle_file_drop_response(
+                &resp,
+                Some(path),
+                true,
+                !crate::platform::is_wsl_path(path),
+                ui,
+                ctx,
+            );
             if resp.clicked() {
                 self.navigate(self.active, path.to_path_buf(), ctx);
             }

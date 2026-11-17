@@ -14,8 +14,10 @@ impl FileManagerApp {
         let count = self.tabs[self.active].entries.len();
         let row_count = count.div_ceil(cols);
         egui::ScrollArea::vertical()
+            .id_salt("grid_file_rows")
             .auto_shrink([false, false])
             .show_rows(ui, 74.0, row_count, |ui, rows| {
+                self.auto_scroll_file_list(ui, ctx);
                 for row in rows {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = style::SPACE_SM;
@@ -41,7 +43,12 @@ impl FileManagerApp {
         let Some(entry) = entry_at(&self.tabs[self.active].entries, index) else {
             return;
         };
-        let (rect, resp) = ui.allocate_exact_size(egui::vec2(104.0, 68.0), egui::Sense::click());
+        let (_, rect) = ui.allocate_space(egui::vec2(104.0, 68.0));
+        let resp = ui.interact(
+            rect,
+            crate::ui::file_dnd::file_row_id(self.tabs[self.active].id, &entry),
+            crate::ui::file_dnd::file_row_sense(),
+        );
         let selected = self.tabs[self.active].is_selected(&entry);
         let focused = self.tabs[self.active].cursor == index;
         if selected {
