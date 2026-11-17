@@ -8,7 +8,7 @@ your files, and free of a console window.
 
 ## Status
 
-Early development — **v0.9.0: performance, properties, and reliability improvements**.
+Early development — **v0.9.1: internal file drag-and-drop and bookmark improvements**.
 See [ROADMAP.md](ROADMAP.md)
 for the full plan up to the stable 1.0 release (in Russian).
 
@@ -97,7 +97,7 @@ Portable-файловый менеджер только для **Windows 11 x64*
 
 ## Статус
 
-Ранняя разработка — **версия 0.9.0: производительность, свойства и надёжность**.
+Ранняя разработка — **версия 0.9.1: внутреннее перетаскивание файлов и улучшения закладок**.
 Полный план до стабильного релиза 1.0 — в [ROADMAP.md](ROADMAP.md).
 
 Уже работает:
