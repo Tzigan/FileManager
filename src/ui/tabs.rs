@@ -31,10 +31,6 @@ impl SelectionKey {
     pub(crate) fn borrowed(&self) -> (&Path, Option<&str>) {
         (&self.path, self.archive_member.as_deref())
     }
-
-    pub(crate) fn path(&self) -> &Path {
-        &self.path
-    }
 }
 
 /// Рамка выделения хранит только временно добавленные ключи, чтобы обновлять её инкрементально.

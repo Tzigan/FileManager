@@ -16,9 +16,15 @@ pub(crate) const FILE_DND_REPAINT_AFTER: Duration = Duration::from_millis(16);
 
 #[derive(Clone, Debug)]
 pub(crate) struct FileDragPayload {
-    pub source_tab_id: u64,
-    pub keys: Vec<SelectionKey>,
-    pub source_volumes: Vec<Option<String>>,
+    pub sources: Vec<DragSource>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DragSource {
+    pub key: SelectionKey,
+    pub path: PathBuf,
+    pub is_dir: bool,
+    pub volume: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -42,12 +48,7 @@ fn drag_start_ready(origin: egui::Pos2, pointer: egui::Pos2, elapsed: Duration) 
 }
 
 pub(crate) fn file_row_id(tab_id: u64, entry: &FileEntry) -> egui::Id {
-    egui::Id::unique((
-        "file_entry",
-        tab_id,
-        &entry.path,
-        &entry.archive_member,
-    ))
+    egui::Id::unique(("file_entry", tab_id, &entry.path, &entry.archive_member))
 }
 
 pub(crate) fn select_drag_entries(
@@ -70,6 +71,56 @@ pub(crate) fn select_drag_entries(
         })
         .collect();
     (!keys.is_empty()).then_some(keys)
+}
+
+fn dnd_path_is_inside(root: &Path, candidate: &Path) -> bool {
+    // absolute убирает . и .. без обхода содержимого каталога; границы проверяет helper кэша.
+    let root = std::path::absolute(root).unwrap_or_else(|_| root.to_path_buf());
+    let candidate = std::path::absolute(candidate).unwrap_or_else(|_| candidate.to_path_buf());
+    crate::core::dir_cache::path_is_inside(&root, &candidate)
+}
+
+pub(crate) fn normalize_drag_sources(
+    entries: &[FileEntry],
+    keys: &[SelectionKey],
+) -> Vec<DragSource> {
+    let candidates: Vec<_> = keys
+        .iter()
+        .filter_map(|key| {
+            entries
+                .iter()
+                .find(|entry| key.matches(entry))
+                .filter(|entry| entry.archive_member.is_none())
+                .map(|entry| (key.clone(), entry.path.clone(), entry.is_dir))
+        })
+        .collect();
+
+    candidates
+        .iter()
+        .filter(|(_, path, _)| {
+            !candidates.iter().any(|(_, parent, parent_is_dir)| {
+                *parent_is_dir && parent != path && dnd_path_is_inside(parent, path)
+            })
+        })
+        .map(|(key, path, is_dir)| DragSource {
+            key: key.clone(),
+            path: path.clone(),
+            is_dir: *is_dir,
+            volume: None,
+        })
+        .collect()
+}
+
+fn source_volumes(sources: &[DragSource]) -> Vec<Option<String>> {
+    sources.iter().map(|source| source.volume.clone()).collect()
+}
+
+fn cursor_item_count(payload: &FileDragPayload) -> usize {
+    payload.sources.len()
+}
+
+fn same_component_path(left: &Path, right: &Path) -> bool {
+    dnd_path_is_inside(left, right) && dnd_path_is_inside(right, left)
 }
 
 pub(crate) fn mode_for_volumes(
@@ -111,15 +162,25 @@ pub(crate) fn build_drop_operation(
         || !target_is_folder
         || sources.is_empty()
         || sources.iter().any(|(source, is_dir)| {
-            source == destination
-                || (mode == DropMode::Move && source.parent() == Some(destination))
-                || (*is_dir && destination.starts_with(source))
+            source == destination || (*is_dir && dnd_path_is_inside(source, destination))
         })
     {
         return None;
     }
 
-    let sources = sources.iter().map(|(path, _)| path.clone()).collect();
+    let sources: Vec<_> = sources
+        .iter()
+        .filter(|(source, _)| {
+            mode != DropMode::Move
+                || !source
+                    .parent()
+                    .is_some_and(|parent| same_component_path(parent, destination))
+        })
+        .map(|(path, _)| path.clone())
+        .collect();
+    if sources.is_empty() {
+        return None;
+    }
     Some(match mode {
         DropMode::Move => OpKind::Move {
             sources,
@@ -210,7 +271,8 @@ impl FileManagerApp {
             self.file_drag_candidate = None;
             return;
         }
-        let primary_down = ctx.input(|input| input.pointer.button_down(egui::PointerButton::Primary));
+        let primary_down =
+            ctx.input(|input| input.pointer.button_down(egui::PointerButton::Primary));
         if !primary_down {
             self.file_drag_candidate = None;
             return;
@@ -238,7 +300,7 @@ impl FileManagerApp {
             return;
         }
 
-        let Some((source_tab_id, keys)) = (|| {
+        let Some(sources) = (|| {
             let tab = self.tabs.get_mut(self.active)?;
             if tab.archive_prefix.is_some()
                 || tab.secure_trash
@@ -248,22 +310,17 @@ impl FileManagerApp {
                 return None;
             }
             let keys = select_drag_entries(&tab.entries, &mut tab.selection, source_index)?;
+            let mut sources = normalize_drag_sources(&tab.entries, &keys);
+            for source in &mut sources {
+                source.volume = crate::platform::volume_id(&source.path);
+            }
             tab.anchor = Some(SelectionKey::from_entry(entry));
             tab.cursor = source_index;
-            Some((tab.id, keys))
+            Some(sources)
         })() else {
             return;
         };
-
-        let source_volumes = keys
-            .iter()
-            .map(|key| crate::platform::volume_id(key.path()))
-            .collect();
-        let payload = FileDragPayload {
-            source_tab_id,
-            keys,
-            source_volumes,
-        };
+        let payload = FileDragPayload { sources };
         if response.drag_started_by(egui::PointerButton::Primary) {
             response.dnd_set_drag_payload(payload);
         } else {
@@ -290,18 +347,12 @@ impl FileManagerApp {
                 .unwrap_or_else(|| Path::new(""));
             let target = destination.unwrap_or(fallback);
             let plan = destination.and_then(|path| {
-                self.file_drop_plan(
-                    &payload,
-                    path,
-                    target_is_folder,
-                    target_allowed,
-                    modifiers,
-                )
+                self.file_drop_plan(&payload, path, target_is_folder, target_allowed, modifiers)
             });
             let mode = plan.as_ref().map(|(_, mode)| *mode).unwrap_or_else(|| {
                 let destination_volume = crate::platform::volume_id(target);
                 mode_for_volumes(
-                    &payload.source_volumes,
+                    &source_volumes(&payload.sources),
                     destination_volume.as_deref(),
                     modifiers.ctrl,
                     modifiers.shift,
@@ -380,7 +431,7 @@ impl FileManagerApp {
             .unwrap_or_else(|| {
                 let destination_volume = crate::platform::volume_id(destination);
                 mode_for_volumes(
-                    &payload.source_volumes,
+                    &source_volumes(&payload.sources),
                     destination_volume.as_deref(),
                     modifiers.ctrl,
                     modifiers.shift,
@@ -401,12 +452,17 @@ impl FileManagerApp {
             format!(
                 "{}: {} · {} · {}",
                 count_label,
-                payload.keys.len(),
+                cursor_item_count(&payload),
                 mode_label,
                 invalid_label
             )
         } else {
-            format!("{}: {} · {}", count_label, payload.keys.len(), mode_label)
+            format!(
+                "{}: {} · {}",
+                count_label,
+                cursor_item_count(&payload),
+                mode_label
+            )
         };
         let Some(pointer) = ctx.pointer_latest_pos() else {
             return;
@@ -424,10 +480,7 @@ impl FileManagerApp {
                         crate::ui::style::FRAME_PADDING_X,
                         crate::ui::style::FRAME_PADDING_Y,
                     ))
-                    .stroke(egui::Stroke::new(
-                        1.0,
-                        ui.visuals().selection.stroke.color,
-                    ))
+                    .stroke(egui::Stroke::new(1.0, ui.visuals().selection.stroke.color))
                     .show(ui, |ui| {
                         ui.label(label);
                     });
@@ -445,31 +498,14 @@ impl FileManagerApp {
         if self.shutdown_active() {
             return None;
         }
-        let source_tab = self
-            .tabs
-            .iter()
-            .find(|tab| tab.id == payload.source_tab_id)?;
-        if source_tab.archive_prefix.is_some()
-            || source_tab.secure_trash
-            || crate::platform::is_wsl_path(&source_tab.path)
-        {
-            return None;
-        }
         let sources: Vec<_> = payload
-            .keys
+            .sources
             .iter()
-            .map(|key| {
-                source_tab
-                    .entries
-                    .iter()
-                    .find(|entry| key.matches(entry))
-                    .filter(|entry| entry.archive_member.is_none())
-                    .map(|entry| (entry.path.clone(), entry.is_dir))
-            })
-            .collect::<Option<_>>()?;
+            .map(|source| (source.path.clone(), source.is_dir))
+            .collect();
         let destination_volume = crate::platform::volume_id(destination);
         let mode = mode_for_volumes(
-            &payload.source_volumes,
+            &source_volumes(&payload.sources),
             destination_volume.as_deref(),
             modifiers.ctrl,
             modifiers.shift,
@@ -550,6 +586,298 @@ mod tests {
         let entries_after_scroll = vec![entry(r"C:\src\other.txt", false), file.clone()];
         let scrolled_id = file_row_id(7, &entries_after_scroll[1]);
         assert_eq!(original_id, scrolled_id);
+    }
+
+    #[test]
+    fn dnd_rejects_folder_into_itself() {
+        assert!(
+            build_drop_operation(
+                &[(PathBuf::from(r"C:\Work"), true)],
+                Path::new(r"C:\Work"),
+                true,
+                true,
+                false,
+                DropMode::Move,
+            )
+            .is_none()
+        );
+        assert!(
+            build_drop_operation(
+                &[(PathBuf::from(r"C:\Work"), true)],
+                Path::new(r"C:\Work"),
+                true,
+                true,
+                false,
+                DropMode::Copy,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn dnd_rejects_folder_into_own_subtree() {
+        assert!(
+            build_drop_operation(
+                &[(PathBuf::from(r"C:\Work"), true)],
+                Path::new(r"C:\Work\sub"),
+                true,
+                true,
+                false,
+                DropMode::Move,
+            )
+            .is_none()
+        );
+        assert!(
+            build_drop_operation(
+                &[(PathBuf::from(r"C:\Work"), true)],
+                Path::new(r"C:\Work\..\Work\sub"),
+                true,
+                true,
+                false,
+                DropMode::Move,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn dnd_allows_folder_into_sibling_with_shared_prefix() {
+        assert!(
+            build_drop_operation(
+                &[(PathBuf::from(r"C:\Work"), true)],
+                Path::new(r"C:\Workplace"),
+                true,
+                true,
+                false,
+                DropMode::Move,
+            )
+            .is_some()
+        );
+    }
+
+    #[test]
+    fn dnd_recursive_check_applies_to_every_folder_in_payload() {
+        assert!(
+            build_drop_operation(
+                &[
+                    (PathBuf::from(r"C:\Safe"), true),
+                    (PathBuf::from(r"C:\Work"), true),
+                ],
+                Path::new(r"C:\Work\sub"),
+                true,
+                true,
+                false,
+                DropMode::Move,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn dnd_drop_into_same_folder_is_noop_for_move() {
+        let mut enqueued = false;
+        if let Some(kind) = build_drop_operation(
+            &[(PathBuf::from(r"C:\Work\a.txt"), false)],
+            Path::new(r"C:\Work"),
+            true,
+            true,
+            false,
+            DropMode::Move,
+        ) {
+            enqueue_drop(kind, DropMode::Move, |_, _| enqueued = true);
+        }
+        assert!(!enqueued);
+        assert!(matches!(
+            build_drop_operation(
+                &[(PathBuf::from(r"C:\Work\a.txt"), false)],
+                Path::new(r"C:\Work"),
+                true,
+                true,
+                false,
+                DropMode::Copy,
+            ),
+            Some(OpKind::Copy { .. })
+        ));
+        assert!(matches!(
+            build_drop_operation(
+                &[
+                    (PathBuf::from(r"C:\Work\a.txt"), false),
+                    (PathBuf::from(r"C:\Other\b.txt"), false),
+                ],
+                Path::new(r"C:\Work"),
+                true,
+                true,
+                false,
+                DropMode::Move,
+            ),
+            Some(OpKind::Move { sources, .. }) if sources == vec![PathBuf::from(r"C:\Other\b.txt")]
+        ));
+    }
+
+    #[test]
+    fn dnd_payload_normalizes_children_whose_parent_is_included() {
+        let entries = vec![
+            entry(r"C:\Work\parent", true),
+            entry(r"C:\Work\parent\child.txt", false),
+            entry(r"C:\Work\parent\nested", true),
+            entry(r"C:\Work\other.txt", false),
+        ];
+        let keys: Vec<_> = entries.iter().map(key).collect();
+        let normalized = normalize_drag_sources(&entries, &keys);
+        assert_eq!(
+            normalized
+                .iter()
+                .map(|source| source.key.clone())
+                .collect::<Vec<_>>(),
+            vec![key(&entries[0]), key(&entries[3])]
+        );
+    }
+
+    #[test]
+    fn dnd_cursor_count_reflects_normalized_payload() {
+        let entries = vec![
+            entry(r"C:\Work\parent", true),
+            entry(r"C:\Work\parent\child.txt", false),
+        ];
+        let payload = FileDragPayload {
+            sources: normalize_drag_sources(&entries, &entries.iter().map(key).collect::<Vec<_>>()),
+        };
+        assert_eq!(cursor_item_count(&payload), 1);
+    }
+
+    #[test]
+    fn dnd_mode_read_at_release_and_hint_updates_with_modifiers() {
+        let volumes = [Some("VOL".to_owned())];
+        let before = mode_for_volumes(&volumes, Some("VOL"), false, false);
+        let at_release = mode_for_volumes(&volumes, Some("VOL"), true, false);
+        assert_eq!(before, DropMode::Move);
+        assert_eq!(at_release, DropMode::Copy);
+        let source = include_str!("file_dnd.rs");
+        assert!(source.contains("response.dnd_release_payload::<FileDragPayload>()"));
+        assert!(source.contains("ctx.input(|input| input.modifiers)"));
+        assert!(source.contains("self.file_drop_feedback = Some(DropFeedback { mode, valid })"));
+    }
+
+    #[test]
+    fn dnd_missing_object_during_drag_reports_error_not_false_success() {
+        let missing = PathBuf::from(r"C:\Work\removed.txt");
+        let payload = FileDragPayload {
+            sources: vec![DragSource {
+                key: key(&entry(r"C:\Work\removed.txt", false)),
+                path: missing.clone(),
+                is_dir: false,
+                volume: Some("VOL".into()),
+            }],
+        };
+        let kind = build_drop_operation(
+            &payload
+                .sources
+                .iter()
+                .map(|source| (source.path.clone(), source.is_dir))
+                .collect::<Vec<_>>(),
+            Path::new(r"C:\Target"),
+            true,
+            true,
+            false,
+            DropMode::Move,
+        )
+        .unwrap();
+        assert!(matches!(kind, OpKind::Move { sources, .. } if sources == vec![missing]));
+        let worker = include_str!("../core/ops/worker/copy_move.rs");
+        assert!(worker.contains("self.ask_error(job, src, &e)"));
+        assert!(
+            include_str!("../core/ops/worker/tests/tests_v04.rs")
+                .contains("fn error_skip_counts_failed")
+        );
+    }
+
+    #[test]
+    fn dnd_name_conflict_uses_existing_ask_conflict_dialog() {
+        let dnd = include_str!("file_dnd.rs");
+        let worker = include_str!("../core/ops/worker/copy_move.rs");
+        let ui = include_str!("opsui.rs");
+        assert!(dnd.contains("self.enqueue(verb, kind)"));
+        assert!(worker.contains("self.ask_conflict(job, src, dst)"));
+        assert!(
+            include_str!("../core/ops/worker/tests/tests_operation_decisions.rs")
+                .contains("OpEvent::AskConflict")
+        );
+        assert!(ui.contains("OpEvent::AskConflict { id, src, dst }"));
+        assert!(ui.contains("fn conflict_dialog"));
+        assert!(
+            include_str!("app/tests.rs")
+                .contains("conflict_dialog_shown_and_answerable_during_shutdown_phase")
+        );
+    }
+
+    #[test]
+    fn dnd_external_drop_from_explorer_not_regressed() {
+        let input = include_str!("app/input.rs");
+        assert!(input.contains("i.raw.dropped_files"));
+        assert!(input.contains("self.enqueue("));
+        assert!(include_str!("app/mod.rs").contains("self.handle_dropped_files(&ctx)"));
+    }
+
+    #[test]
+    fn selection_marquee_and_tab_drag_not_regressed() {
+        assert!(file_row_sense().senses_click());
+        assert!(file_row_sense().senses_drag());
+        assert!(include_str!("list/mod.rs").contains("egui::Sense::click_and_drag()"));
+        assert!(include_str!("app/toolbar.rs").contains("fn tab_drag_sense()"));
+    }
+
+    #[test]
+    fn existing_dnd_tests_not_regressed() {
+        let dnd = include_str!("file_dnd.rs");
+        for name in [
+            "file_row_sense_allows_drag_without_breaking_click",
+            "drag_payload_uses_stable_selection_keys_not_visible_row_indices",
+            "dragging_selected_item_drags_whole_selection",
+            "dragging_unselected_item_selects_only_it",
+            "drop_on_folder_enqueues_move_through_existing_ops_queue",
+            "same_volume_drop_moves_and_invalidates_source_and_dest",
+            "cross_volume_drop_copies_and_invalidates_dest_only",
+            "ctrl_forces_copy_and_shift_forces_move",
+            "invalid_drop_target_does_nothing_without_error",
+            "esc_cancels_drag_without_operation",
+            "drop_during_shutdown_phase_is_rejected",
+            "virtualized_list_dnd_survives_scroll",
+        ] {
+            assert!(dnd.contains(name), "missing preserved test {name}");
+        }
+        assert!(include_str!("list/grouping.rs").contains("group_header_is_not_draggable"));
+        assert!(
+            include_str!("list/mod.rs").contains("marquee_selection_still_works_after_dnd_added")
+        );
+        assert!(
+            include_str!("app/toolbar.rs").contains("tab_drag_still_works_after_file_dnd_added")
+        );
+        assert!(
+            include_str!("../core/settings.rs")
+                .contains("fn settings_structure_and_json_schema_unchanged()")
+        );
+    }
+
+    #[test]
+    fn domain1_cache_notify_ops_not_regressed() {
+        let cache = include_str!("../core/dir_cache.rs");
+        let ops = include_str!("opsui.rs");
+        let worker = include_str!("../core/ops/worker/mod.rs");
+        assert!(cache.contains("OpKind::Move { sources, dest }"));
+        assert!(cache.contains("OpKind::Copy { dest, .. }"));
+        assert!(ops.contains("self.dir_cache.invalidate_dir(&path)"));
+        assert!(worker.contains("while let Ok(job) = jobs_rx.recv()"));
+        assert!(include_str!("../platform/windows/dir_watch.rs").contains("DirWatchCommand"));
+    }
+
+    #[test]
+    fn domain2_and_domain3_not_regressed() {
+        assert!(include_str!("app/mod.rs").contains("DetailsWatch"));
+        assert!(include_str!("app/trash.rs").contains("secure_trash"));
+        assert!(include_str!("app/archive.rs").contains("zip"));
+        assert!(include_str!("tree.rs").contains("is_wsl_path"));
+        assert!(include_str!("opsui.rs").contains("user_facing_operation_error"));
+        assert!(include_str!("app/mod.rs").contains("shutdown_active"));
     }
 
     #[test]
@@ -687,9 +1015,12 @@ mod tests {
     fn esc_cancels_drag_without_operation() {
         let ctx = egui::Context::default();
         let payload = FileDragPayload {
-            source_tab_id: 1,
-            keys: vec![key(&entry(r"C:\src\a.txt", false))],
-            source_volumes: vec![Some("VOL".into())],
+            sources: vec![DragSource {
+                key: key(&entry(r"C:\src\a.txt", false)),
+                path: PathBuf::from(r"C:\src\a.txt"),
+                is_dir: false,
+                volume: Some("VOL".into()),
+            }],
         };
         egui::DragAndDrop::set_payload(&ctx, payload);
         assert!(cancel_on_escape(&ctx, true));
@@ -712,5 +1043,4 @@ mod tests {
             .is_none()
         );
     }
-
 }
