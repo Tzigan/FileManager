@@ -73,6 +73,13 @@ pub(crate) fn select_drag_entries(
     (!keys.is_empty()).then_some(keys)
 }
 
+fn dnd_path_is_inside(root: &Path, candidate: &Path) -> bool {
+    // absolute убирает . и .. без обхода содержимого каталога; границы проверяет helper кэша.
+    let root = std::path::absolute(root).unwrap_or_else(|_| root.to_path_buf());
+    let candidate = std::path::absolute(candidate).unwrap_or_else(|_| candidate.to_path_buf());
+    crate::core::dir_cache::path_is_inside(&root, &candidate)
+}
+
 pub(crate) fn normalize_drag_sources(
     entries: &[FileEntry],
     keys: &[SelectionKey],
@@ -92,9 +99,7 @@ pub(crate) fn normalize_drag_sources(
         .iter()
         .filter(|(_, path, _)| {
             !candidates.iter().any(|(_, parent, parent_is_dir)| {
-                *parent_is_dir
-                    && parent != path
-                    && crate::core::dir_cache::path_is_inside(parent, path)
+                *parent_is_dir && parent != path && dnd_path_is_inside(parent, path)
             })
         })
         .map(|(key, path, is_dir)| DragSource {
@@ -115,8 +120,7 @@ fn cursor_item_count(payload: &FileDragPayload) -> usize {
 }
 
 fn same_component_path(left: &Path, right: &Path) -> bool {
-    crate::core::dir_cache::path_is_inside(left, right)
-        && crate::core::dir_cache::path_is_inside(right, left)
+    dnd_path_is_inside(left, right) && dnd_path_is_inside(right, left)
 }
 
 pub(crate) fn mode_for_volumes(
@@ -158,8 +162,7 @@ pub(crate) fn build_drop_operation(
         || !target_is_folder
         || sources.is_empty()
         || sources.iter().any(|(source, is_dir)| {
-            source == destination
-                || (*is_dir && crate::core::dir_cache::path_is_inside(source, destination))
+            source == destination || (*is_dir && dnd_path_is_inside(source, destination))
         })
     {
         return None;
@@ -617,6 +620,17 @@ mod tests {
             build_drop_operation(
                 &[(PathBuf::from(r"C:\Work"), true)],
                 Path::new(r"C:\Work\sub"),
+                true,
+                true,
+                false,
+                DropMode::Move,
+            )
+            .is_none()
+        );
+        assert!(
+            build_drop_operation(
+                &[(PathBuf::from(r"C:\Work"), true)],
+                Path::new(r"C:\Work\..\Work\sub"),
                 true,
                 true,
                 false,
