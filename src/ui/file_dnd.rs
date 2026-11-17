@@ -480,6 +480,7 @@ pub(crate) fn file_drag_payload_active(
     ctx: &egui::Context,
     response: Option<&egui::Response>,
 ) -> bool {
+    // Общая проверка синхронизирует hover таб-бара с регистрацией drop-цели.
     egui::DragAndDrop::has_payload_of_type::<FileDragPayload>(ctx)
         || response.is_some_and(|response| {
             response.dnd_hover_payload::<FileDragPayload>().is_some()
