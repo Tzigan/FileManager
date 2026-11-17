@@ -1022,6 +1022,14 @@ mod tests {
     use super::*;
     use std::sync::mpsc;
 
+    // Убираем форматные пробелы, чтобы структурные проверки не зависели от rustfmt и CRLF.
+    fn compact_source(source: &str) -> String {
+        source
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join("")
+    }
+
     fn entry(path: &str, is_dir: bool) -> FileEntry {
         FileEntry {
             name: Path::new(path)
@@ -2941,9 +2949,27 @@ mod tests {
 
     #[test]
     fn hover_suppression_uses_same_payload_check_as_tab_surface() {
-        let toolbar = include_str!("app/toolbar.rs");
-        assert!(toolbar.contains("file_drag_payload_active(ctx, Some(&resp))"));
-        assert!(toolbar.contains("tab_file_payload_active,\n                                    ui"));
+        // Раньше сравнение с \n и точными отступами ломалось при форматировании;
+        // компактная строка сохраняет проверку общей переменной для hover и Tab-цели.
+        let toolbar = compact_source(include_str!("app/toolbar.rs"));
+        assert!(
+            toolbar.contains(
+                "tab_file_payload_active=crate::ui::file_dnd::file_drag_payload_active(ctx,Some(&resp));"
+            ),
+            "Tab-бар должен вычислять общий флаг активности файлового payload"
+        );
+        assert!(
+            toolbar.contains(
+                "tab_close_button_hovered(dragging_tab,tab_file_payload_active,*pinned"
+            ),
+            "подавление hover крестика должно использовать общий флаг payload"
+        );
+        assert!(
+            toolbar.contains(
+                "self.handle_tab_drop_response(&resp,tab_id,tab_file_payload_active,ui,ctx,);"
+            ),
+            "цель Tab должна получать тот же флаг payload, что и hover-логика"
+        );
         let handler = include_str!("file_dnd.rs")
             .split("pub(crate) fn handle_tab_drop_response")
             .nth(1)
