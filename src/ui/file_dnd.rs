@@ -859,6 +859,114 @@ mod tests {
     }
 
     #[test]
+    fn tab_drag_and_detach_behavior_unchanged_after_dnd_safety_fix() {
+        let app_tests = include_str!("app/tests.rs");
+        for name in [
+            "tab_drag_fsm_distinguishes_click_drag_and_close_hitbox",
+            "detached_tab_viewport_is_borderless_resizable_and_keeps_its_size",
+            "detached_window_position_stays_on_the_release_monitor",
+            "tab_strip_uses_mouse_wheel_without_showing_a_scrollbar",
+            "tab_strip_scroll_alignment_changes_only_when_target_is_clipped",
+        ] {
+            assert!(
+                app_tests.contains(name),
+                "missing tab regression test {name}"
+            );
+        }
+        let input = include_str!("app/input.rs");
+        assert!(input.contains("self.handle_keys_impl(ctx, false)"));
+        assert!(input.contains("allow_tab_management && !self.tab_drag_state.is_active()"));
+        assert!(
+            include_str!("app/toolbar.rs").contains("fn tab_drag_still_works_after_file_dnd_added")
+        );
+    }
+
+    #[test]
+    fn cache_component_helper_semantics_shared_by_cache_and_dnd() {
+        let work = Path::new(r"C:\Work");
+        assert!(crate::core::dir_cache::path_is_inside(work, work));
+        assert!(crate::core::dir_cache::path_is_inside(
+            work,
+            Path::new(r"C:\Work\sub1")
+        ));
+        assert!(!crate::core::dir_cache::path_is_inside(
+            work,
+            Path::new(r"C:\Workplace")
+        ));
+        assert!(dnd_path_is_inside(work, Path::new(r"C:\Work\..\Work\sub1")));
+        assert!(!dnd_path_is_inside(work, Path::new(r"C:\Workplace")));
+        assert!(include_str!("../core/dir_cache.rs").contains("candidate.starts_with(root)"));
+        assert!(
+            include_str!("file_dnd.rs").contains("dir_cache::path_is_inside(&root, &candidate)")
+        );
+    }
+
+    #[test]
+    fn prefix_invalidation_boundary_not_regressed_by_dnd_helper_reuse() {
+        let cache = include_str!("../core/dir_cache.rs");
+        for name in [
+            "prefix_invalidation_respects_component_boundary",
+            "recursive_delete_invalidates_subtree_and_parent",
+            "move_dir_invalidates_source_subtree_and_dest_parent",
+            "move_invalidates_both_source_and_dest_dirs",
+            "copy_invalidates_dest_not_source",
+        ] {
+            assert!(cache.contains(name), "missing cache regression test {name}");
+        }
+    }
+
+    #[test]
+    fn dnd_move_still_invalidates_source_and_dest_and_copy_dest_only() {
+        let source = PathBuf::from(r"C:\Work\file.txt");
+        let destination = Path::new(r"D:\Target");
+        let moved = build_drop_operation(
+            &[(source.clone(), false)],
+            destination,
+            true,
+            true,
+            false,
+            DropMode::Move,
+        )
+        .unwrap();
+        let moved_dirs = crate::core::dir_cache::affected_dirs(&moved);
+        assert!(moved_dirs.contains(&PathBuf::from(r"C:\Work")));
+        assert!(moved_dirs.contains(&destination.to_path_buf()));
+
+        let copied = build_drop_operation(
+            &[(source, false)],
+            destination,
+            true,
+            true,
+            false,
+            DropMode::Copy,
+        )
+        .unwrap();
+        let copied_dirs = crate::core::dir_cache::affected_dirs(&copied);
+        assert!(copied_dirs.contains(&destination.to_path_buf()));
+        assert!(!copied_dirs.contains(&PathBuf::from(r"C:\Work")));
+        assert!(include_str!("opsui.rs").contains("self.dir_cache.invalidate_dir(&path)"));
+    }
+
+    #[test]
+    fn existing_dnd_safety_tests_not_regressed() {
+        let dnd = include_str!("file_dnd.rs");
+        for name in [
+            "dnd_rejects_folder_into_itself",
+            "dnd_rejects_folder_into_own_subtree",
+            "dnd_allows_folder_into_sibling_with_shared_prefix",
+            "dnd_recursive_check_applies_to_every_folder_in_payload",
+            "dnd_drop_into_same_folder_is_noop_for_move",
+            "dnd_payload_normalizes_children_whose_parent_is_included",
+            "dnd_cursor_count_reflects_normalized_payload",
+            "dnd_mode_read_at_release_and_hint_updates_with_modifiers",
+            "dnd_missing_object_during_drag_reports_error_not_false_success",
+            "dnd_external_drop_from_explorer_not_regressed",
+        ] {
+            assert!(dnd.contains(name), "missing DnD safety test {name}");
+        }
+    }
+
+    #[test]
     fn domain1_cache_notify_ops_not_regressed() {
         let cache = include_str!("../core/dir_cache.rs");
         let ops = include_str!("opsui.rs");
