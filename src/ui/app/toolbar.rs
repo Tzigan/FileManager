@@ -551,6 +551,7 @@ impl FileManagerApp {
                 parent_folder
                     .as_deref()
                     .is_some_and(|path| self.active_folder_accepts_drop(path)),
+                crate::ui::file_dnd::DropSurface::Other,
                 ui,
                 ctx,
             );
@@ -691,6 +692,7 @@ impl FileManagerApp {
                                     Some(seg_path),
                                     true,
                                     self.active_folder_accepts_drop(seg_path),
+                                    crate::ui::file_dnd::DropSurface::Other,
                                     ui,
                                     ctx,
                                 );

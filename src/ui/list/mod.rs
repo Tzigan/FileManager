@@ -120,20 +120,17 @@ impl FileManagerApp {
                     .show_rows(ui, ROW_HEIGHT, rows.len(), |ui, range| {
                         self.auto_scroll_file_list(ui, ctx);
                         for index in range {
-                            match &rows[index] {
-                                ListRow::Item(i) => {
-                                    self.file_row(
-                                        ui,
-                                        *i,
-                                        ctx,
-                                        visual_order.as_deref(),
-                                        marquee_rect,
-                                    );
-                                }
-                                // Заголовок группы отображается, но не попадает в выбор.
-                                ListRow::Header { key, label } => {
-                                    self.group_header(ui, key, label, &mut drop_target)
-                                }
+                            if let Some(entry_index) = rows[index].item_index() {
+                                self.file_row(
+                                    ui,
+                                    entry_index,
+                                    ctx,
+                                    visual_order.as_deref(),
+                                    marquee_rect,
+                                );
+                            } else if let ListRow::Header { key, label } = &rows[index] {
+                                // Заголовок группы отображается, но не становится drop-целью.
+                                self.group_header(ui, key, label, &mut drop_target);
                             }
                         }
                     });
@@ -210,6 +207,7 @@ impl FileManagerApp {
             Some(&current_folder),
             true,
             self.active_folder_accepts_drop(&current_folder),
+            crate::ui::file_dnd::DropSurface::Background,
             ui,
             ctx,
         );
@@ -815,6 +813,110 @@ mod tests {
         let visual = item_order(&rows);
         assert_eq!(cached[visual[0]].name, "Folder");
         assert_eq!(cache.get(&key).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn grouped_list_hover_resolves_entry_under_cursor() {
+        let entries = vec![
+            entry("1", true, None),
+            entry("AEGIS", true, None),
+            entry("profile.env", false, Some("env")),
+        ];
+        let rows = table_rows_sorted(&entries, true, &[], "Папка", "Файл", SortKey::Name, false);
+        let visual_slot = rows
+            .iter()
+            .position(|row| {
+                row.item_index()
+                    .is_some_and(|index| entries[index].name == "AEGIS")
+            })
+            .unwrap();
+        assert_ne!(visual_slot, 1);
+        let entry_index = rows[visual_slot].item_index().unwrap();
+        assert_eq!(
+            crate::ui::file_dnd::entry_drop_destination(&entries[entry_index]),
+            Some(std::path::Path::new("AEGIS"))
+        );
+    }
+
+    #[test]
+    fn hover_resolution_correct_in_table_list_and_grid() {
+        let entries = vec![
+            entry("1", true, None),
+            entry("AEGIS", true, None),
+            entry("profile.env", false, Some("env")),
+        ];
+        let target_index = 1;
+        let rows = table_rows_sorted(&entries, true, &[], "Папка", "Файл", SortKey::Name, false);
+        let table_index = rows
+            .iter()
+            .find_map(|row| {
+                row.item_index()
+                    .filter(|&index| entries[index].name == "AEGIS")
+            })
+            .unwrap();
+        for view in [ViewMode::Table, ViewMode::List, ViewMode::Grid] {
+            let index = if view == ViewMode::Table {
+                table_index
+            } else {
+                target_index
+            };
+            assert_eq!(
+                crate::ui::file_dnd::entry_drop_destination(&entries[index]),
+                Some(std::path::Path::new("AEGIS"))
+            );
+        }
+    }
+
+    #[test]
+    fn hover_resolution_correct_with_sort_filter_and_search_active() {
+        let entries = vec![
+            entry("skip.txt", false, Some("txt")),
+            entry("AEGIS", true, None),
+            entry("other.env", false, Some("env")),
+        ];
+        let options = crate::core::search::SearchOptions {
+            query: "AEGIS".into(),
+            ..Default::default()
+        };
+        let visible: Vec<_> = entries
+            .into_iter()
+            .filter(|entry| crate::core::search::matches_entry(entry, &options))
+            .collect();
+        let rows = table_rows_sorted(&visible, true, &[], "Папка", "Файл", SortKey::Name, true);
+        let visible_index = rows.iter().find_map(ListRow::item_index).unwrap();
+        assert_eq!(
+            crate::ui::file_dnd::entry_drop_destination(&visible[visible_index]),
+            Some(std::path::Path::new("AEGIS"))
+        );
+    }
+
+    #[test]
+    fn group_header_is_not_a_drop_target_and_does_not_shift_mapping() {
+        let entries = vec![
+            entry("1", true, None),
+            entry("AEGIS", true, None),
+            entry("profile.env", false, Some("env")),
+        ];
+        let rows = table_rows(&entries, true, &[], "Папка", "Файл");
+        let header_slot = rows
+            .iter()
+            .position(|row| matches!(row, ListRow::Header { .. }))
+            .unwrap();
+        assert_eq!(rows[header_slot].item_index(), None);
+        let aegis_slot = rows
+            .iter()
+            .position(|row| {
+                row.item_index()
+                    .is_some_and(|index| entries[index].name == "AEGIS")
+            })
+            .unwrap();
+        assert_ne!(aegis_slot, 1);
+        assert_eq!(
+            crate::ui::file_dnd::entry_drop_destination(
+                &entries[rows[aegis_slot].item_index().unwrap()]
+            ),
+            Some(std::path::Path::new("AEGIS"))
+        );
     }
 
     #[test]

@@ -13,6 +13,9 @@ pub(crate) const FILE_DND_EDGE_ZONE_POINTS: f32 = 36.0;
 pub(crate) const FILE_DND_MAX_SCROLL_POINTS_PER_SECOND: f32 = 480.0;
 pub(crate) const FILE_DND_MAX_FRAME_DELTA_SECONDS: f32 = 0.1;
 pub(crate) const FILE_DND_REPAINT_AFTER: Duration = Duration::from_millis(16);
+pub(crate) const FILE_DND_HINT_MAX_WIDTH_POINTS: f32 = 360.0;
+pub(crate) const FILE_DND_HINT_TARGET_CLEARANCE_POINTS: f32 = 80.0;
+const FILE_DND_HINT_MAX_HEIGHT_POINTS: f32 = 120.0;
 
 #[derive(Clone, Debug)]
 pub(crate) struct FileDragPayload {
@@ -33,10 +36,64 @@ pub(crate) enum DropMode {
     Copy,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct DropFeedback {
     pub mode: DropMode,
-    pub valid: bool,
+    pub plan: Option<DropPlan>,
+    pub reason: Option<DropInvalidReason>,
+    pub surface: DropSurface,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DropSurface {
+    Entry,
+    Background,
+    Other,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DropInvalidReason {
+    FolderIntoSelf,
+    FolderIntoSubfolder,
+    FileAlreadyInFolder,
+    FolderAlreadyInFolder,
+    ItemsAlreadyInFolder,
+    InvalidTarget,
+}
+
+impl DropInvalidReason {
+    fn translation_key(self) -> &'static str {
+        match self {
+            Self::FolderIntoSelf => "dnd.invalid_self",
+            Self::FolderIntoSubfolder => "dnd.invalid_subfolder",
+            Self::FileAlreadyInFolder => "dnd.file_already_in_folder",
+            Self::FolderAlreadyInFolder => "dnd.folder_already_in_folder",
+            Self::ItemsAlreadyInFolder => "dnd.items_already_in_folder",
+            Self::InvalidTarget => "dnd.invalid_target",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DropPlan {
+    pub mode: DropMode,
+    pub sources: Vec<PathBuf>,
+    pub destination: PathBuf,
+}
+
+impl DropPlan {
+    fn into_op_kind(self) -> OpKind {
+        match self.mode {
+            DropMode::Move => OpKind::Move {
+                sources: self.sources,
+                dest: self.destination,
+            },
+            DropMode::Copy => OpKind::Copy {
+                sources: self.sources,
+                dest: self.destination,
+            },
+        }
+    }
 }
 
 pub(crate) fn file_row_sense() -> egui::Sense {
@@ -49,6 +106,10 @@ fn drag_start_ready(origin: egui::Pos2, pointer: egui::Pos2, elapsed: Duration) 
 
 pub(crate) fn file_row_id(tab_id: u64, entry: &FileEntry) -> egui::Id {
     egui::Id::unique(("file_entry", tab_id, &entry.path, &entry.archive_member))
+}
+
+pub(crate) fn entry_drop_destination(entry: &FileEntry) -> Option<&Path> {
+    entry.is_dir.then_some(entry.path.as_path())
 }
 
 pub(crate) fn select_drag_entries(
@@ -73,10 +134,14 @@ pub(crate) fn select_drag_entries(
     (!keys.is_empty()).then_some(keys)
 }
 
+fn normalize_drop_path(path: &Path) -> PathBuf {
+    std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
 fn dnd_path_is_inside(root: &Path, candidate: &Path) -> bool {
     // absolute убирает . и .. без обхода содержимого каталога; границы проверяет helper кэша.
-    let root = std::path::absolute(root).unwrap_or_else(|_| root.to_path_buf());
-    let candidate = std::path::absolute(candidate).unwrap_or_else(|_| candidate.to_path_buf());
+    let root = normalize_drop_path(root);
+    let candidate = normalize_drop_path(candidate);
     crate::core::dir_cache::path_is_inside(&root, &candidate)
 }
 
@@ -149,26 +214,32 @@ pub(crate) fn mode_for_volumes(
     }
 }
 
-pub(crate) fn build_drop_operation(
+fn build_drop_plan(
     sources: &[(PathBuf, bool)],
     destination: &Path,
     target_is_folder: bool,
     target_allowed: bool,
     shutdown_active: bool,
     mode: DropMode,
-) -> Option<OpKind> {
-    if shutdown_active
-        || !target_allowed
-        || !target_is_folder
-        || sources.is_empty()
-        || sources.iter().any(|(source, is_dir)| {
-            source == destination || (*is_dir && dnd_path_is_inside(source, destination))
-        })
-    {
-        return None;
+) -> Result<DropPlan, DropInvalidReason> {
+    if shutdown_active || !target_allowed || !target_is_folder || sources.is_empty() {
+        return Err(DropInvalidReason::InvalidTarget);
     }
 
-    let sources: Vec<_> = sources
+    for (source, is_dir) in sources {
+        if same_component_path(source, destination) {
+            return Err(if *is_dir {
+                DropInvalidReason::FolderIntoSelf
+            } else {
+                DropInvalidReason::FileAlreadyInFolder
+            });
+        }
+        if *is_dir && dnd_path_is_inside(source, destination) {
+            return Err(DropInvalidReason::FolderIntoSubfolder);
+        }
+    }
+
+    let planned_sources: Vec<_> = sources
         .iter()
         .filter(|(source, _)| {
             mode != DropMode::Move
@@ -178,19 +249,121 @@ pub(crate) fn build_drop_operation(
         })
         .map(|(path, _)| path.clone())
         .collect();
-    if sources.is_empty() {
-        return None;
+    if planned_sources.is_empty() {
+        return Err(already_in_folder_reason(sources));
     }
-    Some(match mode {
-        DropMode::Move => OpKind::Move {
-            sources,
-            dest: destination.to_path_buf(),
-        },
-        DropMode::Copy => OpKind::Copy {
-            sources,
-            dest: destination.to_path_buf(),
-        },
+
+    Ok(DropPlan {
+        mode,
+        sources: planned_sources,
+        destination: destination.to_path_buf(),
     })
+}
+
+fn already_in_folder_reason(sources: &[(PathBuf, bool)]) -> DropInvalidReason {
+    if sources.iter().all(|(_, is_dir)| *is_dir) {
+        DropInvalidReason::FolderAlreadyInFolder
+    } else if sources.iter().all(|(_, is_dir)| !*is_dir) {
+        DropInvalidReason::FileAlreadyInFolder
+    } else {
+        DropInvalidReason::ItemsAlreadyInFolder
+    }
+}
+
+pub(crate) fn plan_file_drop(
+    sources: &[DragSource],
+    destination: &Path,
+    target_is_folder: bool,
+    target_allowed: bool,
+    shutdown_active: bool,
+    destination_volume: Option<&str>,
+    modifiers: egui::Modifiers,
+) -> DropFeedback {
+    let mode = mode_for_volumes(
+        &source_volumes(sources),
+        destination_volume,
+        modifiers.ctrl,
+        modifiers.shift,
+    );
+    let source_paths: Vec<_> = sources
+        .iter()
+        .map(|source| (source.path.clone(), source.is_dir))
+        .collect();
+    match build_drop_plan(
+        &source_paths,
+        destination,
+        target_is_folder,
+        target_allowed,
+        shutdown_active,
+        mode,
+    ) {
+        Ok(plan) => DropFeedback {
+            mode,
+            plan: Some(plan),
+            reason: None,
+            surface: DropSurface::Entry,
+        },
+        Err(reason) => DropFeedback {
+            mode,
+            plan: None,
+            reason: Some(reason),
+            surface: DropSurface::Entry,
+        },
+    }
+}
+
+fn drop_hint_lines(
+    count_label: &str,
+    count: usize,
+    mode_label: &str,
+    reason_label: Option<&str>,
+) -> Vec<String> {
+    let mut lines = vec![format!("{count_label}: {count}"), mode_label.to_owned()];
+    if let Some(reason) = reason_label {
+        lines.push(reason.to_owned());
+    }
+    lines
+}
+
+fn drop_hint_placement(pointer: egui::Pos2, viewport: egui::Rect) -> (egui::Align2, egui::Pos2) {
+    let below = pointer.y - viewport.top()
+        < FILE_DND_HINT_MAX_HEIGHT_POINTS + FILE_DND_HINT_TARGET_CLEARANCE_POINTS;
+    if below {
+        (
+            egui::Align2::LEFT_TOP,
+            pointer + egui::vec2(14.0, FILE_DND_HINT_TARGET_CLEARANCE_POINTS),
+        )
+    } else {
+        (
+            egui::Align2::LEFT_BOTTOM,
+            pointer + egui::vec2(14.0, -FILE_DND_HINT_TARGET_CLEARANCE_POINTS),
+        )
+    }
+}
+
+fn background_can_apply_feedback(existing: Option<&DropFeedback>) -> bool {
+    existing.is_none_or(|feedback| feedback.surface == DropSurface::Background)
+}
+
+#[cfg(test)]
+pub(crate) fn build_drop_operation(
+    sources: &[(PathBuf, bool)],
+    destination: &Path,
+    target_is_folder: bool,
+    target_allowed: bool,
+    shutdown_active: bool,
+    mode: DropMode,
+) -> Option<OpKind> {
+    build_drop_plan(
+        sources,
+        destination,
+        target_is_folder,
+        target_allowed,
+        shutdown_active,
+        mode,
+    )
+    .ok()
+    .map(DropPlan::into_op_kind)
 }
 
 pub(crate) fn enqueue_drop(
@@ -335,50 +508,84 @@ impl FileManagerApp {
         destination: Option<&Path>,
         target_is_folder: bool,
         target_allowed: bool,
+        surface: DropSurface,
         ui: &egui::Ui,
         ctx: &egui::Context,
     ) {
         let modifiers = ctx.input(|input| input.modifiers);
-        if let Some(payload) = response.dnd_hover_payload::<FileDragPayload>() {
-            let fallback = self
-                .tabs
-                .get(self.active)
-                .map(|tab| tab.path.as_path())
-                .unwrap_or_else(|| Path::new(""));
-            let target = destination.unwrap_or(fallback);
-            let plan = destination.and_then(|path| {
-                self.file_drop_plan(&payload, path, target_is_folder, target_allowed, modifiers)
-            });
-            let mode = plan.as_ref().map(|(_, mode)| *mode).unwrap_or_else(|| {
-                let destination_volume = crate::platform::volume_id(target);
-                mode_for_volumes(
+        let hover_payload = response.dnd_hover_payload::<FileDragPayload>();
+        let release_payload = response.dnd_release_payload::<FileDragPayload>();
+        if hover_payload.is_none() && release_payload.is_none() {
+            return;
+        }
+
+        if surface == DropSurface::Background
+            && !background_can_apply_feedback(self.file_drop_feedback.as_ref())
+        {
+            return;
+        }
+
+        let Some(payload) = hover_payload
+            .as_deref()
+            .or_else(|| release_payload.as_deref())
+        else {
+            return;
+        };
+        let fallback = self
+            .tabs
+            .get(self.active)
+            .map(|tab| tab.path.as_path())
+            .unwrap_or_else(|| Path::new(""));
+        let destination_volume = destination
+            .map(crate::platform::volume_id)
+            .unwrap_or_else(|| crate::platform::volume_id(fallback));
+        let mut feedback = destination.map_or_else(
+            || DropFeedback {
+                mode: mode_for_volumes(
                     &source_volumes(&payload.sources),
                     destination_volume.as_deref(),
                     modifiers.ctrl,
                     modifiers.shift,
+                ),
+                plan: None,
+                reason: None,
+                surface,
+            },
+            |path| {
+                plan_file_drop(
+                    &payload.sources,
+                    path,
+                    target_is_folder,
+                    target_allowed,
+                    self.shutdown_active(),
+                    destination_volume.as_deref(),
+                    modifiers,
                 )
-            });
-            let valid = plan.is_some();
-            self.file_drop_feedback = Some(DropFeedback { mode, valid });
-            paint_drop_feedback(ui, response.rect, valid);
-            ctx.set_cursor_icon(if valid {
-                egui::CursorIcon::PointingHand
+            },
+        );
+        feedback.surface = surface;
+        self.file_drop_feedback = Some(feedback.clone());
+
+        if hover_payload.is_some() {
+            if destination.is_some() {
+                paint_drop_feedback(ui, response.rect, feedback.plan.is_some());
+                ctx.set_cursor_icon(if feedback.plan.is_some() {
+                    egui::CursorIcon::PointingHand
+                } else {
+                    egui::CursorIcon::NotAllowed
+                });
             } else {
-                egui::CursorIcon::NotAllowed
-            });
+                ctx.set_cursor_icon(egui::CursorIcon::Default);
+            }
         }
 
-        if let Some(payload) = response.dnd_release_payload::<FileDragPayload>()
-            && let Some(destination) = destination
-            && let Some((kind, mode)) = self.file_drop_plan(
-                &payload,
-                destination,
-                target_is_folder,
-                target_allowed,
-                modifiers,
-            )
+        if release_payload.is_some()
+            && let Some(plan) = feedback.plan.take()
         {
-            enqueue_drop(kind, mode, |verb, kind| self.enqueue(verb, kind));
+            let mode = plan.mode;
+            enqueue_drop(plan.into_op_kind(), mode, |verb, kind| {
+                self.enqueue(verb, kind)
+            });
         }
     }
 
@@ -427,6 +634,7 @@ impl FileManagerApp {
         let modifiers = ctx.input(|input| input.modifiers);
         let mode = self
             .file_drop_feedback
+            .as_ref()
             .map(|feedback| feedback.mode)
             .unwrap_or_else(|| {
                 let destination_volume = crate::platform::volume_id(destination);
@@ -444,33 +652,28 @@ impl FileManagerApp {
             })
             .to_owned();
         let count_label = self.t("dnd.count").to_owned();
-        let invalid_label = self.t("dnd.invalid_target").to_owned();
-        let label = if self
+        let reason = self
             .file_drop_feedback
-            .is_some_and(|feedback| !feedback.valid)
-        {
-            format!(
-                "{}: {} · {} · {}",
-                count_label,
-                cursor_item_count(&payload),
-                mode_label,
-                invalid_label
-            )
-        } else {
-            format!(
-                "{}: {} · {}",
-                count_label,
-                cursor_item_count(&payload),
-                mode_label
-            )
-        };
+            .as_ref()
+            .and_then(|feedback| feedback.reason)
+            .map(|reason| self.t(reason.translation_key()).to_owned());
+        let lines = drop_hint_lines(
+            &count_label,
+            cursor_item_count(&payload),
+            &mode_label,
+            reason.as_deref(),
+        );
         let Some(pointer) = ctx.pointer_latest_pos() else {
             return;
         };
+        let (pivot, position) = drop_hint_placement(pointer, ctx.content_rect());
         ctx.request_repaint_after(FILE_DND_REPAINT_AFTER);
         egui::Area::new(egui::Id::unique("file_drag_preview"))
             .order(egui::Order::Foreground)
-            .fixed_pos(pointer + egui::vec2(14.0, 18.0))
+            // Подсказка находится над или под целью с запасом на высоту плитки.
+            .pivot(pivot)
+            .fixed_pos(position)
+            .constrain(true)
             .interactable(false)
             .show(ctx, |ui| {
                 egui::Frame::new()
@@ -482,43 +685,14 @@ impl FileManagerApp {
                     ))
                     .stroke(egui::Stroke::new(1.0, ui.visuals().selection.stroke.color))
                     .show(ui, |ui| {
-                        ui.label(label);
+                        ui.set_max_width(FILE_DND_HINT_MAX_WIDTH_POINTS);
+                        ui.vertical(|ui| {
+                            for line in &lines {
+                                ui.label(line);
+                            }
+                        });
                     });
             });
-    }
-
-    fn file_drop_plan(
-        &self,
-        payload: &FileDragPayload,
-        destination: &Path,
-        target_is_folder: bool,
-        target_allowed: bool,
-        modifiers: egui::Modifiers,
-    ) -> Option<(OpKind, DropMode)> {
-        if self.shutdown_active() {
-            return None;
-        }
-        let sources: Vec<_> = payload
-            .sources
-            .iter()
-            .map(|source| (source.path.clone(), source.is_dir))
-            .collect();
-        let destination_volume = crate::platform::volume_id(destination);
-        let mode = mode_for_volumes(
-            &source_volumes(&payload.sources),
-            destination_volume.as_deref(),
-            modifiers.ctrl,
-            modifiers.shift,
-        );
-        let kind = build_drop_operation(
-            &sources,
-            destination,
-            target_is_folder,
-            target_allowed,
-            false,
-            mode,
-        )?;
-        Some((kind, mode))
     }
 }
 
@@ -550,6 +724,16 @@ mod tests {
 
     fn key(entry: &FileEntry) -> SelectionKey {
         SelectionKey::from_entry(entry)
+    }
+
+    fn drag_source(path: &str, is_dir: bool, volume: Option<&str>) -> DragSource {
+        let entry = entry(path, is_dir);
+        DragSource {
+            key: key(&entry),
+            path: entry.path,
+            is_dir,
+            volume: volume.map(str::to_owned),
+        }
     }
 
     #[test]
@@ -755,7 +939,219 @@ mod tests {
         let source = include_str!("file_dnd.rs");
         assert!(source.contains("response.dnd_release_payload::<FileDragPayload>()"));
         assert!(source.contains("ctx.input(|input| input.modifiers)"));
-        assert!(source.contains("self.file_drop_feedback = Some(DropFeedback { mode, valid })"));
+        assert!(source.contains("feedback.plan.take()"));
+        assert!(source.contains("plan_file_drop("));
+    }
+
+    #[test]
+    fn hover_validity_matches_release_plan_for_same_target() {
+        let sources = [drag_source(r"C:\Parent\1", true, Some("VOL"))];
+        let modifiers = egui::Modifiers::default();
+        let hover = plan_file_drop(
+            &sources,
+            Path::new(r"C:\Parent\AEGIS"),
+            true,
+            true,
+            false,
+            Some("VOL"),
+            modifiers,
+        );
+        let release = plan_file_drop(
+            &sources,
+            Path::new(r"C:\Parent\AEGIS"),
+            true,
+            true,
+            false,
+            Some("VOL"),
+            modifiers,
+        );
+        assert_eq!(hover, release);
+        assert!(hover.plan.is_some());
+        assert_eq!(hover.reason, None);
+    }
+
+    #[test]
+    fn hovering_other_folder_in_same_parent_is_valid() {
+        let feedback = plan_file_drop(
+            &[drag_source(r"C:\Parent\1", true, Some("VOL"))],
+            Path::new(r"C:\Parent\AEGIS"),
+            true,
+            true,
+            false,
+            Some("VOL"),
+            egui::Modifiers::default(),
+        );
+        let plan = feedback.plan.unwrap();
+        assert_eq!(feedback.mode, DropMode::Move);
+        assert_eq!(plan.destination, PathBuf::from(r"C:\Parent\AEGIS"));
+        assert_eq!(plan.sources, vec![PathBuf::from(r"C:\Parent\1")]);
+    }
+
+    #[test]
+    fn payload_source_is_selected_entry_not_active_tab_path() {
+        let entries = vec![
+            entry(r"C:\Parent", true),
+            entry(r"C:\Parent\1", true),
+            entry(r"C:\Parent\AEGIS", true),
+        ];
+        let selected = [key(&entries[1])];
+        let sources = normalize_drag_sources(&entries, &selected);
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].path, entries[1].path);
+        assert_ne!(sources[0].path, entries[0].path);
+    }
+
+    #[test]
+    fn source_and_dest_normalized_identically_before_component_compare() {
+        let source = normalize_drop_path(Path::new(r"C:\Parent\1\..\1"));
+        let destination = normalize_drop_path(Path::new(r"C:\Parent\AEGIS\."));
+        assert_eq!(source, normalize_drop_path(Path::new(r"C:\Parent\1")));
+        assert!(!dnd_path_is_inside(&source, &destination));
+        assert!(!dnd_path_is_inside(&destination, &source));
+        let dnd = include_str!("file_dnd.rs");
+        assert!(dnd.contains("let root = normalize_drop_path(root)"));
+        assert!(dnd.contains("let candidate = normalize_drop_path(candidate)"));
+    }
+
+    #[test]
+    fn unreadable_dest_volume_does_not_silently_mark_invalid() {
+        let feedback = plan_file_drop(
+            &[drag_source(r"C:\Parent\1", true, Some("VOL"))],
+            Path::new(r"D:\AEGIS"),
+            true,
+            true,
+            false,
+            None,
+            egui::Modifiers::default(),
+        );
+        assert!(feedback.plan.is_some());
+        assert_eq!(feedback.mode, DropMode::Copy);
+        assert_eq!(feedback.reason, None);
+    }
+
+    #[test]
+    fn invalid_reason_is_specific_not_generic() {
+        let source = [drag_source(r"C:\Parent\1", true, Some("VOL"))];
+        let self_drop = plan_file_drop(
+            &source,
+            Path::new(r"C:\Parent\1"),
+            true,
+            true,
+            false,
+            Some("VOL"),
+            egui::Modifiers::default(),
+        );
+        assert_eq!(self_drop.reason, Some(DropInvalidReason::FolderIntoSelf));
+
+        let subtree_drop = plan_file_drop(
+            &source,
+            Path::new(r"C:\Parent\1\child"),
+            true,
+            true,
+            false,
+            Some("VOL"),
+            egui::Modifiers::default(),
+        );
+        assert_eq!(
+            subtree_drop.reason,
+            Some(DropInvalidReason::FolderIntoSubfolder)
+        );
+
+        let same_folder_move = plan_file_drop(
+            &[drag_source(r"C:\Parent\file.txt", false, Some("VOL"))],
+            Path::new(r"C:\Parent"),
+            true,
+            true,
+            false,
+            Some("VOL"),
+            egui::Modifiers::default(),
+        );
+        assert_eq!(
+            same_folder_move.reason,
+            Some(DropInvalidReason::FileAlreadyInFolder)
+        );
+        assert_eq!(
+            DropInvalidReason::FolderIntoSelf.translation_key(),
+            "dnd.invalid_self"
+        );
+        assert_eq!(
+            DropInvalidReason::FolderIntoSubfolder.translation_key(),
+            "dnd.invalid_subfolder"
+        );
+        assert_eq!(
+            DropInvalidReason::FileAlreadyInFolder.translation_key(),
+            "dnd.file_already_in_folder"
+        );
+        for key in [
+            "dnd.invalid_self",
+            "dnd.invalid_subfolder",
+            "dnd.file_already_in_folder",
+        ] {
+            assert!(include_str!("../../i18n/ru.json").contains(key));
+            assert!(include_str!("../../i18n/en.json").contains(key));
+        }
+    }
+
+    #[test]
+    fn no_global_invalid_frame_when_valid_row_target_hovered() {
+        let mut feedback = plan_file_drop(
+            &[drag_source(r"C:\Parent\1", true, Some("VOL"))],
+            Path::new(r"C:\Parent\AEGIS"),
+            true,
+            true,
+            false,
+            Some("VOL"),
+            egui::Modifiers::default(),
+        );
+        feedback.surface = DropSurface::Entry;
+        assert!(feedback.plan.is_some());
+        assert!(!background_can_apply_feedback(Some(&feedback)));
+    }
+
+    #[test]
+    fn background_target_highlighted_only_when_pointer_on_background() {
+        assert!(background_can_apply_feedback(None));
+        let mut row = DropFeedback {
+            mode: DropMode::Move,
+            plan: None,
+            reason: Some(DropInvalidReason::InvalidTarget),
+            surface: DropSurface::Entry,
+        };
+        assert!(!background_can_apply_feedback(Some(&row)));
+        row.surface = DropSurface::Other;
+        assert!(!background_can_apply_feedback(Some(&row)));
+        row.surface = DropSurface::Background;
+        assert!(background_can_apply_feedback(Some(&row)));
+    }
+
+    #[test]
+    fn drop_hint_width_prevents_five_line_wrap() {
+        let lines = drop_hint_lines(
+            "Объектов",
+            1,
+            "Переместить",
+            Some("Нельзя поместить папку в её подпапку"),
+        );
+        assert_eq!(FILE_DND_HINT_MAX_WIDTH_POINTS, 360.0);
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0], "Объектов: 1");
+        let viewport = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(640.0, 480.0));
+        let (top_pivot, below_position) = drop_hint_placement(egui::pos2(80.0, 50.0), viewport);
+        assert_eq!(top_pivot, egui::Align2::LEFT_TOP);
+        assert_eq!(
+            below_position.y,
+            50.0 + FILE_DND_HINT_TARGET_CLEARANCE_POINTS
+        );
+        let (bottom_pivot, above_position) = drop_hint_placement(egui::pos2(80.0, 300.0), viewport);
+        assert_eq!(bottom_pivot, egui::Align2::LEFT_BOTTOM);
+        assert_eq!(
+            above_position.y,
+            300.0 - FILE_DND_HINT_TARGET_CLEARANCE_POINTS
+        );
+        assert!(
+            include_str!("file_dnd.rs")
+                .contains("ui.set_max_width(FILE_DND_HINT_MAX_WIDTH_POINTS)")
+        );
     }
 
     #[test]
@@ -961,6 +1357,8 @@ mod tests {
             "dnd_mode_read_at_release_and_hint_updates_with_modifiers",
             "dnd_missing_object_during_drag_reports_error_not_false_success",
             "dnd_external_drop_from_explorer_not_regressed",
+            "alias_target_rejected_by_worker_reports_understandable_error_not_silent_skip",
+            "alias_rejection_counts_as_failed_not_false_success",
         ] {
             assert!(dnd.contains(name), "missing DnD safety test {name}");
         }

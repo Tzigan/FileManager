@@ -90,7 +90,15 @@ impl FileManagerApp {
         let width = ui.available_width();
         let (rect, hr) =
             ui.allocate_exact_size(egui::vec2(width, ROW_HEIGHT), egui::Sense::click());
-        self.handle_file_drop_response(&hr, None, false, false, ui, ui.ctx());
+        self.handle_file_drop_response(
+            &hr,
+            None,
+            false,
+            false,
+            crate::ui::file_dnd::DropSurface::Other,
+            ui,
+            ui.ctx(),
+        );
         let (name_x, size_x, type_x, mod_x) = self.column_x(width);
         let font = egui::TextStyle::Body.resolve(ui.style());
         let color = ui.visuals().strong_text_color();
@@ -142,7 +150,15 @@ impl FileManagerApp {
             );
             let col_resp =
                 ui.interact(col_rect, ui.scope_id().with(i18n_key), egui::Sense::click());
-            self.handle_file_drop_response(&col_resp, None, false, false, ui, ui.ctx());
+            self.handle_file_drop_response(
+                &col_resp,
+                None,
+                false,
+                false,
+                crate::ui::file_dnd::DropSurface::Other,
+                ui,
+                ui.ctx(),
+            );
             if col_resp.clicked() {
                 self.sort_col(k);
             }
