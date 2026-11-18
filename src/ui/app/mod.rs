@@ -128,6 +128,11 @@ impl UpdateCheckState {
     }
 }
 
+// Нулевой ID зарезервирован только за автопроверкой при запуске.
+fn is_startup_update_check(request_id: u64) -> bool {
+    request_id == STARTUP_UPDATE_CHECK_ID
+}
+
 /// Освобождает слот после фактического завершения ручной проверки.
 struct UpdateCheckInFlightGuard(Arc<AtomicBool>);
 
@@ -1688,6 +1693,9 @@ impl FileManagerApp {
                     self.pending_update = Some(manifest);
                     self.update_status = None;
                     self.update_err = None;
+                    if is_startup_update_check(request_id) {
+                        self.show_about = true;
+                    }
                     ctx.request_repaint();
                 }
                 WorkerMsg::UpdateProgress { downloaded, total } => {
