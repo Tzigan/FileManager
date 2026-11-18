@@ -623,8 +623,23 @@ mod tests {
 
         assert!(menu[..create].contains("menu_button"));
         assert!(folder < text_file);
-        assert!(!menu.contains("ctx.new_folder"));
-        assert!(!menu.contains("ctx.new_file"));
+    }
+
+    #[test]
+    fn create_still_available_via_empty_area_create_submenu() {
+        let source = include_str!("actions.rs");
+        let menu = source
+            .split("fn empty_area_menu")
+            .nth(1)
+            .unwrap()
+            .split("pub(super) fn entry_actions")
+            .next()
+            .unwrap();
+        assert!(menu.contains("ui.menu_button(self.t(\"ctx.create\")"));
+        assert!(menu.contains("self.open_create_dialog(true)"));
+        assert!(menu.contains("self.open_create_dialog(false)"));
+        assert!(menu.contains("\"ctx.create_folder\""));
+        assert!(menu.contains("\"ctx.create_text_file\""));
     }
 
     #[test]

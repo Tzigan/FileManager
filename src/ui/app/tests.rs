@@ -1,12 +1,11 @@
 //! Тесты расположения вкладок, навигации и окон.
 use super::chrome::tab_hover_affordances_enabled;
 use super::{
-    MANUAL_UPDATE_CHECK_TIMEOUT, PreviewState, STARTUP_UPDATE_CHECK_ID, UpdateCheckState,
-    SHUTDOWN_NOTICE_DELAY, ShutdownOperation, ShutdownOperationKind, ShutdownProgress,
-    ShutdownSnapshot, log_shutdown_start, log_shutdown_wait,
+    MANUAL_UPDATE_CHECK_TIMEOUT, PreviewState, SHUTDOWN_NOTICE_DELAY, STARTUP_UPDATE_CHECK_ID,
+    ShutdownOperation, ShutdownOperationKind, ShutdownProgress, ShutdownSnapshot, UpdateCheckState,
     breadcrumb_segments, configure_tab_scroll_style, dialogs, dropped_paths,
-    floating_dialog_viewport, parse_archive_address, persisted_tab_path, tab_close_button_hovered,
-    tab_scroll_source, tab_strip_content_margin,
+    floating_dialog_viewport, log_shutdown_start, log_shutdown_wait, parse_archive_address,
+    persisted_tab_path, tab_close_button_hovered, tab_scroll_source, tab_strip_content_margin,
 };
 use crate::core::bg_ops::{BgOpEvent, BgOpKind, BgOpPool};
 use crate::core::ops::{ConflictAction, OpEvent, OpReply};
@@ -417,23 +416,137 @@ fn tab_drag_fsm_distinguishes_click_drag_and_close_hitbox() {
 #[test]
 fn tab_close_hover_suppressed_while_file_payload_active() {
     let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(24.0, 24.0));
-    assert!(!tab_close_button_hovered(false, true, false, rect, Some(rect.center())));
+    assert!(!tab_close_button_hovered(
+        false,
+        true,
+        false,
+        rect,
+        Some(rect.center())
+    ));
 }
 
 #[test]
 fn tab_close_hover_and_click_normal_without_payload() {
     let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(24.0, 24.0));
-    assert!(tab_close_button_hovered(false, false, false, rect, Some(rect.center())));
+    assert!(tab_close_button_hovered(
+        false,
+        false,
+        false,
+        rect,
+        Some(rect.center())
+    ));
     let toolbar = include_str!("toolbar.rs");
     assert!(toolbar.contains("if in_x"));
     assert!(toolbar.contains("act = Some((\"close\", *i))"));
 }
 
 #[test]
-fn plus_button_hover_suppressed_while_file_payload_active() {
+fn new_tab_button_hover_suppressed_while_file_payload_active() {
     assert!(!tab_hover_affordances_enabled(true));
     assert!(tab_hover_affordances_enabled(false));
     assert!(include_str!("toolbar.rs").contains("add_enabled_ui(plus_hover_affordances_enabled"));
+}
+
+#[test]
+fn toolbar_plus_button_and_its_menu_removed() {
+    let source = include_str!("toolbar.rs");
+    let toolbar = source
+        .split("pub(super) fn toolbar")
+        .nth(1)
+        .unwrap()
+        .split("// Breadcrumbs")
+        .next()
+        .unwrap();
+    let removed_keys = [
+        ["ctx", "new_folder"].join("."),
+        ["ctx", "new_file"].join("."),
+    ];
+
+    assert!(!toolbar.contains("menu_button(\"+\""));
+    for key in removed_keys {
+        assert!(!source.contains(&key));
+    }
+    // Кнопка добавления вкладки — отдельный элемент и остаётся на месте.
+    assert!(source.contains("Button::new(\"+\").small()"));
+}
+
+#[test]
+fn toolbar_layout_stable_after_removal() {
+    let source = include_str!("toolbar.rs");
+    let row = source
+        .split("pub(super) fn toolbar")
+        .nth(1)
+        .unwrap()
+        .split("// Breadcrumbs")
+        .next()
+        .unwrap();
+    let bookmark = row.find("self.act_bookmark();").unwrap();
+    let address = row
+        .find("TextEdit::singleline(&mut self.tabs[self.active].address_input)")
+        .unwrap();
+    let between = &row[bookmark..address];
+
+    assert!(row.contains("ui.horizontal(|ui| {"));
+    assert!(bookmark < address);
+    assert!(!between.contains("menu_button"));
+    assert!(!between.contains("add_space"));
+}
+
+#[test]
+fn paste_still_available_via_empty_area_menu_and_ctrl_v() {
+    let menu_source = include_str!("../list/actions.rs");
+    let menu = menu_source
+        .split("fn empty_area_menu")
+        .nth(1)
+        .unwrap()
+        .split("pub(super) fn entry_actions")
+        .next()
+        .unwrap();
+    let input = include_str!("input.rs");
+
+    assert!(menu.contains("ctx.paste"));
+    assert!(menu.contains("self.act_paste()"));
+    assert!(input.contains("id: ShortcutId::Paste"));
+    assert!(input.contains("key: egui::Key::V"));
+    assert!(input.contains("self.act_paste()"));
+}
+
+#[test]
+fn no_references_to_removed_button_in_help_hotkeys_and_detached() {
+    let removed_keys = [
+        ["ctx", "new_folder"].join("."),
+        ["ctx", "new_file"].join("."),
+    ];
+    let help = include_str!("dialogs.rs");
+    let hotkeys = include_str!("input.rs");
+    let detached = include_str!("window_frame.rs");
+
+    assert!(!help.contains("New / Paste"));
+    assert!(!hotkeys.contains("New / Paste"));
+    assert!(!detached.contains("menu_button(\"+\""));
+    assert!(detached.contains("self.toolbar(&viewport_ctx, ui)"));
+    for source in [help, hotkeys, detached] {
+        for key in &removed_keys {
+            assert!(!source.contains(key));
+        }
+    }
+}
+
+#[test]
+fn existing_create_flow_tests_not_regressed() {
+    let ops = include_str!("../opsui.rs");
+    let menu = include_str!("../list/actions.rs");
+    for name in [
+        "text_file_creation_appends_txt_when_name_has_no_extension",
+        "text_file_creation_does_not_double_txt_case_insensitive",
+        "text_file_creation_keeps_other_extension_as_typed",
+        "folder_creation_uses_name_as_typed_without_extension",
+        "create_name_taken_by_folder_shows_folder_reason_and_keeps_form_open",
+        "create_name_taken_by_file_shows_file_reason_and_keeps_form_open",
+    ] {
+        assert!(ops.contains(name), "missing create-flow regression: {name}");
+    }
+    assert!(menu.contains("create_still_available_via_empty_area_create_submenu"));
 }
 
 #[test]
@@ -814,7 +927,8 @@ fn shutdown_warning_does_not_detach_or_force_kill_worker() {
 #[test]
 fn shutdown_completes_normally_after_worker_returns() {
     let (release_tx, release_rx) = std::sync::mpsc::channel();
-    let worker = std::thread::spawn(move || release_rx.recv_timeout(Duration::from_secs(5)).unwrap());
+    let worker =
+        std::thread::spawn(move || release_rx.recv_timeout(Duration::from_secs(5)).unwrap());
     let now = Instant::now();
     let mut progress = ShutdownProgress::default();
     assert!(progress.begin(now, shutdown_fixture()));
