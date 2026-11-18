@@ -154,6 +154,128 @@ fn startup_auto_update_result_preserved_or_explicitly_cancelled_by_about_close()
 }
 
 #[test]
+fn auto_update_check_starts_on_app_launch() {
+    let app = include_str!("mod.rs");
+    let start = app
+        .find("crate::core::update::cleanup_leftovers();")
+        .unwrap();
+    let end = app[start..].find("// Secondary instances").unwrap() + start;
+    let startup = &app[start..end];
+
+    assert!(startup.contains("thread::spawn"));
+    assert!(startup.contains("crate::core::update::check_latest()"));
+    assert!(startup.contains("version_newer"));
+    assert!(startup.contains("request_id: STARTUP_UPDATE_CHECK_ID"));
+}
+
+#[test]
+fn about_opens_automatically_when_update_available() {
+    assert!(super::is_startup_update_check(STARTUP_UPDATE_CHECK_ID));
+
+    let app = include_str!("mod.rs");
+    let found = app
+        .rmatch_indices("WorkerMsg::UpdateFound {")
+        .next()
+        .unwrap()
+        .0;
+    let end = app[found..].find("WorkerMsg::UpdateProgress").unwrap() + found;
+    let handler = &app[found..end];
+    assert!(handler.contains("is_startup_update_check(request_id)"));
+    assert!(handler.contains("self.show_about = true"));
+}
+
+#[test]
+fn about_does_not_open_when_no_update_or_check_failed() {
+    assert!(!super::is_startup_update_check(1));
+
+    let app = include_str!("mod.rs");
+    let start = app
+        .find("crate::core::update::cleanup_leftovers();")
+        .unwrap();
+    let end = app[start..].find("// Secondary instances").unwrap() + start;
+    let startup = &app[start..end];
+    assert!(startup.contains("if let Ok(r) = crate::core::update::check_latest()"));
+    assert!(startup.contains("if crate::core::update::version_newer"));
+    assert!(!startup.contains("WorkerMsg::UpdateFailed"));
+    assert!(!startup.contains("WorkerMsg::UpdateLatest"));
+}
+
+#[test]
+fn manual_check_from_help_menu_opens_about_with_result() {
+    let toolbar = include_str!("toolbar.rs");
+    let help_start = toolbar
+        .find("ui.menu_button(self.t(\"menu.help\")")
+        .unwrap();
+    let help = &toolbar[help_start..];
+    assert!(help.contains("self.t(\"help.about\")"));
+    assert!(help.contains("self.show_about = true"));
+
+    let dialogs = include_str!("dialogs.rs");
+    assert!(dialogs.contains("egui::Button::new(self.t(\"update.check\").to_owned())"));
+    assert!(dialogs.contains("self.spawn_update_check(&viewport_ctx, request_id)"));
+    assert!(dialogs.contains("WorkerMsg::UpdateFound"));
+}
+
+#[test]
+fn about_from_help_menu_shows_cached_update_result_if_available() {
+    let toolbar = include_str!("toolbar.rs");
+    assert!(toolbar.contains("self.t(\"help.about\")"));
+    assert!(toolbar.contains("self.show_about = true"));
+
+    let dialogs = include_str!("dialogs.rs");
+    assert!(dialogs.contains("if let Some(manifest) = self.pending_update.clone()"));
+    assert!(dialogs.contains("self.t(\"update.found\").replace(\"{v}\", &manifest.version)"));
+}
+
+#[test]
+fn about_update_now_triggers_existing_update_logic() {
+    let dialogs = include_str!("dialogs.rs");
+    assert!(dialogs.contains("self.t(\"update.now\")"));
+    assert!(dialogs.contains("self.start_update_download(&viewport_ctx)"));
+}
+
+#[test]
+fn about_later_closes_window_and_continues() {
+    let dialogs = include_str!("dialogs.rs");
+    let later = dialogs.find("self.t(\"update.later\")").unwrap();
+    let handler_start = dialogs[..later].rfind("if !self.update_busy").unwrap();
+    let handler_end = dialogs[later..].find("});").unwrap() + later;
+    let handler = &dialogs[handler_start..handler_end];
+
+    assert!(handler.contains("self.pending_update = None"));
+    assert!(handler.contains("close_requested = true"));
+    assert!(handler.contains("ViewportCommand::Close"));
+    assert!(!handler.contains("self.start_shutdown()"));
+}
+
+#[test]
+fn shutdown_during_update_prompt_behavior_unchanged() {
+    let app = include_str!("mod.rs");
+    let ui_start = app.find("fn ui(&mut self").unwrap();
+    let ui = &app[ui_start..];
+    let shutdown = ui.find("if self.shutdown.is_active()").unwrap();
+    let drain = ui.find("self.drain_messages(&ctx)").unwrap();
+    assert!(shutdown < drain);
+
+    let dialogs = include_str!("dialogs.rs");
+    assert!(dialogs.contains("self.update_check.close_about()"));
+}
+
+#[test]
+fn existing_update_check_tests_not_regressed() {
+    let tests = include_str!("tests.rs");
+    for test in [
+        "update_check_result_ignores_stale_response_after_about_close",
+        "manual_update_check_supersedes_startup_auto_check",
+        "repeated_update_clicks_do_not_spawn_parallel_checks_or_break_status",
+        "reopening_about_does_not_show_stale_update_result",
+        "manual_update_check_has_final_timeout_or_failure_not_stuck_checking",
+    ] {
+        assert!(tests.contains(&format!("fn {test}")));
+    }
+}
+
+#[test]
 fn about_close_clears_manual_display_not_global_auto_state_if_expected() {
     let mut state = UpdateCheckState::default();
     let in_flight = AtomicBool::new(false);
@@ -1367,6 +1489,8 @@ fn settings_structure_and_json_schema_unchanged() {
     let settings = include_str!("../../core/settings.rs");
     assert!(app.contains("const SHUTDOWN_NOTICE_DELAY"));
     assert!(!settings.contains("shutdown_notice_delay"));
+    assert!(!settings.contains("check_updates_on_startup"));
+    assert!(!settings.contains("auto_update"));
     assert!(!include_str!("../../../i18n/ru.json").contains("shutdown_notice_delay"));
     assert!(!include_str!("../../../i18n/en.json").contains("shutdown_notice_delay"));
 }

@@ -218,6 +218,8 @@ impl FileManagerApp {
                                     self.update_total = 0;
                                     self.update_status = None;
                                     self.update_err = None;
+                                    close_requested = true;
+                                    viewport_ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                                 }
                             });
                         }
