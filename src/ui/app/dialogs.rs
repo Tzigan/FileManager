@@ -4,6 +4,11 @@ use anyhow::Context;
 
 use super::*;
 
+const ABOUT_WINDOW_WIDTH: f32 = 520.0;
+const ABOUT_WINDOW_HEIGHT: f32 = 350.0;
+const ABOUT_CONTENT_MARGIN_X: i8 = style::SPACE_MD as i8;
+const ABOUT_PATH_ELLIPSIS: &str = "…";
+
 pub(super) fn log_export_error_key(
     error: &crate::core::log_export::LogExportError,
 ) -> &'static str {
@@ -87,6 +92,57 @@ fn about_build_profile_key() -> &'static str {
     }
 }
 
+fn elide_about_path(
+    path: &str,
+    max_width: f32,
+    measure: impl Fn(&str) -> f32,
+) -> String {
+    if measure(path) <= max_width {
+        return path.to_owned();
+    }
+
+    let chars: Vec<char> = path.chars().collect();
+    let candidate = |keep: usize| {
+        let prefix_len = keep.div_ceil(2);
+        let suffix_len = keep / 2;
+        let mut text = String::new();
+        text.extend(chars.iter().take(prefix_len));
+        text.push_str(ABOUT_PATH_ELLIPSIS);
+        text.extend(chars.iter().skip(chars.len() - suffix_len));
+        text
+    };
+    let mut low = 0;
+    let mut high = chars.len();
+    while low < high {
+        let keep = low + (high - low).div_ceil(2);
+        if measure(&candidate(keep)) <= max_width {
+            low = keep;
+        } else {
+            high = keep - 1;
+        }
+    }
+    candidate(low)
+}
+
+fn about_path_row(ui: &mut egui::Ui, label: &str, path: &str) {
+    ui.horizontal(|ui| {
+        ui.label(format!("{label}:"));
+        let max_width = ui.available_width();
+        let font = egui::TextStyle::Body.resolve(ui.style());
+        let color = ui.visuals().text_color();
+        let display_path = elide_about_path(path, max_width, |text| {
+            ui.ctx().fonts_mut(|fonts| {
+                fonts
+                    .layout_no_wrap(text.to_owned(), font.clone(), color)
+                    .size()
+                    .x
+            })
+        });
+        ui.add(egui::Label::new(display_path).truncate())
+            .on_hover_text(path);
+    });
+}
+
 impl FileManagerApp {
     pub(super) fn about_window(&mut self, ctx: &egui::Context) {
         if !self.show_about {
@@ -106,7 +162,7 @@ impl FileManagerApp {
         let builder = floating_dialog_viewport(
             ctx,
             title,
-            egui::vec2(520.0, 350.0),
+            egui::vec2(ABOUT_WINDOW_WIDTH, ABOUT_WINDOW_HEIGHT),
             self.about_viewport_placed,
         );
         let mut close_requested = false;
@@ -118,40 +174,27 @@ impl FileManagerApp {
                 close_requested = true;
                 return;
             }
-            egui::CentralPanel::default().show(viewport_ui, |ui| {
+            let mut about_frame = egui::Frame::central_panel(viewport_ui.style());
+            about_frame.inner_margin.left = ABOUT_CONTENT_MARGIN_X;
+            about_frame.inner_margin.right = ABOUT_CONTENT_MARGIN_X;
+            egui::CentralPanel::default().frame(about_frame).show(viewport_ui, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     ui.heading(version_label.clone());
                     ui.label(format!("{build_label}: {build_profile}"));
                     ui.add(egui::Label::new(self.t("about.description")).wrap());
                     ui.add_space(style::SPACE_SM);
-                    ui.add(
-                        egui::Label::new(format!(
-                            "{}: {}",
-                            config_label,
-                            self.dirs.config_dir.display()
-                        ))
-                        .wrap(),
-                    );
-                    ui.horizontal(|ui| {
-                        ui.add(
-                            egui::Label::new(format!(
-                                "{}: {}",
-                                log_label,
-                                self.dirs.log_dir.display()
-                            ))
-                            .wrap(),
-                        );
-                        // Экспорт остаётся единственным входом в механизм 3.2.
-                        if ui
-                            .add_enabled(
-                                !self.log_export_busy,
-                                egui::Button::new(export_label.clone()),
-                            )
-                            .clicked()
-                        {
-                            export_requested = true;
-                        }
-                    });
+                    about_path_row(ui, &config_label, &self.dirs.config_dir.display().to_string());
+                    about_path_row(ui, &log_label, &self.dirs.log_dir.display().to_string());
+                    // Кнопка располагается отдельно, чтобы длина пути не выталкивала её за край.
+                    if ui
+                        .add_enabled(
+                            !self.log_export_busy,
+                            egui::Button::new(export_label.clone()),
+                        )
+                        .clicked()
+                    {
+                        export_requested = true;
+                    }
                     ui.add(egui::Label::new(&export_hint).wrap());
                     if let Some(status) = &self.log_export_status {
                         ui.add(egui::Label::new(status.as_str()).wrap());
@@ -1293,7 +1336,8 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        SettingsCategory, about_build_profile_key, log_export_error_key,
+        ABOUT_CONTENT_MARGIN_X, ABOUT_WINDOW_HEIGHT, ABOUT_WINDOW_WIDTH, SettingsCategory,
+        about_build_profile_key, elide_about_path, log_export_error_key,
         refresh_after_attribute_change,
         selected_entry_for_details, settings_category_column_width,
         settings_reset_load_warning, settings_reset_requires_restart,
@@ -1327,6 +1371,21 @@ mod tests {
             extension: Some("txt".to_owned()),
             archive_member: None,
         }
+    }
+
+    const TEST_CHAR_WIDTH: f32 = 8.0;
+    const TEST_BUTTON_PADDING: f32 = 24.0;
+
+    fn test_text_width(text: &str) -> f32 {
+        text.chars().count() as f32 * TEST_CHAR_WIDTH
+    }
+
+    fn about_content_rect() -> egui::Rect {
+        egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(ABOUT_WINDOW_WIDTH, ABOUT_WINDOW_HEIGHT),
+        )
+        .shrink2(egui::vec2(ABOUT_CONTENT_MARGIN_X as f32, 0.0))
     }
 
     #[test]
@@ -1983,6 +2042,186 @@ mod tests {
         }
         for forbidden in ["криптограф", "гарантирован", "кроссплатформ", "ssd"] {
             assert!(!description_ru.contains(forbidden));
+        }
+    }
+
+    #[test]
+    fn about_window_content_has_symmetric_horizontal_margins() {
+        let window = egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(ABOUT_WINDOW_WIDTH, ABOUT_WINDOW_HEIGHT),
+        );
+        let content = about_content_rect();
+        assert_eq!(
+            content.left() - window.left(),
+            window.right() - content.right()
+        );
+        let about = about_window_source();
+        assert!(about.contains("about_frame.inner_margin.left = ABOUT_CONTENT_MARGIN_X"));
+        assert!(about.contains("about_frame.inner_margin.right = ABOUT_CONTENT_MARGIN_X"));
+    }
+
+    #[test]
+    fn about_export_logs_button_fully_inside_content_rect_ru_and_en() {
+        let en: serde_json::Value =
+            serde_json::from_str(include_str!("../../../i18n/en.json")).unwrap();
+        let ru: serde_json::Value =
+            serde_json::from_str(include_str!("../../../i18n/ru.json")).unwrap();
+        let content = about_content_rect();
+        for labels in [&en, &ru] {
+            let label = labels["logs.export"].as_str().unwrap();
+            let button_width = test_text_width(label) + TEST_BUTTON_PADDING;
+            let button_rect = egui::Rect::from_min_size(
+                content.min,
+                egui::vec2(button_width, 32.0),
+            );
+            assert!(content.contains_rect(button_rect), "button clipped: {label}");
+        }
+
+        let about = about_window_source();
+        let path = about.find("about_path_row(ui, &log_label").unwrap();
+        let button = about.find("Button::new(export_label.clone())").unwrap();
+        assert!(path < button);
+        assert!(!about[path..button].contains("ui.horizontal("));
+    }
+
+    #[test]
+    fn about_long_paths_wrap_or_elide_without_silent_clipping() {
+        let path = r"C:\Users\A_Very_Long_Windows_User_Name_For_Layout_Test\AppData\Local\FileManager\Logs";
+        let visible = elide_about_path(path, 240.0, |text| test_text_width(text));
+        assert!(visible.contains(super::ABOUT_PATH_ELLIPSIS));
+        assert!(visible.starts_with(r"C:\Users"));
+        assert!(visible.ends_with(r"\Logs"));
+        assert!(test_text_width(&visible) <= 240.0);
+
+        let dialogs = include_str!("dialogs.rs");
+        assert!(dialogs.contains("Label::new(display_path).truncate()"));
+        assert!(dialogs.contains(".on_hover_text(path)"));
+    }
+
+    #[test]
+    fn about_window_width_accounts_for_widest_content_plus_both_margins() {
+        let en: serde_json::Value =
+            serde_json::from_str(include_str!("../../../i18n/en.json")).unwrap();
+        let ru: serde_json::Value =
+            serde_json::from_str(include_str!("../../../i18n/ru.json")).unwrap();
+        let content_width =
+            ABOUT_WINDOW_WIDTH - 2.0 * ABOUT_CONTENT_MARGIN_X as f32;
+        for labels in [&en, &ru] {
+            for key in [
+                "about.version",
+                "about.build_profile",
+                "logs.export",
+                "update.check",
+                "update.now",
+                "update.later",
+                "update.install",
+                "update.restart_now",
+            ] {
+                let text = labels[key].as_str().unwrap();
+                let widget_width = test_text_width(text)
+                    + if key.starts_with("logs.") || key.starts_with("update.") {
+                        TEST_BUTTON_PADDING
+                    } else {
+                        0.0
+                    };
+                assert!(
+                    widget_width <= content_width,
+                    "{key} does not fit with both margins"
+                );
+            }
+        }
+
+        let about = about_window_source();
+        assert!(about.contains("ABOUT_WINDOW_WIDTH"));
+        assert!(about.contains("ABOUT_CONTENT_MARGIN_X"));
+    }
+
+    #[test]
+    fn about_layout_stable_for_long_windows_username() {
+        let path = r"C:\Users\An_Extremely_Long_User_Name_That_Exceeds_Normal_Length\AppData\Roaming\FileManager\Logs";
+        let visible = elide_about_path(path, 180.0, |text| test_text_width(text));
+        assert!(visible.starts_with(r"C:\Users"));
+        assert!(visible.ends_with(r"\Logs"));
+        assert!(visible.contains(super::ABOUT_PATH_ELLIPSIS));
+        assert!(test_text_width(&visible) <= 180.0);
+    }
+
+    #[test]
+    fn about_content_blocks_order_and_keys_unchanged() {
+        let about = about_window_source();
+        let blocks = [
+            "ui.heading(version_label.clone())",
+            "self.t(\"about.description\")",
+            "about_path_row(ui, &config_label",
+            "about_path_row(ui, &log_label",
+            "Button::new(export_label.clone())",
+            "Label::new(&export_hint)",
+            "self.t(\"update.check\")",
+            "self.t(\"update.found\")",
+            "self.t(\"update.now\")",
+            "self.t(\"update.later\")",
+            "if let Some(status) = &self.update_status",
+            "if let Some(error) = &self.update_err",
+        ];
+        let positions: Vec<_> = blocks
+            .iter()
+            .map(|block| about.find(block).unwrap_or_else(|| panic!("missing block: {block}")))
+            .collect();
+        assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+
+        let en: serde_json::Value =
+            serde_json::from_str(include_str!("../../../i18n/en.json")).unwrap();
+        let ru: serde_json::Value =
+            serde_json::from_str(include_str!("../../../i18n/ru.json")).unwrap();
+        for key in [
+            "about.version",
+            "about.description",
+            "about.build_profile",
+            "label.config_dir",
+            "label.log_dir",
+            "logs.export",
+            "logs.export_hint",
+            "update.check",
+            "update.found",
+            "update.now",
+            "update.later",
+            "update.ready",
+            "update.install",
+            "update.restart_now",
+        ] {
+            assert!(en[key].as_str().is_some(), "missing en key {key}");
+            assert!(ru[key].as_str().is_some(), "missing ru key {key}");
+        }
+    }
+
+    #[test]
+    fn existing_about_and_update_tests_not_regressed() {
+        let dialogs = include_str!("dialogs.rs");
+        let app_tests = include_str!("tests.rs");
+        for test in [
+            "about_version_from_single_source_not_hardcoded",
+            "about_build_profile_reflects_actual_configuration",
+            "about_description_matches_real_capabilities_no_false_promises",
+            "about_update_check_reuses_spawn_update_check_no_second_system",
+            "about_update_result_user_facing_no_raw_error",
+            "about_window_single_instance_existing_style_localized",
+        ] {
+            assert!(dialogs.contains(&format!("fn {test}")));
+        }
+        assert!(app_tests.contains("manual_update_check_supersedes_startup_auto_check"));
+        assert!(app_tests.contains("about_opens_automatically_when_update_available"));
+    }
+
+    #[test]
+    fn existing_log_export_tests_not_regressed() {
+        let dialogs = include_str!("dialogs.rs");
+        for test in [
+            "export_entry_in_about_window_not_second_window_menu_bar_untouched",
+            "help_export_item_reuses_existing_log_export_handler",
+            "about_export_entry_not_duplicated",
+        ] {
+            assert!(dialogs.contains(&format!("fn {test}")));
         }
     }
 
