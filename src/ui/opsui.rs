@@ -60,15 +60,53 @@ pub(crate) fn operation_error_key(kind: ErrorKind) -> &'static str {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExistingEntryKind {
+    File,
+    Folder,
+}
+
+fn name_taken_error_key(kind: ExistingEntryKind) -> &'static str {
+    match kind {
+        ExistingEntryKind::File => "error.name_taken_file",
+        ExistingEntryKind::Folder => "error.name_taken_folder",
+    }
+}
+
+// Проверка самого пути использует правила регистра конкретного каталога Windows.
+fn existing_entry_kind(path: &Path) -> Option<ExistingEntryKind> {
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    Some(if metadata.is_dir() {
+        ExistingEntryKind::Folder
+    } else {
+        ExistingEntryKind::File
+    })
+}
+
+fn operation_error_key_for_context(
+    kind: ErrorKind,
+    is_creation: bool,
+    existing: Option<ExistingEntryKind>,
+) -> &'static str {
+    if is_creation
+        && matches!(kind, ErrorKind::PermissionDenied | ErrorKind::AlreadyExists)
+        && let Some(existing) = existing
+    {
+        return name_taken_error_key(existing);
+    }
+    operation_error_key(kind)
+}
+
 fn user_facing_operation_error(
     path: &Path,
     kind: ErrorKind,
+    reason_key: Option<&'static str>,
     translate: impl FnOnce(&str) -> String,
 ) -> String {
     format!(
         "{}\n{}",
         path.display(),
-        translate(operation_error_key(kind))
+        translate(reason_key.unwrap_or_else(|| operation_error_key(kind)))
     )
 }
 
@@ -173,13 +211,100 @@ fn valid_creation_name(input: &str) -> Option<&str> {
         .then_some(name)
 }
 
+fn text_file_name(name: &str) -> String {
+    if name.to_ascii_lowercase().ends_with(".txt") {
+        name.to_owned()
+    } else if Path::new(name).extension().is_some() {
+        name.to_owned()
+    } else {
+        format!("{name}.txt")
+    }
+}
+
+fn creation_target(parent: &Path, input: &str, is_dir: bool) -> Option<PathBuf> {
+    let name = valid_creation_name(input)?;
+    let final_name = if is_dir {
+        name.to_owned()
+    } else {
+        text_file_name(name)
+    };
+    Some(parent.join(final_name))
+}
+
 fn creation_operation(parent: &std::path::Path, input: &str, is_dir: bool) -> Option<OpKind> {
-    let path = parent.join(valid_creation_name(input)?);
+    let path = creation_target(parent, input, is_dir)?;
     Some(if is_dir {
         OpKind::CreateDir { path }
     } else {
         OpKind::CreateFile { path }
     })
+}
+
+enum CreateSubmission {
+    Enqueue(OpKind),
+    KeepOpen {
+        is_dir: bool,
+        name: String,
+        error_key: &'static str,
+    },
+    Invalid,
+}
+
+fn creation_submission(
+    parent: &Path,
+    input: &str,
+    is_dir: bool,
+    lookup: impl FnOnce(&Path) -> Option<ExistingEntryKind>,
+) -> CreateSubmission {
+    let Some(operation) = creation_operation(parent, input, is_dir) else {
+        return CreateSubmission::Invalid;
+    };
+    let path = match &operation {
+        OpKind::CreateDir { path } | OpKind::CreateFile { path } => path,
+        _ => unreachable!("создание всегда задаёт путь нового элемента"),
+    };
+    match lookup(path) {
+        Some(existing) => CreateSubmission::KeepOpen {
+            is_dir,
+            name: input.trim().to_owned(),
+            error_key: name_taken_error_key(existing),
+        },
+        None => CreateSubmission::Enqueue(operation),
+    }
+}
+
+fn apply_creation_submission(
+    form: &mut Option<(bool, String)>,
+    error_key: &mut Option<&'static str>,
+    submission: CreateSubmission,
+) -> Option<OpKind> {
+    match submission {
+        CreateSubmission::Enqueue(operation) => {
+            *form = None;
+            *error_key = None;
+            Some(operation)
+        }
+        CreateSubmission::KeepOpen {
+            is_dir,
+            name,
+            error_key: reason,
+        } => {
+            *form = Some((is_dir, name));
+            *error_key = Some(reason);
+            None
+        }
+        CreateSubmission::Invalid => {
+            *form = None;
+            *error_key = None;
+            None
+        }
+    }
+}
+
+fn apply_conflict_reason(existing: Option<ExistingEntryKind>) -> &'static str {
+    existing
+        .map(name_taken_error_key)
+        .unwrap_or("conflict.exists")
 }
 
 pub struct JobUi {
@@ -192,6 +317,8 @@ pub struct JobUi {
     pub done_f: usize,
     pub total_f: usize,
     pub cancel: Arc<AtomicBool>,
+    pub is_creation: bool,
+    pub is_rename: bool,
     /// Папки, чей кэш списка надо сбросить, когда операция закончится.
     pub touched_dirs: Vec<PathBuf>,
 }
@@ -213,7 +340,10 @@ pub struct OpsUi {
     pub delete_confirm: Option<(Vec<PathBuf>, bool)>, // (paths, recycle)
     pub delete_ask: Option<Vec<PathBuf>>,
     pub conflict: Option<(u64, PathBuf, PathBuf)>,
+    pub conflict_reason: Option<&'static str>,
     pub error_q: Option<(u64, PathBuf, ErrorKind, bool)>,
+    pub error_reason: Option<&'static str>,
+    pub create_error: Option<&'static str>,
     pub show_journal: bool,
     pub journal: Vec<String>,
 }
@@ -223,6 +353,8 @@ impl FileManagerApp {
         if self.shutdown_active() {
             return;
         }
+        let is_creation = matches!(&kind, OpKind::CreateDir { .. } | OpKind::CreateFile { .. });
+        let is_rename = matches!(&kind, OpKind::Rename { .. });
         self.ops_ui.next_id += 1;
         let id = self.ops_ui.next_id;
         let touched_dirs = crate::core::dir_cache::affected_dirs(&kind);
@@ -248,8 +380,15 @@ impl FileManagerApp {
             done_f: 0,
             total_f: 0,
             cancel: job.cancel,
+            is_creation,
+            is_rename,
             touched_dirs,
         });
+    }
+
+    pub(crate) fn open_create_dialog(&mut self, is_dir: bool) {
+        self.ops_ui.create = Some((is_dir, String::new()));
+        self.ops_ui.create_error = None;
     }
 
     /// Selection of the active tab as paths.
@@ -389,7 +528,18 @@ impl FileManagerApp {
                     }
                 }
                 OpEvent::AskConflict { id, src, dst } => {
+                    let is_rename = self
+                        .ops_ui
+                        .jobs
+                        .iter()
+                        .any(|job| job.id == id && job.is_rename);
+                    let reason = if is_rename {
+                        apply_conflict_reason(existing_entry_kind(&dst))
+                    } else {
+                        "conflict.exists"
+                    };
                     self.ops_ui.conflict = Some((id, src, dst));
+                    self.ops_ui.conflict_reason = Some(reason);
                 }
                 OpEvent::AskError {
                     id,
@@ -398,20 +548,45 @@ impl FileManagerApp {
                     kind,
                     retryable,
                 } => {
+                    let is_creation = self
+                        .ops_ui
+                        .jobs
+                        .iter()
+                        .any(|job| job.id == id && job.is_creation);
+                    let existing = if is_creation
+                        && matches!(kind, ErrorKind::PermissionDenied | ErrorKind::AlreadyExists)
+                    {
+                        existing_entry_kind(&path)
+                    } else {
+                        None
+                    };
+                    let reason_key = operation_error_key_for_context(kind, is_creation, existing);
+                    let specific_reason =
+                        (reason_key != operation_error_key(kind)).then_some(reason_key);
                     #[cfg(not(debug_assertions))]
                     let _ = message;
                     #[cfg(debug_assertions)]
-                    self.ops_ui
-                        .journal
-                        .push(format!("{} [{kind:?}]: {message}", path.display()));
+                    {
+                        let detail = if let Some(key) = specific_reason {
+                            format!("{} [OS {kind:?}: {message}]", self.t(key))
+                        } else {
+                            format!("[{kind:?}]: {message}")
+                        };
+                        self.ops_ui
+                            .journal
+                            .push(format!("{}: {detail}", path.display()));
+                    }
                     #[cfg(not(debug_assertions))]
                     {
-                        let user_message = self.operation_error_message(kind);
+                        let user_message = specific_reason
+                            .map(|key| self.t(key).to_owned())
+                            .unwrap_or_else(|| self.operation_error_message(kind));
                         self.ops_ui
                             .journal
                             .push(format!("{}: {user_message}", path.display()));
                     }
                     self.ops_ui.error_q = Some((id, path, kind, retryable));
+                    self.ops_ui.error_reason = specific_reason;
                 }
                 OpEvent::Cancelled { id } => {
                     if let Some(pos) = self.ops_ui.jobs.iter().position(|job| job.id == id) {
@@ -615,7 +790,7 @@ impl FileManagerApp {
     }
 
     fn create_dialog(&mut self, ctx: &egui::Context) {
-        let Some((is_dir, _)) = self.ops_ui.create.clone() else {
+        let Some((is_dir, original_name)) = self.ops_ui.create.clone() else {
             return;
         };
         let title = self
@@ -628,13 +803,16 @@ impl FileManagerApp {
         let ok = self.t("dlg.ok").to_owned();
         let cancel = self.t("dlg.cancel").to_owned();
         let mut action = 0u8;
-        let mut name = self.ops_ui.create.as_ref().unwrap().1.clone();
+        let mut name = original_name.clone();
         egui::Window::new(title)
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
                 ui.add(egui::TextEdit::singleline(&mut name).desired_width(280.0));
+                if let Some(error_key) = self.ops_ui.create_error {
+                    ui.colored_label(ui.visuals().error_fg_color, self.t(error_key).to_owned());
+                }
                 ui.horizontal(|ui| {
                     if ui.button(ok).clicked() {
                         action = 1;
@@ -644,17 +822,32 @@ impl FileManagerApp {
                     }
                 });
             });
-        if let Some((is_dir, _)) = self.ops_ui.create.take() {
-            match action {
-                1 => {
-                    if let Some(kind) =
-                        creation_operation(&self.tabs[self.active].path, &name, is_dir)
-                    {
-                        self.enqueue("ops.creating", kind);
-                    }
+        match action {
+            1 => {
+                let submission = creation_submission(
+                    &self.tabs[self.active].path,
+                    &name,
+                    is_dir,
+                    existing_entry_kind,
+                );
+                if let Some(kind) = apply_creation_submission(
+                    &mut self.ops_ui.create,
+                    &mut self.ops_ui.create_error,
+                    submission,
+                ) {
+                    self.enqueue("ops.creating", kind);
                 }
-                0 => self.ops_ui.create = Some((is_dir, name.trim().to_owned())),
-                _ => {}
+            }
+            0 => {
+                let trimmed = name.trim().to_owned();
+                if trimmed != original_name {
+                    self.ops_ui.create_error = None;
+                }
+                self.ops_ui.create = Some((is_dir, trimmed));
+            }
+            _ => {
+                self.ops_ui.create = None;
+                self.ops_ui.create_error = None;
             }
         }
     }
@@ -666,7 +859,7 @@ impl FileManagerApp {
         let title = self.t("conflict.title").to_owned();
         let msg = format!(
             "{}\n{} → {}",
-            self.t("conflict.exists"),
+            self.t(self.ops_ui.conflict_reason.unwrap_or("conflict.exists"),),
             src.file_name().unwrap_or_default().to_string_lossy(),
             dst.display()
         );
@@ -694,6 +887,7 @@ impl FileManagerApp {
         if let Some(act) = action {
             self.reply_conflict(id, act);
             self.ops_ui.conflict = None;
+            self.ops_ui.conflict_reason = None;
         }
     }
 
@@ -702,7 +896,9 @@ impl FileManagerApp {
             return;
         };
         let title = self.t("err.title").to_owned();
-        let msg = user_facing_operation_error(&path, kind, |key| self.t(key).to_owned());
+        let msg = user_facing_operation_error(&path, kind, self.ops_ui.error_reason, |key| {
+            self.t(key).to_owned()
+        });
         let mut action = None;
         egui::Window::new(title)
             .collapsible(false)
@@ -725,6 +921,7 @@ impl FileManagerApp {
         if let Some(act) = action {
             self.reply_error(id, act);
             self.ops_ui.error_q = None;
+            self.ops_ui.error_reason = None;
         }
     }
 
@@ -925,6 +1122,229 @@ mod tests {
     }
 
     #[test]
+    fn text_file_creation_appends_txt_when_name_has_no_extension() {
+        assert_eq!(
+            creation_target(Path::new(r"C:\data"), "1", false),
+            Some(PathBuf::from(r"C:\data\1.txt"))
+        );
+    }
+
+    #[test]
+    fn text_file_creation_does_not_double_txt_case_insensitive() {
+        let parent = Path::new(r"C:\data");
+        assert_eq!(
+            creation_target(parent, "a.txt", false),
+            Some(parent.join("a.txt"))
+        );
+        assert_eq!(
+            creation_target(parent, "a.TXT", false),
+            Some(parent.join("a.TXT"))
+        );
+    }
+
+    #[test]
+    fn text_file_creation_keeps_other_extension_as_typed() {
+        let parent = Path::new(r"C:\data");
+        assert_eq!(
+            creation_target(parent, "a.md", false),
+            Some(parent.join("a.md"))
+        );
+    }
+
+    #[test]
+    fn folder_creation_uses_name_as_typed_without_extension() {
+        let parent = Path::new(r"C:\data");
+        assert_eq!(
+            creation_target(parent, "a.md", true),
+            Some(parent.join("a.md"))
+        );
+    }
+
+    fn assert_collision_keeps_creation_form(
+        is_dir: bool,
+        input: &str,
+        target: &Path,
+        existing: ExistingEntryKind,
+        expected_key: &'static str,
+    ) {
+        let parent = Path::new(r"C:\data");
+        let mut form = Some((is_dir, input.to_owned()));
+        let mut error_key = None;
+        let submission = creation_submission(parent, input, is_dir, |path| {
+            assert_eq!(path, target);
+            Some(existing)
+        });
+        assert!(apply_creation_submission(&mut form, &mut error_key, submission).is_none());
+        assert_eq!(form, Some((is_dir, input.to_owned())));
+        assert_eq!(error_key, Some(expected_key));
+    }
+
+    #[test]
+    fn create_name_taken_by_folder_shows_folder_reason_and_keeps_form_open() {
+        assert_collision_keeps_creation_form(
+            false,
+            "x",
+            Path::new(r"C:\data\x.txt"),
+            ExistingEntryKind::Folder,
+            "error.name_taken_folder",
+        );
+    }
+
+    #[test]
+    fn create_name_taken_by_file_shows_file_reason_and_keeps_form_open() {
+        assert_collision_keeps_creation_form(
+            true,
+            "x",
+            Path::new(r"C:\data\x"),
+            ExistingEntryKind::File,
+            "error.name_taken_file",
+        );
+    }
+
+    #[test]
+    fn create_race_access_denied_on_directory_maps_to_name_taken_reason() {
+        let key = operation_error_key_for_context(
+            ErrorKind::PermissionDenied,
+            true,
+            Some(ExistingEntryKind::Folder),
+        );
+        assert_eq!(key, "error.name_taken_folder");
+        assert_eq!(
+            operation_error_key_for_context(
+                ErrorKind::AlreadyExists,
+                true,
+                Some(ExistingEntryKind::File)
+            ),
+            "error.name_taken_file"
+        );
+        let shown = user_facing_operation_error(
+            Path::new(r"C:\data\x"),
+            ErrorKind::PermissionDenied,
+            Some(key),
+            |key| key.to_owned(),
+        );
+        assert!(shown.ends_with("error.name_taken_folder"));
+    }
+
+    #[test]
+    fn genuine_permission_denied_still_shows_permissions_text() {
+        use crate::core::i18n::{I18n, Language};
+
+        assert_eq!(
+            operation_error_key_for_context(ErrorKind::PermissionDenied, true, None),
+            "error.operation.access_denied"
+        );
+        assert_eq!(
+            operation_error_key_for_context(
+                ErrorKind::PermissionDenied,
+                false,
+                Some(ExistingEntryKind::Folder)
+            ),
+            "error.operation.access_denied"
+        );
+        assert!(
+            I18n::new(Language::Ru)
+                .t("error.operation.access_denied")
+                .contains("разрешения")
+        );
+    }
+
+    #[test]
+    fn create_submenu_localization_ru_en_complete() {
+        use crate::core::i18n::{I18n, Language};
+
+        let ru = I18n::new(Language::Ru);
+        assert_eq!(ru.t("ctx.create"), "Создать");
+        assert_eq!(ru.t("ctx.create_folder"), "Папка");
+        assert_eq!(ru.t("ctx.create_text_file"), "Текстовый файл");
+        assert_eq!(
+            ru.t("error.name_taken_folder"),
+            "Папка с таким именем уже существует."
+        );
+        assert_eq!(
+            ru.t("error.name_taken_file"),
+            "Файл с таким именем уже существует."
+        );
+
+        let en = I18n::new(Language::En);
+        assert_eq!(en.t("ctx.create"), "Create");
+        assert_eq!(en.t("ctx.create_folder"), "Folder");
+        assert_eq!(en.t("ctx.create_text_file"), "Text file");
+        assert_eq!(
+            en.t("error.name_taken_folder"),
+            "A folder with this name already exists."
+        );
+        assert_eq!(
+            en.t("error.name_taken_file"),
+            "A file with this name already exists."
+        );
+    }
+
+    #[test]
+    fn orphaned_old_create_menu_keys_removed_or_justified() {
+        let empty_area_menu = include_str!("list/actions.rs")
+            .split("fn empty_area_menu")
+            .nth(1)
+            .unwrap()
+            .split("pub(super) fn entry_actions")
+            .next()
+            .unwrap();
+        let toolbar_menu = include_str!("app/toolbar.rs");
+        assert!(!empty_area_menu.contains("ctx.new_folder"));
+        assert!(!empty_area_menu.contains("ctx.new_file"));
+        assert!(toolbar_menu.contains("ctx.new_folder"));
+        assert!(toolbar_menu.contains("ctx.new_file"));
+        let dialogs = include_str!("opsui.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        assert!(dialogs.contains("dlg.create_folder_title"));
+        assert!(dialogs.contains("dlg.create_file_title"));
+    }
+
+    #[test]
+    fn rename_occupied_name_reason_consistent_with_create() {
+        let reason = name_taken_error_key(ExistingEntryKind::Folder);
+        assert_eq!(
+            apply_conflict_reason(Some(ExistingEntryKind::Folder)),
+            reason
+        );
+        let from = PathBuf::from(r"C:\data\old");
+        assert_eq!(
+            rename_target(&from, "new"),
+            Some(PathBuf::from(r"C:\data\new"))
+        );
+    }
+
+    #[test]
+    fn existing_error_layer_and_ops_tests_not_regressed() {
+        assert_eq!(
+            operation_error_key(ErrorKind::PermissionDenied),
+            "error.operation.access_denied"
+        );
+        assert_eq!(
+            operation_error_key(ErrorKind::AlreadyExists),
+            "error.operation.exists"
+        );
+        let worker = include_str!("../core/ops/worker/mod.rs");
+        let mutations = include_str!("../core/ops/worker/mutations.rs");
+        assert!(worker.contains("OpEvent::AskError"));
+        assert!(mutations.contains("self.ask_error(job, path, &e)"));
+        assert!(mutations.contains("self.failed += 1"));
+        let ui = include_str!("opsui.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        for action in [
+            "ErrorAction::Retry",
+            "ErrorAction::Skip",
+            "ErrorAction::Cancel",
+        ] {
+            assert!(ui.contains(action));
+        }
+    }
+
+    #[test]
     fn rename_keeps_the_parent_and_ignores_empty_or_unchanged_names() {
         let from = PathBuf::from("C:\\data\\old name.txt");
         assert_eq!(
@@ -952,7 +1372,7 @@ mod tests {
     fn user_facing_error_has_no_raw_io_error_or_stacktrace() {
         let path = Path::new(r"C:\data\file.txt");
         let error = std::io::Error::other("HRESULT 0x80070005\nstack trace: private detail");
-        let shown = user_facing_operation_error(path, error.kind(), |key| match key {
+        let shown = user_facing_operation_error(path, error.kind(), None, |key| match key {
             "error.operation.failed" => "Operation could not be completed.".to_owned(),
             _ => key.to_owned(),
         });
@@ -968,7 +1388,7 @@ mod tests {
         let path = Path::new(r"C:\data\unknown.txt");
         let error = std::io::Error::from_raw_os_error(0x5A17);
         assert_eq!(operation_error_key(error.kind()), "error.operation.failed");
-        let shown = user_facing_operation_error(path, error.kind(), |_| {
+        let shown = user_facing_operation_error(path, error.kind(), None, |_| {
             "The operation could not be completed.".to_owned()
         });
         assert!(shown.contains(path.to_string_lossy().as_ref()));
