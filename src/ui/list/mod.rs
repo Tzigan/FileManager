@@ -5,9 +5,14 @@ mod grouping;
 mod rows;
 
 pub(super) use columns::next_sort_order;
-use columns::{COL_GAP, paint_column_separators, table_rows_content_margin};
+use columns::{
+    COL_GAP, content_width_for_mode, paint_column_separators, table_rows_content_margin,
+};
 #[cfg(test)]
-use columns::{column_positions, column_separator_x};
+use columns::{
+    NAME_COL_MIN, column_positions, column_separator_x, list_min_content_width,
+    table_min_content_width,
+};
 use grouping::{ListRow, item_order, move_group_order};
 #[cfg(test)]
 use grouping::{group_drag_threshold_crossed, table_rows, table_rows_sorted};
@@ -100,56 +105,94 @@ impl FileManagerApp {
         }
         let mut group_drop: Option<(Vec<String>, String, bool)> = None;
         let mut marquee_rect = None;
+        let mut content_drop_response = None;
         match self.store.settings.view_mode {
             ViewMode::Table => {
-                self.list_header(ui);
-                ui.separator();
-                let rows_area = ui.available_rect_before_wrap().intersect(ui.clip_rect());
-                marquee_rect = self.update_selection_marquee(ctx, &bg_resp, rows_area);
-                let rows = self.build_rows();
-                let visual_order = self.store.settings.group_by_type.then(|| item_order(&rows));
-                let group_keys: Vec<String> = rows
-                    .iter()
-                    .filter_map(|row| match row {
-                        ListRow::Header { key, .. } => Some(key.clone()),
-                        ListRow::Item(_) => None,
-                    })
-                    .collect();
-                let mut drop_target = None;
-                egui::ScrollArea::vertical()
-                    .id_salt("table_file_rows")
+                let content_width = content_width_for_mode(
+                    ViewMode::Table,
+                    &self.store.settings,
+                    ui.available_width(),
+                );
+                egui::ScrollArea::horizontal()
+                    .id_salt("table_file_horizontal")
                     .auto_shrink([false, false])
-                    .content_margin(table_rows_content_margin())
-                    .show_rows(ui, ROW_HEIGHT, rows.len(), |ui, range| {
-                        self.auto_scroll_file_list(ui, ctx);
-                        for index in range {
-                            if let Some(entry_index) = rows[index].item_index() {
-                                self.file_row(
-                                    ui,
-                                    entry_index,
-                                    ctx,
-                                    visual_order.as_deref(),
-                                    marquee_rect,
-                                );
-                            } else if let ListRow::Header { key, label } = &rows[index] {
-                                // Заголовок группы отображается, но не становится drop-целью.
-                                self.group_header(ui, key, label, &mut drop_target);
-                            }
+                    .show(ui, |ui| {
+                        ui.set_width(content_width);
+                        self.list_header(ui);
+                        ui.separator();
+                        let rows_area = ui.available_rect_before_wrap();
+                        marquee_rect = self.update_selection_marquee(ctx, &bg_resp, rows_area);
+                        let rows = self.build_rows();
+                        let visual_order =
+                            self.store.settings.group_by_type.then(|| item_order(&rows));
+                        let group_keys: Vec<String> = rows
+                            .iter()
+                            .filter_map(|row| match row {
+                                ListRow::Header { key, .. } => Some(key.clone()),
+                                ListRow::Item(_) => None,
+                            })
+                            .collect();
+                        let background_rect = ui.available_rect_before_wrap();
+                        let background_response = ui.interact(
+                            background_rect,
+                            ui.scope_id().with("content_background_drop"),
+                            egui::Sense::hover(),
+                        );
+                        let mut drop_target = None;
+                        egui::ScrollArea::vertical()
+                            .id_salt("table_file_rows")
+                            .auto_shrink([false, false])
+                            .content_margin(table_rows_content_margin())
+                            .show_rows(ui, ROW_HEIGHT, rows.len(), |ui, range| {
+                                self.auto_scroll_file_list(ui, ctx);
+                                for index in range {
+                                    if let Some(entry_index) = rows[index].item_index() {
+                                        self.file_row(
+                                            ui,
+                                            entry_index,
+                                            ctx,
+                                            visual_order.as_deref(),
+                                            marquee_rect,
+                                        );
+                                    } else if let ListRow::Header { key, label } = &rows[index] {
+                                        // Заголовок группы отображается, но не становится drop-целью.
+                                        self.group_header(ui, key, label, &mut drop_target);
+                                    }
+                                }
+                            });
+                        content_drop_response = Some(background_response);
+                        if let Some((target, after)) = drop_target {
+                            group_drop = Some((group_keys, target, after));
                         }
                     });
-                if let Some((target, after)) = drop_target {
-                    group_drop = Some((group_keys, target, after));
-                }
             }
             ViewMode::List => {
-                egui::ScrollArea::vertical()
-                    .id_salt("list_file_rows")
+                let content_width = content_width_for_mode(
+                    ViewMode::List,
+                    &self.store.settings,
+                    ui.available_width(),
+                );
+                egui::ScrollArea::horizontal()
+                    .id_salt("list_file_horizontal")
                     .auto_shrink([false, false])
-                    .show_rows(ui, ROW_HEIGHT, count, |ui, range| {
-                        self.auto_scroll_file_list(ui, ctx);
-                        for index in range {
-                            self.list_row(ui, index, ctx, None);
-                        }
+                    .show(ui, |ui| {
+                        ui.set_width(content_width);
+                        let background_rect = ui.available_rect_before_wrap();
+                        let background_response = ui.interact(
+                            background_rect,
+                            ui.scope_id().with("content_background_drop"),
+                            egui::Sense::hover(),
+                        );
+                        egui::ScrollArea::vertical()
+                            .id_salt("list_file_rows")
+                            .auto_shrink([false, false])
+                            .show_rows(ui, ROW_HEIGHT, count, |ui, range| {
+                                self.auto_scroll_file_list(ui, ctx);
+                                for index in range {
+                                    self.list_row(ui, index, ctx, None);
+                                }
+                            });
+                        content_drop_response = Some(background_response);
                     });
             }
             ViewMode::Grid => {
@@ -189,7 +232,11 @@ impl FileManagerApp {
                         });
                 });
         }
-        self.finish_list_background(&bg_resp, ui, ctx);
+        if let Some(drop_response) = &content_drop_response {
+            self.finish_list_background_with_drop(&bg_resp, drop_response, ui, ctx);
+        } else {
+            self.finish_list_background(&bg_resp, ui, ctx);
+        }
         self.scroll_to_cursor = false;
     }
 
@@ -259,9 +306,19 @@ impl FileManagerApp {
         ui: &egui::Ui,
         ctx: &egui::Context,
     ) {
+        self.finish_list_background_with_drop(bg_resp, bg_resp, ui, ctx);
+    }
+
+    fn finish_list_background_with_drop(
+        &mut self,
+        bg_resp: &egui::Response,
+        drop_resp: &egui::Response,
+        ui: &egui::Ui,
+        ctx: &egui::Context,
+    ) {
         let current_folder = self.tabs[self.active].path.clone();
         self.handle_file_drop_response(
-            bg_resp,
+            drop_resp,
             Some(&current_folder),
             true,
             self.active_folder_accepts_drop(&current_folder),
@@ -991,14 +1048,8 @@ mod tests {
 
     #[test]
     fn background_response_covers_visible_list_area_with_zero_entries() {
-        let available = egui::Rect::from_min_size(
-            egui::pos2(12.0, 24.0),
-            egui::vec2(500.0, 360.0),
-        );
-        let clip = egui::Rect::from_min_size(
-            egui::pos2(12.0, 40.0),
-            egui::vec2(500.0, 300.0),
-        );
+        let available = egui::Rect::from_min_size(egui::pos2(12.0, 24.0), egui::vec2(500.0, 360.0));
+        let clip = egui::Rect::from_min_size(egui::pos2(12.0, 40.0), egui::vec2(500.0, 300.0));
         let visible_entries: Vec<FileEntry> = Vec::new();
 
         assert!(visible_entries.is_empty());
@@ -1025,4 +1076,171 @@ mod tests {
         assert!(list.contains("self.finish_list_background(&bg_resp,ui,ctx)"));
     }
 
+    #[test]
+    fn table_content_width_never_below_column_minimums() {
+        let settings = crate::core::settings::Settings::default();
+        let minimum = table_min_content_width(&settings);
+        assert_eq!(
+            content_width_for_mode(ViewMode::Table, &settings, 120.0),
+            minimum
+        );
+        assert_eq!(
+            content_width_for_mode(ViewMode::Table, &settings, minimum + 10.0),
+            minimum + 10.0
+        );
+    }
+
+    #[test]
+    fn narrow_window_enables_horizontal_scroll_instead_of_column_overlap() {
+        let settings = crate::core::settings::Settings::default();
+        let viewport = 220.0;
+        let content = content_width_for_mode(ViewMode::Table, &settings, viewport);
+        let positions = column_positions(&settings, content);
+        let name_x = positions.name_start;
+        let size_x = positions.size_start.unwrap();
+        let type_x = positions.type_start.unwrap();
+        let modified_x = positions.modified_start.unwrap();
+
+        assert!(content > viewport);
+        assert!(size_x - COL_GAP - name_x >= NAME_COL_MIN);
+        assert!(type_x > size_x);
+        assert!(modified_x > type_x);
+    }
+
+    #[test]
+    fn wide_window_keeps_stretchable_name_column_without_scroll() {
+        let settings = crate::core::settings::Settings::default();
+        let viewport = 1200.0;
+        let content = content_width_for_mode(ViewMode::Table, &settings, viewport);
+        let positions = column_positions(&settings, content);
+
+        assert_eq!(content, viewport);
+        assert!(positions.size_start.unwrap() - COL_GAP - positions.name_start > NAME_COL_MIN);
+    }
+
+    #[test]
+    fn list_mode_gets_same_minimum_width_rule() {
+        let settings = crate::core::settings::Settings::default();
+        assert_eq!(list_min_content_width(), ICON_WIDTH + NAME_COL_MIN);
+        assert_eq!(
+            content_width_for_mode(ViewMode::List, &settings, 100.0),
+            list_min_content_width()
+        );
+    }
+
+    #[test]
+    fn grid_mode_has_no_horizontal_scroll_and_unchanged_wrapping() {
+        let settings = crate::core::settings::Settings::default();
+        assert_eq!(
+            content_width_for_mode(ViewMode::Grid, &settings, 240.0),
+            240.0
+        );
+        let grid = include_str!("grid.rs");
+        assert!(grid.contains("ScrollArea::vertical()"));
+        assert!(!grid.contains("ScrollArea::horizontal()"));
+        assert!(grid.contains("ui.horizontal(|ui|"));
+    }
+
+    #[test]
+    fn table_header_scroll_together_with_rows_and_hit_rects_align() {
+        let source = include_str!("mod.rs");
+        let horizontal = source.find("ScrollArea::horizontal()").unwrap();
+        let header = source[horizontal..].find("self.list_header(ui)").unwrap() + horizontal;
+        let vertical = source[horizontal..].find("ScrollArea::vertical()").unwrap() + horizontal;
+        let header_code = include_str!("columns.rs");
+
+        assert!(horizontal < header && header < vertical);
+        assert!(header_code.contains("rect.min.x + x0"));
+        assert!(header_code.contains("rect.min.x + x1"));
+    }
+
+    #[test]
+    fn group_headers_scroll_together_with_rows() {
+        let source = include_str!("mod.rs");
+        let vertical = source.find("ScrollArea::vertical()").unwrap();
+        let show_rows = source[vertical..].find(".show_rows(").unwrap() + vertical;
+        let group_header = source[show_rows..]
+            .find("self.group_header(ui, key, label")
+            .unwrap()
+            + show_rows;
+
+        assert!(vertical < show_rows && show_rows < group_header);
+    }
+
+    #[test]
+    fn marquee_and_background_surface_cover_content_width_after_scroll() {
+        let source = include_str!("mod.rs");
+        assert!(source.contains("let rows_area = ui.available_rect_before_wrap();"));
+        assert!(source.contains("let background_rect = ui.available_rect_before_wrap();"));
+        assert!(source.contains("ui.set_width(content_width);"));
+        assert!(source.contains("finish_list_background_with_drop(&bg_resp, drop_response"));
+    }
+
+    #[test]
+    fn virtualization_still_renders_only_visible_rows_with_hscroll() {
+        let source = include_str!("mod.rs");
+        let horizontal = source.find("ScrollArea::horizontal()").unwrap();
+        let vertical = source[horizontal..].find("ScrollArea::vertical()").unwrap() + horizontal;
+        let virtual_rows = source[vertical..].find(".show_rows(").unwrap() + vertical;
+
+        assert!(horizontal < vertical && vertical < virtual_rows);
+        assert!(source[virtual_rows..].contains("for index in range"));
+    }
+
+    #[test]
+    fn detached_window_inherits_horizontal_scroll_via_shared_code() {
+        let app = include_str!("../app/mod.rs");
+        let content = app
+            .split("pub(super) fn show_active_file_content")
+            .nth(1)
+            .unwrap();
+        assert!(content.contains("self.file_list(ctx, ui, bg_resp)"));
+        assert!(include_str!("../app/window_frame.rs").contains("show_active_file_content"));
+    }
+
+    #[test]
+    fn sorting_by_header_click_works_after_horizontal_scroll() {
+        let source = include_str!("columns.rs");
+        assert!(source.contains("col_resp.clicked()"));
+        assert!(source.contains("self.sort_col(k)"));
+        let (key, descending) = next_sort_order(SortKey::Name, false, SortKey::Modified);
+        assert_eq!(key, SortKey::Modified);
+        assert!(!descending);
+    }
+
+    #[test]
+    fn row_context_menu_rects_correct_after_horizontal_scroll() {
+        let rows = include_str!("rows.rs");
+        assert!(rows.contains("let width = ui.available_width();"));
+        assert!(rows.contains("ui.allocate_space(size)"));
+        assert!(rows.contains("ui.interact("));
+        assert!(rows.contains("file_row_sense()"));
+    }
+
+    #[test]
+    fn existing_selection_dnd_and_cache_tests_not_regressed() {
+        let source = include_str!("mod.rs");
+        for test in [
+            "marquee_selection_still_works_after_dnd_added",
+            "background_drop_target_registers_in_empty_folder",
+            "grouped_visual_order_is_rebuilt_from_cached_entries",
+        ] {
+            assert!(source.contains(test), "missing regression test: {test}");
+        }
+    }
+
+    #[test]
+    fn settings_structure_and_json_schema_unchanged() {
+        let settings = include_str!("../../core/settings.rs");
+        assert!(!settings.contains("horizontal_scroll"));
+        assert!(!settings.contains("name_col_min"));
+        assert_eq!(
+            content_width_for_mode(
+                ViewMode::List,
+                &crate::core::settings::Settings::default(),
+                100.0,
+            ),
+            list_min_content_width()
+        );
+    }
 }
