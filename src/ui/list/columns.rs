@@ -10,10 +10,49 @@ pub(super) struct ColumnPositions {
     pub(super) modified_start: Option<f32>,
 }
 
-const SIZE_COL: f32 = 90.0;
-const TYPE_COL: f32 = 110.0;
-const MODIFIED_COL: f32 = 140.0;
 pub(super) const COL_GAP: f32 = style::SPACE_SM;
+pub(super) const NAME_COL_MIN: f32 = 180.0;
+const SIZE_COL_MIN: f32 = 82.0;
+const TYPE_COL_MIN: f32 = 102.0;
+const MODIFIED_COL_MIN: f32 = 140.0;
+const SIZE_COL: f32 = SIZE_COL_MIN + COL_GAP;
+const TYPE_COL: f32 = TYPE_COL_MIN + COL_GAP;
+const MODIFIED_COL: f32 = MODIFIED_COL_MIN;
+
+pub(super) fn table_min_content_width(settings: &crate::core::settings::Settings) -> f32 {
+    let has_optional_column = settings.col_size || settings.col_type || settings.col_modified;
+    ICON_WIDTH
+        + NAME_COL_MIN
+        + if settings.col_size { SIZE_COL_MIN } else { 0.0 }
+        + if settings.col_type { TYPE_COL_MIN } else { 0.0 }
+        + if settings.col_modified {
+            MODIFIED_COL_MIN
+        } else {
+            0.0
+        }
+        + COL_GAP
+            * (usize::from(has_optional_column)
+                + usize::from(settings.col_size)
+                + usize::from(settings.col_type)) as f32
+}
+
+pub(super) fn list_min_content_width() -> f32 {
+    ICON_WIDTH + NAME_COL_MIN
+}
+
+pub(super) fn content_width_for_mode(
+    mode: crate::core::settings::ViewMode,
+    settings: &crate::core::settings::Settings,
+    available_width: f32,
+) -> f32 {
+    match mode {
+        crate::core::settings::ViewMode::Table => {
+            available_width.max(table_min_content_width(settings))
+        }
+        crate::core::settings::ViewMode::List => available_width.max(list_min_content_width()),
+        crate::core::settings::ViewMode::Grid => available_width,
+    }
+}
 
 pub(super) fn column_positions(
     settings: &crate::core::settings::Settings,
