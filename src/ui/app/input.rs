@@ -309,6 +309,10 @@ fn shortcut_pressed(ctx: &egui::Context, id: ShortcutId) -> bool {
         }
 }
 
+fn should_select_all_files(key_pressed: bool, text_edit_focused: bool) -> bool {
+    key_pressed && crate::ui::opsui::file_hotkeys_allowed(text_edit_focused)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum MouseNavigationAction {
     Back,
@@ -343,17 +347,13 @@ impl FileManagerApp {
         let text_edit_focused = ctx.text_edit_focused();
         let mods = ctx.input(|i| i.modifiers);
 
-        // Prefer file operations when a file selection/internal file clipboard
-        // exists. This also recovers if the address TextEdit retained focus after
-        // the user clicked a file row; without a file selection normal text-edit
-        // shortcuts (copy/paste in the address bar) remain untouched.
-        if shortcut_pressed(ctx, ShortcutId::Copy) {
-            match crate::ui::opsui::clipboard_target(
-                crate::ui::opsui::ClipboardCommand::Copy,
-                text_edit_focused,
-                !self.selected_paths().is_empty(),
-                false,
-            ) {
+        // Фокус любого TextEdit отдаёт Ctrl+C/X/V текстовому редактору.
+        if let Some(target) = crate::ui::opsui::clipboard_target(
+            crate::ui::opsui::ClipboardCommand::Copy,
+            shortcut_pressed(ctx, ShortcutId::Copy),
+            text_edit_focused,
+        ) {
+            match target {
                 crate::ui::opsui::ClipboardTarget::Files => {
                     tracing::info!("Ctrl+C shortcut received");
                     self.act_copy();
@@ -364,13 +364,12 @@ impl FileManagerApp {
             }
             return;
         }
-        if shortcut_pressed(ctx, ShortcutId::Cut) {
-            match crate::ui::opsui::clipboard_target(
-                crate::ui::opsui::ClipboardCommand::Cut,
-                text_edit_focused,
-                !self.selected_paths().is_empty(),
-                false,
-            ) {
+        if let Some(target) = crate::ui::opsui::clipboard_target(
+            crate::ui::opsui::ClipboardCommand::Cut,
+            shortcut_pressed(ctx, ShortcutId::Cut),
+            text_edit_focused,
+        ) {
+            match target {
                 crate::ui::opsui::ClipboardTarget::Files => self.act_cut(),
                 crate::ui::opsui::ClipboardTarget::Text => {
                     ctx.input_mut(|i| i.events.push(egui::Event::Cut));
@@ -378,15 +377,12 @@ impl FileManagerApp {
             }
             return;
         }
-        if shortcut_pressed(ctx, ShortcutId::Paste) {
-            let has_file_clipboard = self.ops_ui.clipboard.is_some()
-                || !crate::platform::get_clipboard_files().is_empty();
-            match crate::ui::opsui::clipboard_target(
-                crate::ui::opsui::ClipboardCommand::Paste,
-                text_edit_focused,
-                false,
-                has_file_clipboard,
-            ) {
+        if let Some(target) = crate::ui::opsui::clipboard_target(
+            crate::ui::opsui::ClipboardCommand::Paste,
+            shortcut_pressed(ctx, ShortcutId::Paste),
+            text_edit_focused,
+        ) {
+            match target {
                 crate::ui::opsui::ClipboardTarget::Files => {
                     tracing::info!("Ctrl+V shortcut received");
                     self.act_paste();
@@ -400,7 +396,15 @@ impl FileManagerApp {
             }
             return;
         }
-        if text_edit_focused {
+        if should_select_all_files(
+            shortcut_pressed(ctx, ShortcutId::SelectAll),
+            text_edit_focused,
+        ) {
+            let tab = &mut self.tabs[self.active];
+            crate::ui::tabs::select_all_entries(&mut tab.selection, &tab.entries);
+            return;
+        }
+        if !crate::ui::opsui::file_hotkeys_allowed(text_edit_focused) {
             return;
         }
 
@@ -457,11 +461,6 @@ impl FileManagerApp {
         }
 
         // Selection and navigation.
-        if shortcut_pressed(ctx, ShortcutId::SelectAll) {
-            let tab = &mut self.tabs[self.active];
-            crate::ui::tabs::select_all_entries(&mut tab.selection, &tab.entries);
-            return;
-        }
         if shortcut_pressed(ctx, ShortcutId::Parent) {
             self.go_up(ctx);
             return;
@@ -627,7 +626,25 @@ impl FileManagerApp {
 
 #[cfg(test)]
 mod tests {
-    use super::{ShortcutId, ShortcutModifiers, hotkey_bindings};
+    use super::{
+        ShortcutId, ShortcutModifiers, hotkey_bindings, should_select_all_files,
+    };
+
+    #[test]
+    fn ctrl_a_skipped_when_focus_in_text_edit() {
+        let key_pressed = true;
+        assert!(!should_select_all_files(key_pressed, true));
+        assert!(should_select_all_files(key_pressed, false));
+        assert!(!should_select_all_files(false, false));
+
+        let source = include_str!("input.rs");
+        let handler = source.find("if should_select_all_files(").unwrap();
+        let file_guard = source
+            .find("if !crate::ui::opsui::file_hotkeys_allowed(text_edit_focused)")
+            .unwrap();
+        assert!(handler < file_guard);
+        assert!(source[handler..file_guard].contains("ShortcutId::SelectAll"));
+    }
 
     #[test]
     fn hotkey_registry_covers_real_bindings_from_input_handler() {

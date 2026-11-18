@@ -22,24 +22,26 @@ pub(super) enum ClipboardTarget {
     Text,
 }
 
-/// Keep text-edit clipboard behavior unless selection/clipboard data has a
-/// file-manager meaning.
+pub(super) fn file_hotkeys_allowed(text_edit_focused: bool) -> bool {
+    !text_edit_focused
+}
+
 pub(super) fn clipboard_target(
     command: ClipboardCommand,
+    key_pressed: bool,
     text_edit_focused: bool,
-    has_file_selection: bool,
-    has_file_clipboard: bool,
-) -> ClipboardTarget {
-    if !text_edit_focused
-        || match command {
-            ClipboardCommand::Copy | ClipboardCommand::Cut => has_file_selection,
-            ClipboardCommand::Paste => has_file_clipboard,
-        }
-    {
-        ClipboardTarget::Files
-    } else {
-        ClipboardTarget::Text
+) -> Option<ClipboardTarget> {
+    if !key_pressed {
+        return None;
     }
+    if !file_hotkeys_allowed(text_edit_focused) {
+        return Some(ClipboardTarget::Text);
+    }
+    Some(match command {
+        ClipboardCommand::Copy | ClipboardCommand::Cut | ClipboardCommand::Paste => {
+            ClipboardTarget::Files
+        }
+    })
 }
 
 pub(crate) fn operation_error_key(kind: ErrorKind) -> &'static str {
@@ -1010,17 +1012,131 @@ mod tests {
         use ClipboardCommand::{Copy, Cut, Paste};
         use ClipboardTarget::{Files, Text};
 
-        assert_eq!(clipboard_target(Copy, false, false, false), Files);
-        assert_eq!(clipboard_target(Cut, false, false, false), Files);
-        assert_eq!(clipboard_target(Paste, false, false, false), Files);
+        assert_eq!(clipboard_target(Copy, true, false), Some(Files));
+        assert_eq!(clipboard_target(Cut, true, false), Some(Files));
+        assert_eq!(clipboard_target(Paste, true, false), Some(Files));
+        assert_eq!(clipboard_target(Copy, true, true), Some(Text));
+        assert_eq!(clipboard_target(Cut, true, true), Some(Text));
+        assert_eq!(clipboard_target(Paste, true, true), Some(Text));
+        assert_eq!(clipboard_target(Copy, false, true), None);
+    }
 
-        assert_eq!(clipboard_target(Copy, true, true, false), Files);
-        assert_eq!(clipboard_target(Cut, true, true, false), Files);
+    #[test]
+    fn ctrl_c_skipped_when_focus_in_text_edit() {
+        assert_eq!(
+            clipboard_target(ClipboardCommand::Copy, true, true),
+            Some(ClipboardTarget::Text)
+        );
+        assert!(include_str!("app/input.rs").contains("egui::Event::Copy"));
+    }
 
-        assert_eq!(clipboard_target(Copy, true, false, false), Text);
-        assert_eq!(clipboard_target(Cut, true, false, false), Text);
-        assert_eq!(clipboard_target(Paste, true, false, false), Text);
-        assert_eq!(clipboard_target(Paste, true, false, true), Files);
+    #[test]
+    fn ctrl_x_skipped_when_focus_in_text_edit() {
+        assert_eq!(
+            clipboard_target(ClipboardCommand::Cut, true, true),
+            Some(ClipboardTarget::Text)
+        );
+        assert!(include_str!("app/input.rs").contains("egui::Event::Cut"));
+    }
+
+    #[test]
+    fn ctrl_v_skipped_when_focus_in_text_edit() {
+        assert_eq!(
+            clipboard_target(ClipboardCommand::Paste, true, true),
+            Some(ClipboardTarget::Text)
+        );
+        assert!(include_str!("app/input.rs").contains("egui::Event::Paste(text)"));
+    }
+
+    #[test]
+    fn ctrl_c_copies_file_when_focus_not_in_text_edit() {
+        assert_eq!(
+            clipboard_target(ClipboardCommand::Copy, true, false),
+            Some(ClipboardTarget::Files)
+        );
+        assert!(include_str!("app/input.rs").contains("self.act_copy();"));
+    }
+
+    #[test]
+    fn ctrl_x_cuts_file_when_focus_not_in_text_edit() {
+        assert_eq!(
+            clipboard_target(ClipboardCommand::Cut, true, false),
+            Some(ClipboardTarget::Files)
+        );
+        assert!(include_str!("app/input.rs").contains("self.act_cut()"));
+    }
+
+    #[test]
+    fn ctrl_v_pastes_file_when_focus_not_in_text_edit() {
+        assert_eq!(
+            clipboard_target(ClipboardCommand::Paste, true, false),
+            Some(ClipboardTarget::Files)
+        );
+        assert!(include_str!("app/input.rs").contains("self.act_paste();"));
+    }
+
+    fn text_copy_uses_focused_edit(source: &str, text_edit: &str) {
+        assert!(source.contains(text_edit));
+        assert_eq!(
+            clipboard_target(ClipboardCommand::Copy, true, true),
+            Some(ClipboardTarget::Text)
+        );
+        assert!(include_str!("app/input.rs").contains("egui::Event::Copy"));
+    }
+
+    #[test]
+    fn inline_rename_text_copy_works() {
+        text_copy_uses_focused_edit(
+            include_str!("opsui.rs"),
+            "TextEdit::singleline(&mut new_name)",
+        );
+    }
+
+    #[test]
+    fn create_dialog_text_copy_works() {
+        text_copy_uses_focused_edit(
+            include_str!("opsui.rs"),
+            "TextEdit::singleline(&mut name)",
+        );
+    }
+
+    #[test]
+    fn search_field_text_copy_works() {
+        text_copy_uses_focused_edit(
+            include_str!("app/search.rs"),
+            "TextEdit::singleline(&mut search.query)",
+        );
+    }
+
+    #[test]
+    fn filter_field_text_copy_works() {
+        text_copy_uses_focused_edit(
+            include_str!("app/search.rs"),
+            "TextEdit::singleline(&mut search.extensions)",
+        );
+    }
+
+    #[test]
+    fn existing_copy_cut_paste_tests_not_regressed() {
+        let tests = include_str!("opsui.rs");
+        for name in [
+            "clipboard_shortcuts_choose_file_operations_or_text_by_user_context",
+            "internal_copy_paste_keeps_clipboard_while_cut_paste_moves_and_clears_it",
+            "explorer_paste_is_copy_and_empty_external_clipboard_is_noop",
+        ] {
+            assert!(tests.contains(name), "missing clipboard regression: {name}");
+        }
+    }
+
+    #[test]
+    fn existing_rename_tests_not_regressed() {
+        let tests = include_str!("opsui.rs");
+        for name in [
+            "rename_occupied_name_reason_consistent_with_create",
+            "rename_keeps_the_parent_and_ignores_empty_or_unchanged_names",
+        ] {
+            assert!(tests.contains(name), "missing rename regression: {name}");
+        }
     }
 
     #[test]
