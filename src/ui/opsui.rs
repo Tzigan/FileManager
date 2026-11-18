@@ -795,9 +795,9 @@ impl FileManagerApp {
         };
         let title = self
             .t(if is_dir {
-                "dlg.create_folder_title"
+                "ctx.create_folder"
             } else {
-                "dlg.create_file_title"
+                "ctx.create_text_file"
             })
             .to_owned();
         let ok = self.t("dlg.ok").to_owned();
@@ -1281,25 +1281,83 @@ mod tests {
     }
 
     #[test]
-    fn orphaned_old_create_menu_keys_removed_or_justified() {
-        let empty_area_menu = include_str!("list/actions.rs")
-            .split("fn empty_area_menu")
-            .nth(1)
-            .unwrap()
-            .split("pub(super) fn entry_actions")
-            .next()
-            .unwrap();
-        let toolbar_menu = include_str!("app/toolbar.rs");
-        assert!(!empty_area_menu.contains("ctx.new_folder"));
-        assert!(!empty_area_menu.contains("ctx.new_file"));
-        assert!(toolbar_menu.contains("ctx.new_folder"));
-        assert!(toolbar_menu.contains("ctx.new_file"));
-        let dialogs = include_str!("opsui.rs")
+    fn dialog_titles_match_create_submenu_items() {
+        use crate::core::i18n::{I18n, Language};
+
+        let ui = include_str!("opsui.rs")
             .split("#[cfg(test)]")
             .next()
             .unwrap();
-        assert!(dialogs.contains("dlg.create_folder_title"));
-        assert!(dialogs.contains("dlg.create_file_title"));
+        assert!(ui.contains("\"ctx.create_folder\""));
+        assert!(ui.contains("\"ctx.create_text_file\""));
+        let ru = I18n::new(Language::Ru);
+        let en = I18n::new(Language::En);
+        assert_eq!(ru.t("ctx.create_folder"), "Папка");
+        assert_eq!(ru.t("ctx.create_text_file"), "Текстовый файл");
+        assert_eq!(en.t("ctx.create_folder"), "Folder");
+        assert_eq!(en.t("ctx.create_text_file"), "Text file");
+    }
+
+    #[test]
+    fn orphaned_new_folder_new_file_keys_removed_from_both_locales() {
+        let removed_keys = [
+            ["ctx", "new_folder"].join("."),
+            ["ctx", "new_file"].join("."),
+            ["dlg", "create_folder_title"].join("."),
+            ["dlg", "create_file_title"].join("."),
+        ];
+        let locales = [
+            include_str!("../../i18n/ru.json"),
+            include_str!("../../i18n/en.json"),
+        ];
+        for locale in locales {
+            for key in &removed_keys {
+                assert!(!locale.contains(key), "orphaned locale key: {key}");
+            }
+        }
+        for source in [
+            include_str!("app/toolbar.rs"),
+            include_str!("app/input.rs"),
+            include_str!("app/dialogs.rs"),
+            include_str!("app/window_frame.rs"),
+            include_str!("list/actions.rs"),
+            include_str!("opsui.rs"),
+        ] {
+            for key in &removed_keys {
+                assert!(!source.contains(key), "reference to removed key: {key}");
+            }
+        }
+    }
+
+    #[test]
+    fn existing_create_flow_tests_not_regressed() {
+        let tests = include_str!("opsui.rs");
+        for name in [
+            "text_file_creation_appends_txt_when_name_has_no_extension",
+            "text_file_creation_does_not_double_txt_case_insensitive",
+            "text_file_creation_keeps_other_extension_as_typed",
+            "folder_creation_uses_name_as_typed_without_extension",
+            "create_name_taken_by_folder_shows_folder_reason_and_keeps_form_open",
+            "create_name_taken_by_file_shows_file_reason_and_keeps_form_open",
+            "create_race_access_denied_on_directory_maps_to_name_taken_reason",
+        ] {
+            assert!(
+                tests.contains(name),
+                "missing create-flow regression: {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn existing_paste_and_clipboard_tests_not_regressed() {
+        let tests = include_str!("opsui.rs");
+        for name in [
+            "clipboard_shortcuts_choose_file_operations_or_text_by_user_context",
+            "explorer_paste_is_copy_and_empty_external_clipboard_is_noop",
+            "internal_copy_paste_keeps_clipboard_while_cut_paste_moves_and_clears_it",
+        ] {
+            assert!(tests.contains(name), "missing paste regression: {name}");
+        }
     }
 
     #[test]

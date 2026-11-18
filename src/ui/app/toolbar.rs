@@ -607,35 +607,6 @@ impl FileManagerApp {
                 self.act_bookmark();
             }
 
-            // "New / Paste" menu.
-            ui.menu_button("+", |ui| {
-                if in_archive {
-                    if ui.button(self.t("zip.extract_all").to_owned()).clicked() {
-                        self.extract_zip_all(ctx);
-                        ui.close();
-                    }
-                } else {
-                    if ui.button(self.t("ctx.new_folder").to_owned()).clicked() {
-                        self.open_create_dialog(true);
-                        ui.close();
-                    }
-                    if ui.button(self.t("ctx.new_file").to_owned()).clicked() {
-                        self.open_create_dialog(false);
-                        ui.close();
-                    }
-                    if ui
-                        .add_enabled(
-                            self.ops_ui.clipboard.is_some(),
-                            egui::Button::new(self.t("ctx.paste").to_owned()),
-                        )
-                        .clicked()
-                    {
-                        self.act_paste();
-                        ui.close();
-                    }
-                }
-            });
-
             let resp = ui.add(
                 egui::TextEdit::singleline(&mut self.tabs[self.active].address_input)
                     .desired_width(f32::INFINITY),
