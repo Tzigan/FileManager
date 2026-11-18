@@ -2,9 +2,15 @@
 
 use super::*;
 
+fn response_context_menu_opened(
+    response: &egui::Response,
+    add_contents: impl FnOnce(&mut egui::Ui),
+) -> bool {
+    response.context_menu(add_contents).is_some()
+}
+
 impl FileManagerApp {
-    /// Empty space below the rows: left-click clears the selection, right-click
-    /// shows the folder menu (Explorer semantics).
+    /// Пустое место списка сбрасывает выделение по левому клику и открывает меню по правому.
     pub(super) fn empty_area_menu(&mut self, resp: &egui::Response, ctx: &egui::Context) {
         if resp.clicked() {
             ctx.memory_mut(|m| {
@@ -17,7 +23,7 @@ impl FileManagerApp {
         }
         let in_archive = self.tabs[self.active].archive_prefix.is_some();
         let in_trash = self.tabs[self.active].secure_trash;
-        resp.context_menu(|ui| {
+        response_context_menu_opened(resp, |ui| {
             if in_trash {
                 style::compact_context_menu(ui);
                 if ui.button(self.t("trash.empty").to_owned()).clicked() {
@@ -306,5 +312,332 @@ impl FileManagerApp {
             mods.command,
             mods.shift,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::settings::ViewMode;
+
+    const SCREEN_RECT: egui::Rect =
+        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(500.0, 400.0));
+
+    #[derive(Default)]
+    struct MenuFrame {
+        background_rect: Option<egui::Rect>,
+        placeholder_rect: Option<egui::Rect>,
+        spinner_rect: Option<egui::Rect>,
+        row_rect: Option<egui::Rect>,
+        background_secondary_clicked: bool,
+        background_primary_drag_started: bool,
+        background_menu_open: bool,
+        row_menu_open: bool,
+    }
+
+    fn run_menu_frame(
+        ctx: &egui::Context,
+        view_mode: ViewMode,
+        placeholder: Option<&str>,
+        with_row: bool,
+        events: Vec<egui::Event>,
+        frame: &mut MenuFrame,
+    ) {
+        run_menu_frame_with_spinner(
+            ctx,
+            view_mode,
+            placeholder,
+            false,
+            with_row,
+            events,
+            frame,
+        );
+    }
+
+    fn run_menu_frame_with_spinner(
+        ctx: &egui::Context,
+        view_mode: ViewMode,
+        placeholder: Option<&str>,
+        loading_spinner: bool,
+        with_row: bool,
+        events: Vec<egui::Event>,
+        frame: &mut MenuFrame,
+    ) {
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(SCREEN_RECT),
+                events,
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let background_rect = crate::ui::list::list_background_rect(ui);
+                    if loading_spinner {
+                        ui.vertical_centered(|ui| {
+                            ui.add_space(crate::ui::style::SPACE_EMPTY_STATE);
+                            frame.spinner_rect = Some(ui.spinner().rect);
+                            if let Some(text) = placeholder {
+                                frame.placeholder_rect = Some(ui.label(text).rect);
+                            }
+                        });
+                    } else if let Some(text) = placeholder {
+                        ui.vertical_centered(|ui| {
+                            ui.add_space(crate::ui::style::SPACE_EMPTY_STATE);
+                            frame.placeholder_rect = Some(ui.label(text).rect);
+                        });
+                    }
+                    let background = crate::ui::list::list_background_response(
+                        ui,
+                        view_mode,
+                        background_rect,
+                    );
+                    frame.background_rect = Some(background.rect);
+                    frame.background_secondary_clicked |= background.secondary_clicked();
+                    frame.background_primary_drag_started |=
+                        background.drag_started_by(egui::PointerButton::Primary);
+                    if with_row {
+                        let row_rect = egui::Rect::from_min_size(
+                            background.rect.min,
+                            egui::vec2(background.rect.width(), 24.0),
+                        );
+                        frame.row_rect = Some(row_rect);
+                        let row = ui.interact(
+                            row_rect,
+                            ui.scope_id().with("test_file_row"),
+                            egui::Sense::click(),
+                        );
+                        frame.row_menu_open |=
+                            response_context_menu_opened(&row, |ui| {
+                                ui.label("Контекстное меню строки");
+                            });
+                    }
+                    frame.background_menu_open |=
+                        response_context_menu_opened(&background, |ui| {
+                            ui.label("Контекстное меню пустого места");
+                        });
+                });
+            },
+        );
+        output.textures_delta.clear();
+    }
+
+    fn pointer_event(
+        pos: egui::Pos2,
+        button: egui::PointerButton,
+        pressed: bool,
+    ) -> Vec<egui::Event> {
+        vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton {
+                pos,
+                button,
+                pressed,
+                modifiers: egui::Modifiers::default(),
+            },
+        ]
+    }
+
+    fn simulate_secondary_click(
+        view_mode: ViewMode,
+        placeholder: Option<&str>,
+        with_row: bool,
+        click_placeholder: bool,
+        click_row: bool,
+    ) -> MenuFrame {
+        let ctx = egui::Context::default();
+        let mut frame = MenuFrame::default();
+        run_menu_frame(&ctx, view_mode, placeholder, with_row, Vec::new(), &mut frame);
+        let pos = if click_placeholder {
+            frame.placeholder_rect.unwrap().center()
+        } else if click_row {
+            frame.row_rect.unwrap().center()
+        } else {
+            frame.background_rect.unwrap().center()
+        };
+        run_menu_frame(
+            &ctx,
+            view_mode,
+            placeholder,
+            with_row,
+            pointer_event(pos, egui::PointerButton::Secondary, true),
+            &mut frame,
+        );
+        run_menu_frame(
+            &ctx,
+            view_mode,
+            placeholder,
+            with_row,
+            pointer_event(pos, egui::PointerButton::Secondary, false),
+            &mut frame,
+        );
+        frame
+    }
+
+    fn simulate_loading_secondary_click() -> MenuFrame {
+        let ctx = egui::Context::default();
+        let mut frame = MenuFrame::default();
+        run_menu_frame_with_spinner(
+            &ctx,
+            ViewMode::Table,
+            Some("Загрузка"),
+            true,
+            false,
+            Vec::new(),
+            &mut frame,
+        );
+        let pos = frame.spinner_rect.unwrap().center();
+        run_menu_frame_with_spinner(
+            &ctx,
+            ViewMode::Table,
+            Some("Загрузка"),
+            true,
+            false,
+            pointer_event(pos, egui::PointerButton::Secondary, true),
+            &mut frame,
+        );
+        run_menu_frame_with_spinner(
+            &ctx,
+            ViewMode::Table,
+            Some("Загрузка"),
+            true,
+            false,
+            pointer_event(pos, egui::PointerButton::Secondary, false),
+            &mut frame,
+        );
+        frame
+    }
+
+    fn simulate_primary_drag(
+        view_mode: ViewMode,
+        placeholder: Option<&str>,
+    ) -> (MenuFrame, egui::Pos2) {
+        let ctx = egui::Context::default();
+        let mut frame = MenuFrame::default();
+        run_menu_frame(&ctx, view_mode, placeholder, false, Vec::new(), &mut frame);
+        let start = frame
+            .placeholder_rect
+            .unwrap_or_else(|| frame.background_rect.unwrap())
+            .center();
+        let end = start + egui::vec2(24.0, 0.0);
+        run_menu_frame(
+            &ctx,
+            view_mode,
+            placeholder,
+            false,
+            pointer_event(start, egui::PointerButton::Primary, true),
+            &mut frame,
+        );
+        run_menu_frame(
+            &ctx,
+            view_mode,
+            placeholder,
+            false,
+            vec![egui::Event::PointerMoved(end)],
+            &mut frame,
+        );
+        run_menu_frame(
+            &ctx,
+            view_mode,
+            placeholder,
+            false,
+            pointer_event(end, egui::PointerButton::Primary, false),
+            &mut frame,
+        );
+        (frame, start)
+    }
+
+    #[test]
+    fn empty_folder_secondary_click_opens_empty_area_context_menu() {
+        let frame = simulate_secondary_click(
+            ViewMode::Table,
+            Some("Папка пуста"),
+            false,
+            true,
+            false,
+        );
+
+        assert!(
+            frame.background_menu_open,
+            "secondary_clicked={}, background_rect={:?}, placeholder_rect={:?}",
+            frame.background_secondary_clicked, frame.background_rect, frame.placeholder_rect
+        );
+    }
+
+    #[test]
+    fn secondary_click_works_right_after_navigate_into_new_empty_folder() {
+        let frame = simulate_loading_secondary_click();
+
+        assert!(frame.background_menu_open);
+    }
+
+    #[test]
+    fn zero_filter_results_secondary_click_opens_empty_area_menu() {
+        let app = include_str!("../app/mod.rs").split_whitespace().collect::<String>();
+        assert!(app.contains("tab.entries.is_empty()"));
+        assert!(app.contains("self.t(\"search.no_results\")"));
+
+        let frame = simulate_secondary_click(
+            ViewMode::Table,
+            Some("Совпадений не найдено"),
+            false,
+            true,
+            false,
+        );
+        assert!(frame.background_menu_open);
+    }
+
+    #[test]
+    fn empty_area_placeholder_does_not_intercept_pointer() {
+        let frame = simulate_secondary_click(
+            ViewMode::Table,
+            Some("Папка пуста"),
+            false,
+            true,
+            false,
+        );
+
+        assert!(frame.placeholder_rect.is_some());
+        assert!(frame.background_menu_open);
+    }
+
+    #[test]
+    fn non_empty_folder_below_rows_secondary_click_not_regressed() {
+        let frame = simulate_secondary_click(ViewMode::Table, None, true, false, false);
+
+        assert!(frame.background_menu_open);
+        assert!(!frame.row_menu_open);
+    }
+
+    #[test]
+    fn row_context_menu_not_regressed() {
+        let frame = simulate_secondary_click(ViewMode::Table, None, true, false, true);
+
+        assert!(!frame.background_menu_open);
+        assert!(frame.row_menu_open);
+    }
+
+    #[test]
+    fn empty_area_menu_same_in_table_list_and_grid() {
+        for view_mode in [ViewMode::Table, ViewMode::List, ViewMode::Grid] {
+            let frame =
+                simulate_secondary_click(view_mode, Some("Папка пуста"), false, true, false);
+            assert!(frame.background_menu_open, "menu failed for {view_mode:?}");
+        }
+    }
+
+    #[test]
+    fn marquee_starts_on_empty_folder_background_and_selects_nothing() {
+        let (frame, start) =
+            simulate_primary_drag(ViewMode::Table, Some("Папка пуста"));
+        let entries: Vec<crate::core::fs::FileEntry> = Vec::new();
+        let selection = std::collections::BTreeSet::<crate::ui::tabs::SelectionKey>::new();
+
+        assert!(frame.background_primary_drag_started);
+        assert!(entries.is_empty());
+        let marquee =
+            super::super::selection_marquee_at(start, frame.background_rect.unwrap()).unwrap();
+        assert!(selection.is_empty());
+        assert!(marquee.added.is_empty());
+        assert_eq!(marquee.start, start);
     }
 }

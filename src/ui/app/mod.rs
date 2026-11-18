@@ -1819,6 +1819,7 @@ impl FileManagerApp {
             });
             return;
         }
+        let bg_rect = crate::ui::list::list_background_rect(ui);
         if empty {
             ui.vertical_centered(|ui| {
                 ui.add_space(style::SPACE_EMPTY_STATE);
@@ -1842,9 +1843,26 @@ impl FileManagerApp {
                     ui.label(self.t("folder.empty").to_owned());
                 }
             });
+            // Фон регистрируется после заглушки: её ответ наведения иначе перехватывает правый клик.
+            let bg_resp = crate::ui::list::list_background_response(
+                ui,
+                self.store.settings.view_mode,
+                bg_rect,
+            );
+            let marquee_rect = if self.store.settings.view_mode == ViewMode::Table {
+                self.update_selection_marquee(ctx, &bg_resp, bg_resp.rect)
+            } else {
+                self.tabs[self.active].selection_marquee = None;
+                None
+            };
+            crate::ui::list::paint_selection_marquee(ui, marquee_rect);
+            self.finish_selection_marquee(ctx);
+            self.finish_list_background(&bg_resp, ui, ctx);
             return;
         }
-        self.file_list(ctx, ui);
+        let bg_resp =
+            crate::ui::list::list_background_response(ui, self.store.settings.view_mode, bg_rect);
+        self.file_list(ctx, ui, bg_resp);
     }
 
     fn error_text(&self, e: &std::io::Error) -> String {

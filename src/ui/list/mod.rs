@@ -32,9 +32,65 @@ fn empty_list_sense(table_view: bool) -> egui::Sense {
     }
 }
 
+fn visible_list_rect(available: egui::Rect, clip: egui::Rect) -> egui::Rect {
+    available.intersect(clip)
+}
+
+pub(crate) fn list_background_rect(ui: &egui::Ui) -> egui::Rect {
+    visible_list_rect(ui.available_rect_before_wrap(), ui.clip_rect())
+}
+
+pub(crate) fn list_background_response(
+    ui: &mut egui::Ui,
+    view_mode: ViewMode,
+    rect: egui::Rect,
+) -> egui::Response {
+    ui.interact(
+        rect,
+        ui.scope_id().with("empty_list_area"),
+        empty_list_sense(view_mode == ViewMode::Table),
+    )
+}
+
+fn selection_marquee_at(
+    start: egui::Pos2,
+    rows_area: egui::Rect,
+) -> Option<crate::ui::tabs::SelectionMarquee> {
+    rows_area
+        .contains(start)
+        .then(|| crate::ui::tabs::SelectionMarquee {
+            start,
+            current: start,
+            added: std::collections::BTreeSet::new(),
+        })
+}
+
+pub(crate) fn paint_selection_marquee(ui: &egui::Ui, rect: Option<egui::Rect>) {
+    let Some(rect) = rect else {
+        return;
+    };
+    let visuals = ui.visuals();
+    ui.painter().rect_filled(
+        rect,
+        style::RADIUS_ICON_FINE,
+        visuals.selection.bg_fill.gamma_multiply(0.28),
+    );
+    ui.painter().rect_stroke(
+        rect,
+        style::RADIUS_ICON_FINE,
+        egui::Stroke::new(1.0, visuals.selection.stroke.color),
+        egui::StrokeKind::Inside,
+    );
+}
+
 impl FileManagerApp {
     /// Заголовок и виртуализированные строки выбранного режима отображения.
-    pub(crate) fn file_list(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
+    pub(crate) fn file_list(
+        &mut self,
+        ctx: &egui::Context,
+        ui: &mut egui::Ui,
+        bg_resp: egui::Response,
+    ) {
         style::dense_vertical_spacing(ui.style_mut());
 
         let count = self.tabs[self.active].entries.len();
@@ -42,11 +98,6 @@ impl FileManagerApp {
         if !table_view {
             self.tabs[self.active].selection_marquee = None;
         }
-        // Background hit-test under the whole list: rows drawn later win their
-        // rects, empty space falls through to this response.
-        let bg = ui.available_rect_before_wrap();
-        let bg_sense = empty_list_sense(table_view);
-        let bg_resp = ui.interact(bg, ui.scope_id().with("empty_list_area"), bg_sense);
         let mut group_drop: Option<(Vec<String>, String, bool)> = None;
         let mut marquee_rect = None;
         match self.store.settings.view_mode {
@@ -54,55 +105,7 @@ impl FileManagerApp {
                 self.list_header(ui);
                 ui.separator();
                 let rows_area = ui.available_rect_before_wrap().intersect(ui.clip_rect());
-                let primary_down =
-                    ctx.input(|input| input.pointer.button_down(egui::PointerButton::Primary));
-                let primary_released =
-                    ctx.input(|input| input.pointer.button_released(egui::PointerButton::Primary));
-                if !primary_down && !primary_released {
-                    self.tabs[self.active].selection_marquee = None;
-                }
-                if bg_resp.drag_started_by(egui::PointerButton::Primary)
-                    && self.group_press.is_none()
-                    && let Some(start) = ctx
-                        .input(|input| input.pointer.press_origin())
-                        .or_else(|| bg_resp.interact_pointer_pos())
-                    && rows_area.contains(start)
-                {
-                    let tab = &mut self.tabs[self.active];
-                    if !ctx.input(|input| input.modifiers.command) {
-                        tab.selection.clear();
-                        tab.anchor = None;
-                    }
-                    tab.selection_marquee = Some(crate::ui::tabs::SelectionMarquee {
-                        start,
-                        current: start,
-                        added: std::collections::BTreeSet::new(),
-                    });
-                }
-                if let Some(tab) = self.tabs.get_mut(self.active)
-                    && let Some(marquee) = &mut tab.selection_marquee
-                {
-                    if let Some(pointer) = ctx.pointer_latest_pos() {
-                        marquee.current = pointer;
-                    }
-                    // На каждом кадре обновляем только элементы, затронутые рамкой.
-                    let previous_additions = std::mem::take(&mut marquee.added);
-                    for key in previous_additions {
-                        tab.selection.remove(&key);
-                    }
-                    if tab
-                        .anchor
-                        .as_ref()
-                        .is_some_and(|key| !tab.selection.contains(key))
-                    {
-                        tab.anchor = None;
-                    }
-                    marquee_rect = Some(
-                        egui::Rect::from_two_pos(marquee.start, marquee.current)
-                            .expand(1.0)
-                            .intersect(rows_area),
-                    );
-                }
+                marquee_rect = self.update_selection_marquee(ctx, &bg_resp, rows_area);
                 let rows = self.build_rows();
                 let visual_order = self.store.settings.group_by_type.then(|| item_order(&rows));
                 let group_keys: Vec<String> = rows
@@ -155,23 +158,8 @@ impl FileManagerApp {
                     .show(ui, |ui| self.grid_view(ui, ctx, None));
             }
         }
-        if let Some(rect) = marquee_rect {
-            let visuals = ui.visuals();
-            ui.painter().rect_filled(
-                rect,
-                style::RADIUS_ICON_FINE,
-                visuals.selection.bg_fill.gamma_multiply(0.28),
-            );
-            ui.painter().rect_stroke(
-                rect,
-                style::RADIUS_ICON_FINE,
-                egui::Stroke::new(1.0, visuals.selection.stroke.color),
-                egui::StrokeKind::Inside,
-            );
-        }
-        if ctx.input(|input| input.pointer.button_released(egui::PointerButton::Primary)) {
-            self.tabs[self.active].selection_marquee = None;
-        }
+        paint_selection_marquee(ui, marquee_rect);
+        self.finish_selection_marquee(ctx);
         if ctx.input(|i| i.pointer.any_released()) {
             if let Some((source, _)) = self.group_drag.take() {
                 if let Some((keys, target, after)) = group_drop {
@@ -201,9 +189,79 @@ impl FileManagerApp {
                         });
                 });
         }
+        self.finish_list_background(&bg_resp, ui, ctx);
+        self.scroll_to_cursor = false;
+    }
+
+    pub(crate) fn update_selection_marquee(
+        &mut self,
+        ctx: &egui::Context,
+        bg_resp: &egui::Response,
+        rows_area: egui::Rect,
+    ) -> Option<egui::Rect> {
+        let primary_down =
+            ctx.input(|input| input.pointer.button_down(egui::PointerButton::Primary));
+        let primary_released =
+            ctx.input(|input| input.pointer.button_released(egui::PointerButton::Primary));
+        if !primary_down && !primary_released {
+            self.tabs[self.active].selection_marquee = None;
+        }
+        if bg_resp.drag_started_by(egui::PointerButton::Primary)
+            && self.group_press.is_none()
+            && let Some(start) = ctx
+                .input(|input| input.pointer.press_origin())
+                .or_else(|| bg_resp.interact_pointer_pos())
+            && let Some(marquee) = selection_marquee_at(start, rows_area)
+        {
+            let tab = &mut self.tabs[self.active];
+            if !ctx.input(|input| input.modifiers.command) {
+                tab.selection.clear();
+                tab.anchor = None;
+            }
+            tab.selection_marquee = Some(marquee);
+        }
+        if let Some(tab) = self.tabs.get_mut(self.active)
+            && let Some(marquee) = &mut tab.selection_marquee
+        {
+            if let Some(pointer) = ctx.pointer_latest_pos() {
+                marquee.current = pointer;
+            }
+            // На каждом кадре обновляем только элементы, затронутые рамкой.
+            let previous_additions = std::mem::take(&mut marquee.added);
+            for key in previous_additions {
+                tab.selection.remove(&key);
+            }
+            if tab
+                .anchor
+                .as_ref()
+                .is_some_and(|key| !tab.selection.contains(key))
+            {
+                tab.anchor = None;
+            }
+            return Some(
+                egui::Rect::from_two_pos(marquee.start, marquee.current)
+                    .expand(1.0)
+                    .intersect(rows_area),
+            );
+        }
+        None
+    }
+
+    pub(crate) fn finish_selection_marquee(&mut self, ctx: &egui::Context) {
+        if ctx.input(|input| input.pointer.button_released(egui::PointerButton::Primary)) {
+            self.tabs[self.active].selection_marquee = None;
+        }
+    }
+
+    pub(crate) fn finish_list_background(
+        &mut self,
+        bg_resp: &egui::Response,
+        ui: &egui::Ui,
+        ctx: &egui::Context,
+    ) {
         let current_folder = self.tabs[self.active].path.clone();
         self.handle_file_drop_response(
-            &bg_resp,
+            bg_resp,
             Some(&current_folder),
             true,
             self.active_folder_accepts_drop(&current_folder),
@@ -211,8 +269,7 @@ impl FileManagerApp {
             ui,
             ctx,
         );
-        self.empty_area_menu(&bg_resp, ctx);
-        self.scroll_to_cursor = false;
+        self.empty_area_menu(bg_resp, ctx);
     }
 }
 
@@ -931,4 +988,41 @@ mod tests {
         assert!(crate::ui::file_dnd::file_row_sense().senses_click());
         assert!(crate::ui::file_dnd::file_row_sense().senses_drag());
     }
+
+    #[test]
+    fn background_response_covers_visible_list_area_with_zero_entries() {
+        let available = egui::Rect::from_min_size(
+            egui::pos2(12.0, 24.0),
+            egui::vec2(500.0, 360.0),
+        );
+        let clip = egui::Rect::from_min_size(
+            egui::pos2(12.0, 40.0),
+            egui::vec2(500.0, 300.0),
+        );
+        let visible_entries: Vec<FileEntry> = Vec::new();
+
+        assert!(visible_entries.is_empty());
+        assert_eq!(visible_list_rect(available, clip), clip);
+    }
+
+    #[test]
+    fn background_drop_target_registers_in_empty_folder() {
+        fn compact_source(source: &str) -> String {
+            source.split_whitespace().collect()
+        }
+
+        let app = compact_source(include_str!("../app/mod.rs"));
+        let content = app
+            .split("pub(super)fnshow_active_file_content")
+            .nth(1)
+            .unwrap();
+        assert!(content.find("list_background_rect").unwrap() < content.find("ifempty{").unwrap());
+        assert_eq!(content.matches("list_background_response").count(), 2);
+        assert!(content.contains("self.finish_list_background(&bg_resp,ui,ctx)"));
+
+        let list = compact_source(include_str!("mod.rs"));
+        assert!(list.contains("DropSurface::Background"));
+        assert!(list.contains("self.finish_list_background(&bg_resp,ui,ctx)"));
+    }
+
 }
