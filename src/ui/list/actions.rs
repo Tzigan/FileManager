@@ -69,14 +69,19 @@ impl FileManagerApp {
                 ui.close();
             }
             ui.separator();
-            if ui.button(self.t("ctx.new_folder").to_owned()).clicked() {
-                self.ops_ui.create = Some((true, String::new()));
-                ui.close();
-            }
-            if ui.button(self.t("ctx.new_file").to_owned()).clicked() {
-                self.ops_ui.create = Some((false, String::new()));
-                ui.close();
-            }
+            ui.menu_button(self.t("ctx.create").to_owned(), |ui| {
+                if ui.button(self.t("ctx.create_folder").to_owned()).clicked() {
+                    self.open_create_dialog(true);
+                    ui.close();
+                }
+                if ui
+                    .button(self.t("ctx.create_text_file").to_owned())
+                    .clicked()
+                {
+                    self.open_create_dialog(false);
+                    ui.close();
+                }
+            });
             if ui.button(self.t("ctx.open_terminal").to_owned()).clicked() {
                 let path = self.tabs[self.active].path.clone();
                 if let Err(e) = crate::platform::open_terminal(&path) {
@@ -343,15 +348,7 @@ mod tests {
         events: Vec<egui::Event>,
         frame: &mut MenuFrame,
     ) {
-        run_menu_frame_with_spinner(
-            ctx,
-            view_mode,
-            placeholder,
-            false,
-            with_row,
-            events,
-            frame,
-        );
+        run_menu_frame_with_spinner(ctx, view_mode, placeholder, false, with_row, events, frame);
     }
 
     fn run_menu_frame_with_spinner(
@@ -386,11 +383,8 @@ mod tests {
                             frame.placeholder_rect = Some(ui.label(text).rect);
                         });
                     }
-                    let background = crate::ui::list::list_background_response(
-                        ui,
-                        view_mode,
-                        background_rect,
-                    );
+                    let background =
+                        crate::ui::list::list_background_response(ui, view_mode, background_rect);
                     frame.background_rect = Some(background.rect);
                     frame.background_secondary_clicked |= background.secondary_clicked();
                     frame.background_primary_drag_started |=
@@ -406,15 +400,13 @@ mod tests {
                             ui.scope_id().with("test_file_row"),
                             egui::Sense::click(),
                         );
-                        frame.row_menu_open |=
-                            response_context_menu_opened(&row, |ui| {
-                                ui.label("Контекстное меню строки");
-                            });
-                    }
-                    frame.background_menu_open |=
-                        response_context_menu_opened(&background, |ui| {
-                            ui.label("Контекстное меню пустого места");
+                        frame.row_menu_open |= response_context_menu_opened(&row, |ui| {
+                            ui.label("Контекстное меню строки");
                         });
+                    }
+                    frame.background_menu_open |= response_context_menu_opened(&background, |ui| {
+                        ui.label("Контекстное меню пустого места");
+                    });
                 });
             },
         );
@@ -446,7 +438,14 @@ mod tests {
     ) -> MenuFrame {
         let ctx = egui::Context::default();
         let mut frame = MenuFrame::default();
-        run_menu_frame(&ctx, view_mode, placeholder, with_row, Vec::new(), &mut frame);
+        run_menu_frame(
+            &ctx,
+            view_mode,
+            placeholder,
+            with_row,
+            Vec::new(),
+            &mut frame,
+        );
         let pos = if click_placeholder {
             frame.placeholder_rect.unwrap().center()
         } else if click_row {
@@ -548,13 +547,8 @@ mod tests {
 
     #[test]
     fn empty_folder_secondary_click_opens_empty_area_context_menu() {
-        let frame = simulate_secondary_click(
-            ViewMode::Table,
-            Some("Папка пуста"),
-            false,
-            true,
-            false,
-        );
+        let frame =
+            simulate_secondary_click(ViewMode::Table, Some("Папка пуста"), false, true, false);
 
         assert!(
             frame.background_menu_open,
@@ -572,7 +566,9 @@ mod tests {
 
     #[test]
     fn zero_filter_results_secondary_click_opens_empty_area_menu() {
-        let app = include_str!("../app/mod.rs").split_whitespace().collect::<String>();
+        let app = include_str!("../app/mod.rs")
+            .split_whitespace()
+            .collect::<String>();
         assert!(app.contains("tab.entries.is_empty()"));
         assert!(app.contains("self.t(\"search.no_results\")"));
 
@@ -588,13 +584,8 @@ mod tests {
 
     #[test]
     fn empty_area_placeholder_does_not_intercept_pointer() {
-        let frame = simulate_secondary_click(
-            ViewMode::Table,
-            Some("Папка пуста"),
-            false,
-            true,
-            false,
-        );
+        let frame =
+            simulate_secondary_click(ViewMode::Table, Some("Папка пуста"), false, true, false);
 
         assert!(frame.placeholder_rect.is_some());
         assert!(frame.background_menu_open);
@@ -617,6 +608,44 @@ mod tests {
     }
 
     #[test]
+    fn empty_area_menu_has_create_submenu_with_folder_and_text_file() {
+        let source = include_str!("actions.rs");
+        let menu = source
+            .split("fn empty_area_menu")
+            .nth(1)
+            .unwrap()
+            .split("pub(super) fn entry_actions")
+            .next()
+            .unwrap();
+        let create = menu.find("ctx.create").unwrap();
+        let folder = menu.find("ctx.create_folder").unwrap();
+        let text_file = menu.find("ctx.create_text_file").unwrap();
+
+        assert!(menu[..create].contains("menu_button"));
+        assert!(folder < text_file);
+        assert!(!menu.contains("ctx.new_folder"));
+        assert!(!menu.contains("ctx.new_file"));
+    }
+
+    #[test]
+    fn empty_area_menu_other_items_and_order_not_regressed() {
+        let source = include_str!("actions.rs");
+        let menu = source
+            .split("fn empty_area_menu")
+            .nth(1)
+            .unwrap()
+            .split("pub(super) fn entry_actions")
+            .next()
+            .unwrap();
+        let paste = menu.find("ctx.paste").unwrap();
+        let create = menu.find("ctx.create").unwrap();
+        let terminal = menu.find("ctx.open_terminal").unwrap();
+        let refresh = menu.rfind("toolbar.refresh").unwrap();
+
+        assert!(paste < create && create < terminal && terminal < refresh);
+    }
+
+    #[test]
     fn empty_area_menu_same_in_table_list_and_grid() {
         for view_mode in [ViewMode::Table, ViewMode::List, ViewMode::Grid] {
             let frame =
@@ -627,8 +656,7 @@ mod tests {
 
     #[test]
     fn marquee_starts_on_empty_folder_background_and_selects_nothing() {
-        let (frame, start) =
-            simulate_primary_drag(ViewMode::Table, Some("Папка пуста"));
+        let (frame, start) = simulate_primary_drag(ViewMode::Table, Some("Папка пуста"));
         let entries: Vec<crate::core::fs::FileEntry> = Vec::new();
         let selection = std::collections::BTreeSet::<crate::ui::tabs::SelectionKey>::new();
 

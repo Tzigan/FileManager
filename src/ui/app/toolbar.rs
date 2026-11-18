@@ -191,8 +191,7 @@ impl FileManagerApp {
                                     );
                                 // Обычный клик сохраняет работу глобальных сочетаний клавиш.
                                 // Drag-ответ остаётся активным, даже если указатель вышел за вкладку.
-                                let (rect, resp) =
-                                    ui.allocate_exact_size(size, tab_drag_sense());
+                                let (rect, resp) = ui.allocate_exact_size(size, tab_drag_sense());
                                 let tab_id = self.tabs[*i].id;
                                 let tab_file_payload_active =
                                     crate::ui::file_dnd::file_drag_payload_active(ctx, Some(&resp));
@@ -558,10 +557,7 @@ impl FileManagerApp {
                     icon_arrow(p, r, egui::vec2(0.0, -1.0), c);
                 },
             );
-            let parent_folder = self.tabs[self.active]
-                .path
-                .parent()
-                .map(Path::to_path_buf);
+            let parent_folder = self.tabs[self.active].path.parent().map(Path::to_path_buf);
             self.handle_file_drop_response(
                 &up_response,
                 parent_folder.as_deref(),
@@ -620,11 +616,11 @@ impl FileManagerApp {
                     }
                 } else {
                     if ui.button(self.t("ctx.new_folder").to_owned()).clicked() {
-                        self.ops_ui.create = Some((true, String::new()));
+                        self.open_create_dialog(true);
                         ui.close();
                     }
                     if ui.button(self.t("ctx.new_file").to_owned()).clicked() {
-                        self.ops_ui.create = Some((false, String::new()));
+                        self.open_create_dialog(false);
                         ui.close();
                     }
                     if ui
