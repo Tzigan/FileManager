@@ -13,7 +13,7 @@ mod trash;
 mod window_frame;
 
 pub(crate) use chrome::{
-    configure_tab_scroll_style, icon_arrow, icon_button, icon_pin, icon_refresh, icon_star,
+    configure_tab_scroll_style, icon_arrow, icon_pin, icon_refresh, icon_star,
     tab_close_button_hovered, tab_scroll_source, tab_strip_content_margin,
 };
 
