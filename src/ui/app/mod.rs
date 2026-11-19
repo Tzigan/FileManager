@@ -482,6 +482,8 @@ pub struct FileManagerApp {
     /// Update offer: (version, exe URL).
     pending_update: Option<UpdateManifest>,
     update_busy: bool,
+    /// Однократная прокрутка окна «О программе» к началу загрузки обновления.
+    about_scroll_to_update: bool,
     update_check: UpdateCheckState,
     update_check_inflight: Arc<AtomicBool>,
     update_downloaded: u64,
@@ -776,6 +778,7 @@ impl FileManagerApp {
             update_startup_signaled: false,
             pending_update: None,
             update_busy: false,
+            about_scroll_to_update: false,
             update_check: UpdateCheckState::default(),
             update_check_inflight: Arc::new(AtomicBool::new(false)),
             update_downloaded: 0,

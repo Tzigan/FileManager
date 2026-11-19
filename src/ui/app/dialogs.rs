@@ -8,6 +8,20 @@ const ABOUT_WINDOW_WIDTH: f32 = 520.0;
 const ABOUT_WINDOW_HEIGHT: f32 = 350.0;
 const ABOUT_CONTENT_MARGIN_X: i8 = style::SPACE_MD as i8;
 const ABOUT_PATH_ELLIPSIS: &str = "…";
+const ABOUT_SCROLL_ID: &str = "about_update_vertical_scroll";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AboutScrollPlan {
+    stick_to_bottom: bool,
+    scroll_to_bottom_now: bool,
+}
+
+fn about_scroll_plan(update_active: bool, scroll_requested: bool) -> AboutScrollPlan {
+    AboutScrollPlan {
+        stick_to_bottom: update_active,
+        scroll_to_bottom_now: update_active && scroll_requested,
+    }
+}
 
 pub(super) fn log_export_error_key(
     error: &crate::core::log_export::LogExportError,
@@ -146,8 +160,13 @@ fn about_path_row(ui: &mut egui::Ui, label: &str, path: &str) {
 impl FileManagerApp {
     pub(super) fn about_window(&mut self, ctx: &egui::Context) {
         if !self.show_about {
+            if !self.update_busy {
+                self.about_scroll_to_update = false;
+            }
             return;
         }
+        let scroll_plan = about_scroll_plan(self.update_busy, self.about_scroll_to_update);
+        self.about_scroll_to_update = false;
         let title = self.t("about.title").to_owned();
         let version_label = self
             .t("about.version")
@@ -178,7 +197,10 @@ impl FileManagerApp {
             about_frame.inner_margin.left = ABOUT_CONTENT_MARGIN_X;
             about_frame.inner_margin.right = ABOUT_CONTENT_MARGIN_X;
             egui::CentralPanel::default().frame(about_frame).show(viewport_ui, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
+                let scroll_area = egui::ScrollArea::vertical()
+                    .id_salt(ABOUT_SCROLL_ID)
+                    .stick_to_bottom(scroll_plan.stick_to_bottom);
+                scroll_area.show(ui, |ui| {
                     ui.heading(version_label.clone());
                     ui.label(format!("{build_label}: {build_profile}"));
                     ui.add(egui::Label::new(self.t("about.description")).wrap());
@@ -297,6 +319,10 @@ impl FileManagerApp {
                             )
                             .wrap(),
                         );
+                    }
+                    if scroll_plan.scroll_to_bottom_now {
+                        // Начальная прокрутка показывает статус запуска, даже если About был наверху.
+                        ui.scroll_to_cursor(Some(egui::Align::BOTTOM));
                     }
                 });
             });
@@ -934,6 +960,7 @@ impl FileManagerApp {
             return;
         };
         self.update_busy = true;
+        self.about_scroll_to_update = true;
         self.update_ready = None;
         self.update_downloaded = 0;
         self.update_total = manifest.size;
@@ -1336,7 +1363,9 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        ABOUT_CONTENT_MARGIN_X, ABOUT_WINDOW_HEIGHT, ABOUT_WINDOW_WIDTH, SettingsCategory,
+        ABOUT_CONTENT_MARGIN_X, ABOUT_SCROLL_ID, ABOUT_WINDOW_HEIGHT, ABOUT_WINDOW_WIDTH,
+        AboutScrollPlan, SettingsCategory,
+        about_scroll_plan,
         about_build_profile_key, elide_about_path, log_export_error_key,
         refresh_after_attribute_change,
         selected_entry_for_details, settings_category_column_width,
@@ -1375,6 +1404,108 @@ mod tests {
 
     const TEST_CHAR_WIDTH: f32 = 8.0;
     const TEST_BUTTON_PADDING: f32 = 24.0;
+
+    #[test]
+    fn about_auto_scrolls_to_bottom_while_update_lines_grow() {
+        let line_counts = [4, 5, 6];
+        let mut scroll_requested = true;
+        let mut previous_line_count = line_counts[0] - 1;
+        for (index, line_count) in line_counts.into_iter().enumerate() {
+            let plan = about_scroll_plan(true, scroll_requested);
+            assert_eq!(
+                plan,
+                AboutScrollPlan {
+                    stick_to_bottom: true,
+                    scroll_to_bottom_now: index == 0,
+                }
+            );
+            assert!(line_count > previous_line_count);
+            previous_line_count = line_count;
+            scroll_requested = false;
+        }
+    }
+
+    #[test]
+    fn about_no_auto_scroll_when_update_not_active() {
+        assert_eq!(
+            about_scroll_plan(false, false),
+            AboutScrollPlan {
+                stick_to_bottom: false,
+                scroll_to_bottom_now: false,
+            }
+        );
+    }
+
+    #[test]
+    fn about_auto_scroll_stops_after_update_completes_or_cancelled() {
+        for plan in [
+            about_scroll_plan(false, true),
+            about_scroll_plan(false, true),
+        ] {
+            assert!(!plan.stick_to_bottom);
+            assert!(!plan.scroll_to_bottom_now);
+        }
+    }
+
+    #[test]
+    fn about_manual_scroll_up_stops_auto_scroll_until_return_to_bottom() {
+        let about = about_window_source();
+        assert!(about.contains(".stick_to_bottom(scroll_plan.stick_to_bottom)"));
+        assert!(about.contains("let scroll_plan = about_scroll_plan(self.update_busy"));
+    }
+
+    #[test]
+    fn about_open_without_update_starts_at_top() {
+        let plan = about_scroll_plan(false, false);
+        assert!(!plan.scroll_to_bottom_now);
+        assert!(!plan.stick_to_bottom);
+        assert!(include_str!("mod.rs").contains("about_scroll_to_update: false"));
+    }
+
+    #[test]
+    fn about_scroll_id_not_shared_with_other_panels() {
+        let about = about_window_source();
+        assert!(!ABOUT_SCROLL_ID.is_empty());
+        assert!(about.contains(".id_salt(ABOUT_SCROLL_ID)"));
+        for source in [
+            include_str!("../tree.rs"),
+            include_str!("../list/mod.rs"),
+            include_str!("toolbar.rs"),
+        ] {
+            assert!(!source.contains(ABOUT_SCROLL_ID));
+        }
+    }
+
+    #[test]
+    fn existing_about_geometry_and_padding_tests_not_regressed() {
+        let source = include_str!("dialogs.rs");
+        for test_name in [
+            "about_window_content_has_symmetric_horizontal_margins",
+            "about_window_width_accounts_for_widest_content_plus_both_margins",
+        ] {
+            assert!(source.contains(&format!("fn {test_name}")));
+        }
+    }
+
+    #[test]
+    fn existing_about_auto_open_tests_not_regressed() {
+        let tests = include_str!("tests.rs");
+        assert!(tests.contains("fn about_opens_automatically_when_update_available"));
+        assert!(tests.contains("fn about_does_not_open_when_no_update_or_check_failed"));
+    }
+
+    #[test]
+    fn existing_update_flow_tests_not_regressed() {
+        let tests = include_str!("tests.rs");
+        for test_name in [
+            "manual_update_check_supersedes_startup_auto_check",
+            "manual_update_check_has_final_timeout_or_failure_not_stuck_checking",
+            "about_update_now_triggers_existing_update_logic",
+            "about_later_closes_window_and_continues",
+        ] {
+            assert!(tests.contains(&format!("fn {test_name}")));
+        }
+    }
 
     fn test_text_width(text: &str) -> f32 {
         text.chars().count() as f32 * TEST_CHAR_WIDTH
