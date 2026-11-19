@@ -41,8 +41,13 @@ use crate::platform::{
 };
 use crate::ui::opsui::OpsUi;
 use crate::ui::tabs::{ListStatus, Tab};
-use crate::ui::tree::TreeState;
+use crate::ui::tree::{
+    TREE_PANEL_MAX_WIDTH, TREE_PANEL_MIN_WIDTH, TreeState, clamp_tree_panel_width,
+};
 use bookmark_cache::{BookmarkProbeBatch, BookmarkStateCache};
+
+const TREE_PANEL_PERSIST_DEBOUNCE: Duration = Duration::from_millis(300);
+const TREE_PANEL_WIDTH_CHANGE_EPSILON: f32 = 0.5;
 
 const DISK_USAGE_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 /// Канал эскизов остаётся отдельным от пула тяжёлых независимых операций.
@@ -554,6 +559,7 @@ pub struct FileManagerApp {
     pub(crate) tabs: Vec<Tab>,
     pub(crate) active: usize,
     pub(crate) tree: TreeState,
+    tree_panel_persist_deadline: Option<Instant>,
     pub(crate) system_bookmarks: Vec<SystemBookmark>,
     bookmark_state_cache: BookmarkStateCache,
     /// Scroll the focused row into view next repaint (set by keyboard nav).
@@ -841,6 +847,7 @@ impl FileManagerApp {
                 .collect(),
             active,
             tree,
+            tree_panel_persist_deadline: None,
             system_bookmarks: crate::core::known_folders::system_bookmarks(),
             bookmark_state_cache: BookmarkStateCache::new(),
             scroll_to_cursor: false,
@@ -993,6 +1000,31 @@ impl FileManagerApp {
                 self.ops_ui.show_journal = true;
                 Err(error)
             }
+        }
+    }
+
+    fn note_tree_panel_width(&mut self, ctx: &egui::Context, width: f32) {
+        let width = clamp_tree_panel_width(width);
+        if (self.store.settings.tree_panel_width - width).abs()
+            < TREE_PANEL_WIDTH_CHANGE_EPSILON
+        {
+            return;
+        }
+        self.store.settings.tree_panel_width = width;
+        self.tree_panel_persist_deadline = Some(Instant::now() + TREE_PANEL_PERSIST_DEBOUNCE);
+        ctx.request_repaint_after(TREE_PANEL_PERSIST_DEBOUNCE);
+    }
+
+    fn persist_tree_panel_width_if_due(&mut self, ctx: &egui::Context) {
+        let Some(deadline) = self.tree_panel_persist_deadline else {
+            return;
+        };
+        let now = Instant::now();
+        if deadline <= now {
+            self.tree_panel_persist_deadline = None;
+            let _ = self.persist_checked();
+        } else {
+            ctx.request_repaint_after(deadline - now);
         }
     }
 
@@ -2036,11 +2068,17 @@ impl eframe::App for FileManagerApp {
         egui::Panel::top("search_bar").show(ui, |ui| self.search_bar(ui));
         self.dispatch_due_searches(&ctx);
 
-        egui::Panel::left("tree_panel")
+        let tree_panel_width = egui::Panel::left("tree_panel")
             .resizable(true)
-            .default_size(230.0)
-            .size_range(150.0..=400.0)
-            .show(ui, |ui| self.tree_panel(&ctx, ui));
+            .default_size(clamp_tree_panel_width(
+                self.store.settings.tree_panel_width,
+            ))
+            .size_range(TREE_PANEL_MIN_WIDTH..=TREE_PANEL_MAX_WIDTH)
+            .show(ui, |ui| self.tree_panel(&ctx, ui))
+            .response
+            .rect
+            .width();
+        self.note_tree_panel_width(&ctx, tree_panel_width);
 
         egui::Panel::right("props_panel")
             .resizable(false)
@@ -2070,6 +2108,7 @@ impl eframe::App for FileManagerApp {
         self.zip_status_window(&ctx);
         self.ops_dialogs(&ctx);
         self.poll_update_restart(&ctx);
+        self.persist_tree_panel_width_if_due(&ctx);
 
         // Keep repainting while operations run so progress stays live.
         if !self.ops_ui.jobs.is_empty()

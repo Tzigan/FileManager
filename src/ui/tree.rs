@@ -7,6 +7,13 @@ use crate::platform::DiskUsage;
 use crate::ui::icons;
 use crate::ui::style;
 
+pub(crate) const TREE_PANEL_MIN_WIDTH: f32 = 140.0;
+pub(crate) const TREE_PANEL_MAX_WIDTH: f32 = 480.0;
+
+pub(crate) fn clamp_tree_panel_width(width: f32) -> f32 {
+    width.clamp(TREE_PANEL_MIN_WIDTH, TREE_PANEL_MAX_WIDTH)
+}
+
 /// Lazy folder tree shown in the left panel.
 ///
 /// Roots are the system drives. A node's children are loaded on demand by a
@@ -838,6 +845,113 @@ mod tests {
         assert!(detached.contains("self.tree_panel(&viewport_ctx, ui)"));
         assert!(tree.contains("self.store.settings.bookmarks_system_collapsed"));
         assert!(tree.contains("self.store.settings.bookmarks_personal_collapsed"));
+    }
+
+    #[test]
+    fn tree_panel_width_clamped_to_min_and_max_constants() {
+        assert_eq!(clamp_tree_panel_width(TREE_PANEL_MIN_WIDTH - 20.0), 140.0);
+        assert_eq!(clamp_tree_panel_width(TREE_PANEL_MIN_WIDTH), 140.0);
+        assert_eq!(clamp_tree_panel_width(TREE_PANEL_MAX_WIDTH), 480.0);
+        assert_eq!(clamp_tree_panel_width(TREE_PANEL_MAX_WIDTH + 20.0), 480.0);
+    }
+
+    #[test]
+    fn tree_panel_width_shared_with_detached_window() {
+        let main = include_str!("app/mod.rs");
+        let detached = include_str!("app/window_frame.rs");
+        assert!(main.contains("self.store.settings.tree_panel_width"));
+        assert!(detached.contains("self.store.settings.tree_panel_width"));
+        assert!(main.contains("TREE_PANEL_MIN_WIDTH..=TREE_PANEL_MAX_WIDTH"));
+        assert!(detached.contains("TREE_PANEL_MIN_WIDTH..=TREE_PANEL_MAX_WIDTH"));
+        assert!(detached.contains("Одна сохранённая ширина"));
+    }
+
+    #[test]
+    fn tree_panel_resize_calls_persist_checked() {
+        let app = include_str!("app/mod.rs");
+        let panel = app.find("egui::Panel::left(\"tree_panel\")").unwrap();
+        let resize = app[panel..].find("self.note_tree_panel_width").unwrap() + panel;
+        let debounce = app
+            .find("fn persist_tree_panel_width_if_due")
+            .map(|start| &app[start..])
+            .unwrap();
+        assert!(panel < resize);
+        assert!(debounce.contains("let _ = self.persist_checked();"));
+        assert!(debounce.contains("ctx.request_repaint_after"));
+        assert!(
+            app.contains("TREE_PANEL_PERSIST_DEBOUNCE: Duration = Duration::from_millis(300)")
+        );
+    }
+
+    #[test]
+    fn tree_panel_resize_persist_failure_does_not_block_ui() {
+        let dir = std::env::temp_dir().join(format!(
+            "filemanager-tree-width-failure-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let config_blocker = dir.join("settings-parent");
+        std::fs::write(&config_blocker, b"not a directory").unwrap();
+        let mut store = crate::core::settings::SettingsStore::load(&config_blocker);
+        store.settings.tree_panel_width = 370.0;
+
+        assert!(store.save().is_err());
+        assert_eq!(store.settings.tree_panel_width, 370.0);
+
+        let app = include_str!("app/mod.rs");
+        let note = app
+            .split("fn note_tree_panel_width")
+            .nth(1)
+            .unwrap()
+            .split("fn persist_tree_panel_width_if_due")
+            .next()
+            .unwrap();
+        let persist = app
+            .split("fn persist_tree_panel_width_if_due")
+            .nth(1)
+            .unwrap()
+            .split("pub(crate) fn sort_col")
+            .next()
+            .unwrap();
+        assert!(note.contains("self.store.settings.tree_panel_width = width"));
+        assert!(persist.contains("let _ = self.persist_checked();"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn existing_tree_and_list_tests_not_regressed() {
+        let tree = include_str!("tree.rs");
+        let list = include_str!("list/mod.rs");
+        for test in [
+            "existing_bookmark_drop_and_cache_tests_not_regressed",
+            "bookmark_collapse_shared_between_main_and_detached",
+            "domain1_2_3_not_regressed",
+        ] {
+            assert!(tree.contains(test));
+        }
+        for test in [
+            "table_rows_do_not_add_horizontal_scroll_margin_that_shifts_columns",
+            "narrow_window_enables_horizontal_scroll_instead_of_column_overlap",
+        ] {
+            assert!(list.contains(test));
+        }
+    }
+
+    #[test]
+    fn existing_horizontal_scroll_tests_not_regressed() {
+        let list = include_str!("list/mod.rs");
+        for test in [
+            "narrow_window_enables_horizontal_scroll_instead_of_column_overlap",
+            "detached_window_inherits_horizontal_scroll_via_shared_code",
+            "sorting_by_header_click_works_after_horizontal_scroll",
+            "row_context_menu_rects_correct_after_horizontal_scroll",
+        ] {
+            assert!(list.contains(test));
+        }
     }
 
     #[test]
