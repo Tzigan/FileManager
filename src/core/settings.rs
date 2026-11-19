@@ -82,13 +82,6 @@ fn location_for_routing(path: &Path) -> Option<PathBuf> {
     Some(canonical_parent.join(name))
 }
 
-/// Закладка «Корзина» открывает корзину приложения, когда удаление может в неё попасть.
-/// В режиме «спрашивать» это она, а не системная корзина: иначе список приложения неоткуда открыть.
-/// Системная корзина остаётся отдельным пунктом меню.
-pub fn bookmark_opens_secure_trash(mode: DeleteMode) -> bool {
-    matches!(mode, DeleteMode::SecureTrash | DeleteMode::Ask)
-}
-
 /// Папки из списка сравниваются по компонентам пути, не по сырой строке и не по маске.
 pub fn route_delete(
     mode: DeleteMode,
@@ -1380,10 +1373,22 @@ mod tests_v06 {
     }
 
     #[test]
-    fn ask_mode_bookmark_opens_the_app_trash() {
-        assert!(bookmark_opens_secure_trash(DeleteMode::Ask));
-        assert!(bookmark_opens_secure_trash(DeleteMode::SecureTrash));
-        assert!(!bookmark_opens_secure_trash(DeleteMode::WindowsRecycle));
+    fn delete_file_uses_secure_trash_enabled_setting_for_target() {
+        let path = PathBuf::from(r"C:\work\a.txt");
+        let windows = route_delete(
+            DeleteMode::WindowsRecycle,
+            false,
+            std::slice::from_ref(&path),
+            &[],
+        );
+        let secure = route_delete(
+            DeleteMode::SecureTrash,
+            false,
+            std::slice::from_ref(&path),
+            &[],
+        );
+        assert_eq!(windows.windows, vec![path.clone()]);
+        assert_eq!(secure.secure, vec![path]);
     }
 
     #[test]
