@@ -11,6 +11,10 @@ pub(super) fn entry_at(entries: &[FileEntry], index: usize) -> Option<FileEntry>
     entries.get(index).cloned()
 }
 
+pub(super) fn name_column_text(entry: &FileEntry) -> &str {
+    &entry.name
+}
+
 impl FileManagerApp {
     pub(super) fn file_row(
         &mut self,
@@ -97,20 +101,10 @@ impl FileManagerApp {
             egui::pos2(rect.min.x + name_x, rect.min.y),
             egui::pos2(rect.min.x + name_right - COL_GAP, rect.max.y),
         );
-        let name_text = if self.tabs[self.active].secure_trash {
-            entry
-                .archive_member
-                .as_ref()
-                .and_then(|id| self.tabs[self.active].trash_notes.get(id))
-                .map(|note| format!("{}  {}", entry.name, note))
-                .unwrap_or_else(|| entry.name.clone())
-        } else {
-            entry.name.clone()
-        };
         painter.with_clip_rect(name_rect).text(
             egui::pos2(rect.min.x + name_x, y),
             egui::Align2::LEFT_CENTER,
-            name_text,
+            name_column_text(&entry),
             font.clone(),
             name_color,
         );
@@ -235,10 +229,37 @@ impl FileManagerApp {
         painter.text(
             egui::pos2(rect.min.x + ICON_WIDTH, rect.center().y),
             egui::Align2::LEFT_CENTER,
-            &entry.name,
+            name_column_text(&entry),
             font,
             ui.visuals().text_color(),
         );
         self.entry_actions(&resp, index, &entry, visual_order, ui, ctx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::name_column_text;
+    use crate::core::fs::FileEntry;
+
+    #[test]
+    fn secure_trash_name_column_shows_only_file_name() {
+        let entry = FileEntry {
+            name: "LLamaApp_0.13.0.0_x64.msix".to_owned(),
+            path: r"C:\trash\item".into(),
+            is_dir: false,
+            is_symlink: false,
+            hidden: false,
+            system: false,
+            readonly: false,
+            size: Some(1),
+            modified: None,
+            created: None,
+            extension: Some("msix".to_owned()),
+            archive_member: Some("card-id".to_owned()),
+        };
+        assert_eq!(name_column_text(&entry), "LLamaApp_0.13.0.0_x64.msix");
+        assert!(include_str!("rows.rs").contains("name_column_text(&entry)"));
+        assert!(include_str!("grid.rs").contains("rows::name_column_text(&entry)"));
     }
 }

@@ -86,7 +86,7 @@ impl FileManagerApp {
         ui.painter().with_clip_rect(rect.shrink(4.0)).text(
             egui::pos2(rect.center().x, rect.max.y - 14.0),
             egui::Align2::CENTER_CENTER,
-            &entry.name,
+            super::rows::name_column_text(&entry),
             font,
             ui.visuals().text_color(),
         );

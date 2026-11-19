@@ -41,6 +41,12 @@ pub(crate) struct SelectionMarquee {
     pub added: BTreeSet<SelectionKey>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TrashDisplayMetadata {
+    pub origin: String,
+    pub status: String,
+}
+
 pub(crate) fn add_marquee_entry(
     selection: &mut BTreeSet<SelectionKey>,
     marquee: &mut SelectionMarquee,
@@ -168,8 +174,8 @@ pub struct Tab {
     pub search: SearchState,
     /// Вкладка показывает карточки корзины, а не каталог хранения.
     pub secure_trash: bool,
-    /// id карточки → «откуда удалено · статус» для подписи строки.
-    pub trash_notes: HashMap<String, String>,
+    /// id карточки → исходный путь и статус для панели свойств.
+    pub trash_notes: HashMap<String, TrashDisplayMetadata>,
 }
 
 impl Tab {

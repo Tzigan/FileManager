@@ -1238,6 +1238,7 @@ mod tests {
         for key in [
             "\"trash.col.origin\"",
             "\"trash.col.deleted\"",
+            "\"trash.col.status\"",
             "\"trash.status.ok\"",
             "\"trash.status.damaged\"",
             "\"trash.status.volume\"",
