@@ -262,6 +262,7 @@ impl FileManagerApp {
                     self.create_zip_from_selection(zip_sources, ctx);
                     ui.close();
                 }
+                self.winrar_context_menu(ui, self.selected_paths(), ctx);
                 ui.separator();
                 if ui.button(self.t("ctx.copy").to_owned()).clicked() {
                     self.act_copy();
