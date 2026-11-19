@@ -63,6 +63,22 @@ enum BookmarkSection {
     Personal,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SpecialSystemBookmarkAction {
+    RecycleBin,
+    SecureTrash,
+}
+
+fn special_system_bookmark_action(
+    target: &SystemBookmarkTarget,
+) -> Option<SpecialSystemBookmarkAction> {
+    match target {
+        SystemBookmarkTarget::RecycleBin => Some(SpecialSystemBookmarkAction::RecycleBin),
+        SystemBookmarkTarget::SecureTrash => Some(SpecialSystemBookmarkAction::SecureTrash),
+        SystemBookmarkTarget::Folder(_) | SystemBookmarkTarget::UnavailableFolder => None,
+    }
+}
+
 fn toggle_bookmark_section(settings: &mut Settings, section: BookmarkSection) {
     let collapsed = match section {
         BookmarkSection::System => &mut settings.bookmarks_system_collapsed,
@@ -425,6 +441,25 @@ impl crate::ui::FileManagerApp {
         open_new_tab: bool,
         ctx: &egui::Context,
     ) {
+        if let Some(action) = special_system_bookmark_action(&bookmark.target) {
+            match action {
+                SpecialSystemBookmarkAction::RecycleBin => {
+                    // Режим удаления не подменяет виртуальную папку Windows; ошибка остаётся видна в журнале.
+                    if let Err(error) = crate::platform::open_recycle_bin() {
+                        self.record_io_error(None, &error);
+                    }
+                }
+                SpecialSystemBookmarkAction::SecureTrash => {
+                    if crate::core::known_folders::bookmark_forces_new_tab(&bookmark.target) {
+                        // Клик просил бы текущую вкладку, но эта закладка всегда создаёт новую.
+                        let _ = open_new_tab;
+                        self.open_secure_trash_tab(ctx);
+                    }
+                }
+            }
+            return;
+        }
+
         match &bookmark.target {
             SystemBookmarkTarget::Folder(path) if path.is_dir() => {
                 if open_new_tab {
@@ -438,25 +473,7 @@ impl crate::ui::FileManagerApp {
                     .retain(|entry| entry.kind != bookmark.kind);
             }
             SystemBookmarkTarget::UnavailableFolder => {}
-            SystemBookmarkTarget::SecureTrash
-                if crate::core::known_folders::bookmark_forces_new_tab(&bookmark.target) =>
-            {
-                // Клик просил бы текущую вкладку, но эта закладка всегда создаёт новую.
-                let _ = open_new_tab;
-                self.open_secure_trash_tab(ctx);
-            }
-            SystemBookmarkTarget::SecureTrash => {}
-            SystemBookmarkTarget::RecycleBin => {
-                // Secure и Ask ведут в корзину приложения. Windows-режим — в системную корзину.
-                if crate::core::settings::bookmark_opens_secure_trash(
-                    self.store.settings.delete_mode,
-                ) {
-                    self.show_secure_trash = true;
-                } else if crate::platform::open_recycle_bin().is_err() {
-                    self.system_bookmarks
-                        .retain(|entry| entry.kind != bookmark.kind);
-                }
-            }
+            SystemBookmarkTarget::RecycleBin | SystemBookmarkTarget::SecureTrash => {}
         }
     }
 
@@ -736,6 +753,118 @@ mod tests {
         assert!(t.expanded.contains(Path::new("C:\\a")));
         assert!(t.expanded.contains(Path::new("C:\\")));
         assert!(!t.expanded.contains(Path::new("C:\\a\\b\\c")));
+    }
+
+    #[test]
+    fn recycle_bin_bookmark_always_opens_system_recycle_bin_regardless_of_secure_trash_enabled() {
+        let target = SystemBookmarkTarget::RecycleBin;
+        let path = PathBuf::from(r"C:\work\a.txt");
+        for mode in [
+            crate::core::settings::DeleteMode::WindowsRecycle,
+            crate::core::settings::DeleteMode::SecureTrash,
+            crate::core::settings::DeleteMode::Ask,
+        ] {
+            let route =
+                crate::core::settings::route_delete(mode, false, std::slice::from_ref(&path), &[]);
+            match mode {
+                crate::core::settings::DeleteMode::WindowsRecycle => {
+                    assert_eq!(route.windows, vec![path.clone()]);
+                    assert!(route.secure.is_empty());
+                }
+                crate::core::settings::DeleteMode::SecureTrash => {
+                    assert!(route.windows.is_empty());
+                    assert_eq!(route.secure, vec![path.clone()]);
+                }
+                crate::core::settings::DeleteMode::Ask => {
+                    assert!(route.windows.is_empty());
+                    assert_eq!(route.ask, vec![path.clone()]);
+                }
+            }
+            assert_eq!(
+                special_system_bookmark_action(&target),
+                Some(SpecialSystemBookmarkAction::RecycleBin)
+            );
+        }
+
+        let handler = include_str!("tree.rs")
+            .split("fn open_system_bookmark")
+            .nth(1)
+            .unwrap()
+            .split("/// One expandable row")
+            .next()
+            .unwrap();
+        assert!(handler.contains("crate::platform::open_recycle_bin()"));
+        assert!(handler.contains("self.record_io_error(None, &error)"));
+        assert!(!handler.contains("self.store.settings.delete_mode"));
+        assert!(!handler.contains("bookmark_opens_secure_trash"));
+    }
+
+    #[test]
+    fn secure_trash_bookmark_opens_secure_trash_independently() {
+        let target = SystemBookmarkTarget::SecureTrash;
+        let path = PathBuf::from(r"C:\work\a.txt");
+        for mode in [
+            crate::core::settings::DeleteMode::WindowsRecycle,
+            crate::core::settings::DeleteMode::SecureTrash,
+            crate::core::settings::DeleteMode::Ask,
+        ] {
+            let route =
+                crate::core::settings::route_delete(mode, false, std::slice::from_ref(&path), &[]);
+            assert_eq!(
+                route.windows.len() + route.secure.len() + route.ask.len(),
+                1
+            );
+            assert_eq!(
+                special_system_bookmark_action(&target),
+                Some(SpecialSystemBookmarkAction::SecureTrash)
+            );
+        }
+        let handler = include_str!("tree.rs")
+            .split("fn open_system_bookmark")
+            .nth(1)
+            .unwrap()
+            .split("/// One expandable row")
+            .next()
+            .unwrap();
+        assert!(handler.contains("self.open_secure_trash_tab(ctx)"));
+        assert!(handler.contains("bookmark_forces_new_tab(&bookmark.target)"));
+    }
+
+    #[test]
+    fn recycle_bin_bookmark_not_a_drop_target() {
+        assert!(matches!(
+            crate::ui::file_dnd::system_bookmark_drop_destination(
+                &SystemBookmarkTarget::RecycleBin
+            ),
+            crate::ui::file_dnd::BookmarkDropDestination::NonTarget
+        ));
+    }
+
+    #[test]
+    fn secure_trash_bookmark_not_a_drop_target() {
+        assert!(matches!(
+            crate::ui::file_dnd::system_bookmark_drop_destination(
+                &SystemBookmarkTarget::SecureTrash
+            ),
+            crate::ui::file_dnd::BookmarkDropDestination::NonTarget
+        ));
+    }
+
+    #[test]
+    fn existing_system_bookmark_tests_not_regressed() {
+        let known_folders = include_str!("../core/known_folders.rs");
+        let dnd = include_str!("file_dnd.rs");
+        let settings = include_str!("../core/settings.rs");
+        for name in [
+            "recycle_bookmark_uses_the_shell_target",
+            "secure_trash_bookmark_is_its_own_target",
+        ] {
+            assert!(known_folders.contains(name));
+        }
+        assert!(dnd.contains(
+            "trash_and_secure_trash_bookmarks_remain_non_targets_without_invalid_highlight"
+        ));
+        assert!(settings.contains("delete_mode_routes_without_replacing_windows_recycle"));
     }
 
     #[test]
