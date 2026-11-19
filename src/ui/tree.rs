@@ -14,6 +14,32 @@ pub(crate) fn clamp_tree_panel_width(width: f32) -> f32 {
     width.clamp(TREE_PANEL_MIN_WIDTH, TREE_PANEL_MAX_WIDTH)
 }
 
+fn tree_content_width(panel_width: f32, widest_row_width: f32) -> f32 {
+    panel_width.max(widest_row_width)
+}
+
+#[cfg(test)]
+fn tree_horizontal_scroll_needed(panel_width: f32, content_width: f32) -> bool {
+    content_width > panel_width
+}
+
+fn tree_row_rect(origin: egui::Pos2, content_width: f32, height: f32) -> egui::Rect {
+    egui::Rect::from_min_size(origin, egui::vec2(content_width, height))
+}
+
+fn visible_tree_row_rect(row_rect: egui::Rect, clip_rect: egui::Rect) -> egui::Rect {
+    row_rect.intersect(clip_rect)
+}
+
+fn migrate_tree_vertical_scroll(ctx: &egui::Context, old_id: egui::Id, new_id: egui::Id) {
+    // Сохраняем прежнюю позицию вертикальной прокрутки при смене вложенности ScrollArea.
+    if egui::containers::scroll_area::State::load(ctx, new_id).is_none()
+        && let Some(state) = egui::containers::scroll_area::State::load(ctx, old_id)
+    {
+        state.store(ctx, new_id);
+    }
+}
+
 /// Lazy folder tree shown in the left panel.
 ///
 /// Roots are the system drives. A node's children are loaded on demand by a
@@ -114,31 +140,55 @@ impl TreeState {
 impl crate::ui::FileManagerApp {
     /// Renders the left panel: bookmarks section and the drive tree.
     pub(crate) fn tree_panel(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
-        egui::ScrollArea::vertical()
+        let panel_width = ui.available_width();
+        let content_width_id = ui.make_persistent_id("tree_content_width");
+        let previous_content_width = ctx
+            .data(|data| data.get_temp::<f32>(content_width_id))
+            .unwrap_or(panel_width);
+        let content_width = tree_content_width(panel_width, previous_content_width);
+        let previous_vertical_id = ui.make_persistent_id("scroll_area");
+
+        // Длинные строки растут внутри содержимого, а не увеличивают минимальную ширину панели.
+        let output = egui::ScrollArea::horizontal()
+            .id_salt("tree_horizontal")
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                style::dense_vertical_spacing(ui.style_mut());
-                self.bookmark_section(ctx, ui);
-                ui.separator();
-                let heading = self.t("tree.this_pc").to_owned();
-                ui.label(egui::RichText::new(heading).strong());
-                ui.add_space(style::SPACE_XS);
-                let roots = self.tree.roots.clone();
-                let wsl_insert_after = self.tree.wsl_insert_after.min(roots.len());
-                // WSL идёт после локальных томов, до сетевых дисков.
-                for index in 0..=roots.len() {
-                    if index == wsl_insert_after {
-                        self.wsl_tree_section(ctx, ui);
-                    }
-                    if let Some(root) = roots.get(index) {
-                        let name = root.display().to_string();
-                        self.tree_node(ui, root, name, 0, ctx);
-                    }
-                }
+                let vertical_id = ui.make_persistent_id("tree_vertical");
+                migrate_tree_vertical_scroll(ctx, previous_vertical_id, vertical_id);
+                egui::ScrollArea::vertical()
+                    .id_salt("tree_vertical")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        style::dense_vertical_spacing(ui.style_mut());
+                        self.bookmark_section(ctx, ui);
+                        ui.separator();
+                        let heading = self.t("tree.this_pc").to_owned();
+                        ui.label(egui::RichText::new(heading).strong());
+                        ui.add_space(style::SPACE_XS);
+                        let roots = self.tree.roots.clone();
+                        let wsl_insert_after = self.tree.wsl_insert_after.min(roots.len());
+                        // WSL идёт после локальных томов, до сетевых дисков.
+                        for index in 0..=roots.len() {
+                            if index == wsl_insert_after {
+                                self.wsl_tree_section(ctx, ui, content_width);
+                            }
+                            if let Some(root) = roots.get(index) {
+                                let name = root.display().to_string();
+                                self.tree_node(ui, root, name, 0, ctx, content_width);
+                            }
+                        }
+                    });
             });
+        let measured_content_width = tree_content_width(panel_width, output.content_size.x);
+        ctx.data_mut(|data| data.insert_temp(content_width_id, measured_content_width));
     }
 
-    fn wsl_tree_section(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
+    fn wsl_tree_section(
+        &mut self,
+        ctx: &egui::Context,
+        ui: &mut egui::Ui,
+        content_width: f32,
+    ) {
         if !self.store.settings.show_wsl_in_tree || self.wsl_distributions.is_empty() {
             return;
         }
@@ -185,7 +235,7 @@ impl crate::ui::FileManagerApp {
         if self.tree.wsl_expanded {
             for name in self.wsl_distributions.clone() {
                 if let Some(path) = crate::platform::wsl_distribution_root(&name) {
-                    self.tree_node(ui, &path, name, 1, ctx);
+                    self.tree_node(ui, &path, name, 1, ctx, content_width);
                 }
             }
         }
@@ -418,6 +468,7 @@ impl crate::ui::FileManagerApp {
         name: String,
         depth: usize,
         ctx: &egui::Context,
+        content_width: f32,
     ) {
         if depth > 24 {
             return;
@@ -438,17 +489,42 @@ impl crate::ui::FileManagerApp {
         };
         // Before the first load we optimistically assume the dir has children.
         let has_arrow = expanded || kids.as_deref().map(|k| !k.is_empty()).unwrap_or(true);
+        let is_current = path == self.tabs[self.active].path.as_path();
+        let row_rect = tree_row_rect(
+            ui.cursor().min,
+            content_width,
+            ui.spacing().interact_size.y,
+        );
+        let row_response = ui.interact(
+            row_rect,
+            ui.make_persistent_id(("tree_node_row", path)),
+            egui::Sense::click(),
+        );
+        let visuals = ui.visuals();
+        let row_fill = if is_current {
+            Some(visuals.selection.bg_fill)
+        } else if row_response.contains_pointer() {
+            Some(visuals.widgets.hovered.bg_fill)
+        } else {
+            None
+        };
+        if let Some(fill) = row_fill {
+            ui.painter()
+                .rect_filled(row_rect, style::RADIUS_ROW, fill);
+        }
 
+        let mut disclosure_clicked = false;
+        let mut label_clicked = false;
         ui.horizontal(|ui| {
             ui.add_space(indent);
             if has_arrow {
                 if tree_disclosure_button(ui, expanded) {
+                    disclosure_clicked = true;
                     self.tree.toggle_expanded(path);
                 }
             } else {
                 ui.add_space(style::TREE_DISCLOSURE_SIZE);
             }
-            let is_current = path == self.tabs[self.active].path.as_path();
             paint_tree_icon(ui, depth == 0, is_current);
             let resp = if depth == 1 && crate::platform::is_wsl_path(path) {
                 let reserved = if loading {
@@ -464,18 +540,7 @@ impl crate::ui::FileManagerApp {
             } else {
                 ui.selectable_label(is_current, name)
             };
-            self.handle_file_drop_response(
-                &resp,
-                Some(path),
-                true,
-                !crate::platform::is_wsl_path(path),
-                crate::ui::file_dnd::DropSurface::Tree,
-                ui,
-                ctx,
-            );
-            if resp.clicked() {
-                self.navigate(self.active, path.to_path_buf(), ctx);
-            }
+            label_clicked = resp.clicked();
             let is_bookmarked = self
                 .store
                 .settings
@@ -526,6 +591,22 @@ impl crate::ui::FileManagerApp {
             }
         });
 
+        // Hit-test остаётся полнострочным, а подсветка обрезается видимой областью ScrollArea.
+        let mut drop_response = row_response.clone();
+        drop_response.rect = visible_tree_row_rect(row_response.rect, row_response.interact_rect);
+        self.handle_file_drop_response(
+            &drop_response,
+            Some(path),
+            true,
+            !crate::platform::is_wsl_path(path),
+            crate::ui::file_dnd::DropSurface::Tree,
+            ui,
+            ctx,
+        );
+        if !disclosure_clicked && (row_response.clicked() || label_clicked) {
+            self.navigate(self.active, path.to_path_buf(), ctx);
+        }
+
         let mut retry_wsl = false;
         if expanded {
             match kids {
@@ -535,7 +616,7 @@ impl crate::ui::FileManagerApp {
                             .file_name()
                             .map(|n| n.to_string_lossy().into_owned())
                             .unwrap_or_default();
-                        self.tree_node(ui, child, cname, depth + 1, ctx);
+                        self.tree_node(ui, child, cname, depth + 1, ctx, content_width);
                     }
                     if list.is_empty()
                         && depth == 1
@@ -864,6 +945,184 @@ mod tests {
         assert!(main.contains("TREE_PANEL_MIN_WIDTH..=TREE_PANEL_MAX_WIDTH"));
         assert!(detached.contains("TREE_PANEL_MIN_WIDTH..=TREE_PANEL_MAX_WIDTH"));
         assert!(detached.contains("Одна сохранённая ширина"));
+    }
+
+    #[test]
+    fn tree_panel_min_width_no_longer_driven_by_row_width() {
+        let app = include_str!("app/mod.rs");
+        let tree = include_str!("tree.rs");
+        let panel = app
+            .split("egui::Panel::left(\"tree_panel\")")
+            .nth(1)
+            .unwrap()
+            .split(".show(ui")
+            .next()
+            .unwrap();
+        let render = tree
+            .split("pub(crate) fn tree_panel")
+            .nth(1)
+            .unwrap()
+            .split("fn wsl_tree_section")
+            .next()
+            .unwrap();
+        assert!(panel.contains("TREE_PANEL_MIN_WIDTH..=TREE_PANEL_MAX_WIDTH"));
+        assert!(
+            render.find("ScrollArea::horizontal()").unwrap()
+                < render.find("ScrollArea::vertical()").unwrap()
+        );
+        assert!(render.contains("tree_content_width(panel_width, output.content_size.x)"));
+    }
+
+    #[test]
+    fn tree_narrow_panel_enables_horizontal_scroll() {
+        let panel_width = TREE_PANEL_MIN_WIDTH;
+        let content_width = tree_content_width(panel_width, 620.0);
+        assert_eq!(content_width, 620.0);
+        assert!(tree_horizontal_scroll_needed(panel_width, content_width));
+    }
+
+    #[test]
+    fn tree_wide_panel_keeps_scroll_inactive() {
+        let panel_width = 420.0;
+        let content_width = tree_content_width(panel_width, 310.0);
+        assert_eq!(content_width, panel_width);
+        assert!(!tree_horizontal_scroll_needed(panel_width, content_width));
+    }
+
+    #[test]
+    fn tree_row_highlight_spans_full_content_width_after_scroll() {
+        let viewport = egui::Rect::from_min_size(egui::pos2(80.0, 20.0), egui::vec2(180.0, 24.0));
+        let content_origin = egui::pos2(viewport.left() - 120.0, viewport.top());
+        let row = tree_row_rect(content_origin, 520.0, viewport.height());
+        let visible = visible_tree_row_rect(row, viewport);
+
+        assert_eq!(row.width(), 520.0);
+        assert_eq!(visible, viewport);
+        let tree = include_str!("tree.rs");
+        assert!(tree.contains(".rect_filled(row_rect, style::RADIUS_ROW, fill)"));
+    }
+
+    #[test]
+    fn tree_node_click_hit_rects_correct_after_horizontal_scroll() {
+        let viewport = egui::Rect::from_min_size(egui::pos2(100.0, 30.0), egui::vec2(200.0, 24.0));
+        let content_origin = egui::pos2(viewport.left() - 260.0, viewport.top());
+        let hit_rect = tree_row_rect(content_origin, 640.0, viewport.height());
+        let pointer = egui::pos2(viewport.right() - 6.0, viewport.center().y);
+
+        assert!(hit_rect.contains(pointer));
+        assert!(visible_tree_row_rect(hit_rect, viewport).contains(pointer));
+        let node = include_str!("tree.rs")
+            .split("fn tree_node(")
+            .nth(1)
+            .unwrap();
+        assert!(node.contains("ui.interact("));
+        assert!(node.contains("row_rect,"));
+    }
+
+    #[test]
+    fn tree_drop_target_hit_rects_correct_after_horizontal_scroll() {
+        let viewport = egui::Rect::from_min_size(egui::pos2(60.0, 12.0), egui::vec2(190.0, 24.0));
+        let content_origin = egui::pos2(viewport.left() - 180.0, viewport.top());
+        let target_rect = tree_row_rect(content_origin, 500.0, viewport.height());
+        let visible_target = visible_tree_row_rect(target_rect, viewport);
+        let pointer = egui::pos2(viewport.center().x, viewport.center().y);
+
+        assert!(target_rect.contains(pointer));
+        assert!(visible_target.contains(pointer));
+        let tree = include_str!("tree.rs");
+        assert!(tree.contains("drop_response.rect = visible_tree_row_rect"));
+        assert!(tree.contains("&drop_response,"));
+    }
+
+    #[test]
+    fn tree_drop_highlight_works_at_any_horizontal_scroll_position() {
+        let viewport = egui::Rect::from_min_size(egui::pos2(40.0, 8.0), egui::vec2(180.0, 24.0));
+        for offset in [0.0, 90.0, 260.0, 430.0] {
+            let origin = egui::pos2(viewport.left() - offset, viewport.top());
+            let row = tree_row_rect(origin, 520.0, viewport.height());
+            let highlight = visible_tree_row_rect(row, viewport);
+            assert!(highlight.width() > 0.0);
+            assert_eq!(highlight.height(), viewport.height());
+        }
+    }
+
+    #[test]
+    fn tree_vertical_autoscroll_to_active_node_not_regressed() {
+        let tree = include_str!("tree.rs");
+        let app = include_str!("app/mod.rs");
+        let panel = tree
+            .split("pub(crate) fn tree_panel")
+            .nth(1)
+            .unwrap()
+            .split("fn wsl_tree_section")
+            .next()
+            .unwrap();
+        assert!(panel.contains("ScrollArea::vertical()"));
+        assert!(panel.contains(".id_salt(\"tree_vertical\")"));
+        assert!(panel.contains("migrate_tree_vertical_scroll(ctx, previous_vertical_id, vertical_id)"));
+        assert!(tree.contains("fn reveal_expands_ancestors"));
+        assert!(app.contains("app.tree.reveal(reveal_path)"));
+        assert!(!panel.contains("scroll_to_rect"));
+    }
+
+    #[test]
+    fn tree_horizontal_scroll_shared_with_detached_window() {
+        let main = include_str!("app/mod.rs");
+        let detached = include_str!("app/window_frame.rs");
+        let tree = include_str!("tree.rs");
+        assert!(main.contains("self.tree_panel(&ctx, ui)"));
+        assert!(detached.contains("self.tree_panel(&viewport_ctx, ui)"));
+        assert!(tree.contains("ScrollArea::horizontal()"));
+    }
+
+    #[test]
+    fn tree_expansion_and_selection_not_regressed() {
+        let tree = include_str!("tree.rs");
+        let node = tree
+            .split("fn tree_node(")
+            .nth(1)
+            .unwrap()
+            .split("fn on_bookmark_section_clicked")
+            .next()
+            .unwrap();
+        assert!(node.contains("self.tree.toggle_expanded(path)"));
+        assert!(node.contains("path == self.tabs[self.active].path.as_path()"));
+        assert!(node.contains("self.navigate(self.active, path.to_path_buf(), ctx)"));
+        assert!(node.contains("for child in &list"));
+    }
+
+    #[test]
+    fn existing_list_horizontal_scroll_tests_not_regressed() {
+        let list = include_str!("list/mod.rs");
+        for name in [
+            "narrow_window_enables_horizontal_scroll_instead_of_column_overlap",
+            "detached_window_inherits_horizontal_scroll_via_shared_code",
+            "sorting_by_header_click_works_after_horizontal_scroll",
+            "row_context_menu_rects_correct_after_horizontal_scroll",
+        ] {
+            assert!(list.contains(name));
+        }
+    }
+
+    #[test]
+    fn existing_tree_panel_width_settings_tests_not_regressed() {
+        let settings = include_str!("../core/settings.rs");
+        assert!(settings.contains("pub tree_panel_width: f32"));
+        for name in [
+            "tree_panel_width_default_when_missing_in_settings",
+            "tree_panel_width_roundtrip_persists_value",
+            "tree_panel_width_preserved_by_settings_reset",
+        ] {
+            assert!(settings.contains(name));
+        }
+    }
+
+    #[test]
+    fn settings_structure_and_json_schema_unchanged() {
+        let settings = include_str!("../core/settings.rs");
+        assert!(settings.contains("fn settings_structure_and_json_schema_unchanged()"));
+        assert!(settings.contains("\"tree_panel_width\""));
+        assert!(settings.contains("fn json_schema_includes_tree_panel_width()"));
     }
 
     #[test]
