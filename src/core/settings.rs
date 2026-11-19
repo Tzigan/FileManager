@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::i18n::Language;
 
+pub const DEFAULT_TREE_PANEL_WIDTH: f32 = 220.0;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Theme {
@@ -163,6 +165,8 @@ pub struct Settings {
     pub bookmarks_system_collapsed: bool,
     #[serde(default)]
     pub bookmarks_personal_collapsed: bool,
+    #[serde(default = "default_tree_panel_width")]
+    pub tree_panel_width: f32,
     pub show_hidden_files: bool,
     pub show_wsl_in_tree: bool,
     pub view_mode: ViewMode,
@@ -217,6 +221,10 @@ fn default_max_concurrent_bg_ops() -> usize {
     crate::core::bg_ops::DEFAULT_CONCURRENT_BG_OPS
 }
 
+fn default_tree_panel_width() -> f32 {
+    DEFAULT_TREE_PANEL_WIDTH
+}
+
 fn default_dir_watch_debounce_ms() -> u64 {
     crate::core::dir_watch::default_dir_watch_debounce_ms()
 }
@@ -252,6 +260,7 @@ impl Default for Settings {
             bookmarks: Vec::new(),
             bookmarks_system_collapsed: false,
             bookmarks_personal_collapsed: false,
+            tree_panel_width: default_tree_panel_width(),
             show_hidden_files: false,
             show_wsl_in_tree: true,
             view_mode: ViewMode::default(),
@@ -278,7 +287,7 @@ impl Default for Settings {
 
 impl Settings {
     /// Сбрасывает поведение, сохраняя вкладки, закладки и папки защищённой корзины.
-    /// Сворачивание секций — пользовательская раскладка, поэтому оно тоже сохраняется.
+    /// Ширина дерева и сворачивание секций — пользовательская раскладка, поэтому они сохраняются.
     pub fn reset_behavior_preserving_user_data(&mut self) {
         let tabs = std::mem::take(&mut self.tabs);
         let pinned_tabs = std::mem::take(&mut self.pinned_tabs);
@@ -287,6 +296,7 @@ impl Settings {
         let secure_trash_folders = std::mem::take(&mut self.secure_trash_folders);
         let bookmarks_system_collapsed = self.bookmarks_system_collapsed;
         let bookmarks_personal_collapsed = self.bookmarks_personal_collapsed;
+        let tree_panel_width = self.tree_panel_width;
 
         *self = Self::default();
         self.tabs = tabs;
@@ -296,6 +306,7 @@ impl Settings {
         self.secure_trash_folders = secure_trash_folders;
         self.bookmarks_system_collapsed = bookmarks_system_collapsed;
         self.bookmarks_personal_collapsed = bookmarks_personal_collapsed;
+        self.tree_panel_width = tree_panel_width;
     }
 }
 
@@ -682,6 +693,65 @@ mod tests {
     }
 
     #[test]
+    fn tree_panel_width_default_when_missing_in_settings() {
+        let dir = std::env::temp_dir().join(format!(
+            "filemanager-tree-width-migration-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let mut old_settings = serde_json::to_value(Settings::default()).unwrap();
+        old_settings
+            .as_object_mut()
+            .unwrap()
+            .remove("tree_panel_width");
+        fs::write(
+            dir.join("settings.json"),
+            serde_json::to_vec(&old_settings).unwrap(),
+        )
+        .unwrap();
+
+        let store = SettingsStore::load(&dir);
+        assert_eq!(store.load_issue, None);
+        assert_eq!(store.settings.tree_panel_width, 220.0);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn tree_panel_width_roundtrip_persists_value() {
+        let dir = std::env::temp_dir().join(format!(
+            "filemanager-tree-width-roundtrip-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut store = SettingsStore::load(&dir);
+        store.settings.tree_panel_width = 347.5;
+        store.save().unwrap();
+
+        let loaded = SettingsStore::load(&dir);
+        assert_eq!(loaded.settings.tree_panel_width, 347.5);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn tree_panel_width_preserved_by_settings_reset() {
+        let mut settings = Settings {
+            tree_panel_width: 347.5,
+            ..Settings::default()
+        };
+
+        settings.reset_behavior_preserving_user_data();
+
+        assert_eq!(settings.tree_panel_width, 347.5);
+    }
+
+    #[test]
     fn bookmark_collapse_preserved_by_settings_reset() {
         let mut settings = Settings {
             bookmarks_system_collapsed: true,
@@ -708,6 +778,7 @@ mod tests {
             bookmarks: vec![PathBuf::from("D:\\docs")],
             bookmarks_system_collapsed: false,
             bookmarks_personal_collapsed: false,
+            tree_panel_width: DEFAULT_TREE_PANEL_WIDTH,
             show_hidden_files: true,
             show_wsl_in_tree: false,
             view_mode: ViewMode::Grid,
@@ -842,12 +913,22 @@ mod tests {
             "single_instance",
             "tabs",
             "theme",
+            "tree_panel_width",
             "update_restart_delay_secs",
             "view_mode",
         ];
         actual.sort_unstable();
         expected.sort_unstable();
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn json_schema_includes_tree_panel_width() {
+        let settings = serde_json::to_value(Settings::default()).unwrap();
+        assert_eq!(
+            settings["tree_panel_width"],
+            serde_json::json!(DEFAULT_TREE_PANEL_WIDTH)
+        );
     }
 
     #[test]

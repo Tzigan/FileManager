@@ -1961,6 +1961,7 @@ mod tests {
             "single_instance",
             "tabs",
             "theme",
+            "tree_panel_width",
             "update_restart_delay_secs",
             "view_mode",
         ]

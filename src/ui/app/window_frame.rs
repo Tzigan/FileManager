@@ -43,8 +43,6 @@ pub(super) const TAB_DRAG_CHIP_STROKE: f32 = 1.0;
 pub(super) const DETACHED_WINDOW_INNER_SIZE: [f32; 2] = [1000.0, 640.0];
 pub(super) const DETACHED_WINDOW_MIN_SIZE: [f32; 2] = [640.0, 420.0];
 pub(super) const DETACHED_TAB_MIN_WIDTH: f32 = 100.0;
-pub(super) const DETACHED_TREE_DEFAULT_WIDTH: f32 = 210.0;
-pub(super) const DETACHED_TREE_WIDTH_RANGE: std::ops::RangeInclusive<f32> = 140.0..=360.0;
 
 pub(super) fn new_tab_button_size(text_height: f32, min_interact_height: f32) -> egui::Vec2 {
     egui::vec2(
@@ -431,10 +429,13 @@ impl FileManagerApp {
                     .show(viewport_ui, |ui| self.toolbar(&viewport_ctx, ui));
                 egui::Panel::top("detached_search").show(viewport_ui, |ui| self.search_bar(ui));
                 self.dispatch_due_searches(&viewport_ctx);
+                // Одна сохранённая ширина задаёт начальную раскладку дерева во всех окнах.
                 egui::Panel::left("detached_tree")
                     .resizable(true)
-                    .default_size(DETACHED_TREE_DEFAULT_WIDTH)
-                    .size_range(DETACHED_TREE_WIDTH_RANGE)
+                    .default_size(clamp_tree_panel_width(
+                        self.store.settings.tree_panel_width,
+                    ))
+                    .size_range(TREE_PANEL_MIN_WIDTH..=TREE_PANEL_MAX_WIDTH)
                     .show(viewport_ui, |ui| self.tree_panel(&viewport_ctx, ui));
                 egui::Panel::right("detached_props")
                     .resizable(false)
