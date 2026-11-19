@@ -472,5 +472,12 @@
   "shutdown.finishing": "Приложение завершает работу.",
   "shutdown.fs_unresponsive": "Возможно, файловая система или устройство не отвечает.",
   "shutdown.continue_waiting": "Приложение продолжает ждать фактического завершения операций.",
-  "shutdown.force_close_risk": "Принудительное закрытие может привести к потере или повреждению данных."
+  "shutdown.force_close_risk": "Принудительное закрытие может привести к потере или повреждению данных.",
+  "winrar.menu": "WinRAR",
+  "winrar.add_dialog": "Добавить в архив...",
+  "winrar.quick_add": "Добавить в архив «{name}.rar»",
+  "winrar.extract_here": "Извлечь здесь",
+  "winrar.extract_to": "Извлечь в «{folder}\\»",
+  "winrar.open": "Открыть в WinRAR",
+  "winrar.operation_failed": "WinRAR: операция «{operation}» не выполнена для «{path}». Подробности записаны в журнал."
 }

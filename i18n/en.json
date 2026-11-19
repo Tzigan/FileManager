@@ -470,5 +470,12 @@
   "shutdown.finishing": "The application is completing its shutdown.",
   "shutdown.fs_unresponsive": "The file system or device may not be responding.",
   "shutdown.continue_waiting": "The application will keep waiting for the operations to actually finish.",
-  "shutdown.force_close_risk": "Forcing the application closed may cause data loss or corruption."
+  "shutdown.force_close_risk": "Forcing the application closed may cause data loss or corruption.",
+  "winrar.menu": "WinRAR",
+  "winrar.add_dialog": "Add to archive...",
+  "winrar.quick_add": "Add to \"{name}.rar\"",
+  "winrar.extract_here": "Extract here",
+  "winrar.extract_to": "Extract to \"{folder}\\\"",
+  "winrar.open": "Open in WinRAR",
+  "winrar.operation_failed": "WinRAR could not complete \"{operation}\" for \"{path}\". Details were recorded in the log."
 }

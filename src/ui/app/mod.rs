@@ -10,6 +10,7 @@ mod search;
 mod tab_drag_preview;
 mod toolbar;
 mod trash;
+mod winrar;
 mod window_frame;
 
 pub(crate) use chrome::{
@@ -202,6 +203,8 @@ pub(crate) enum WorkerMsg {
     DiskUsage { values: HashMap<PathBuf, DiskUsage> },
     /// Обнаружены установленные дистрибутивы WSL.
     WslDistributions(Vec<String>),
+    /// Завершилась операция установленного WinRAR.
+    WinrarFinished(winrar::WinrarFinished),
     /// A path forwarded by another instance / CLI — open in a new tab.
     OpenPath(PathBuf),
     /// Найдена более новая версия приложения.
@@ -555,6 +558,7 @@ pub struct FileManagerApp {
     wsl_req: Sender<()>,
     pub(crate) wsl_loading: bool,
     pub(crate) wsl_distributions: Vec<String>,
+    winrar_dir: Option<PathBuf>,
     detached_tabs: HashMap<u64, window_frame::DetachedTabWindow>,
     tab_detach_error: Option<String>,
 
@@ -756,6 +760,7 @@ impl FileManagerApp {
         let mut tree = TreeState::new(drive_roots);
         tree.wsl_insert_after = wsl_insert_after;
         let dir_cache_entries = store.settings.dir_cache_entries;
+        let winrar_dir = winrar::detect_install_dir();
         let mut app = Self {
             store,
             i18n,
@@ -838,6 +843,7 @@ impl FileManagerApp {
             wsl_req,
             wsl_loading: false,
             wsl_distributions: Vec::new(),
+            winrar_dir,
             detached_tabs: HashMap::new(),
             tab_detach_error: None,
             tabs: paths
@@ -1654,6 +1660,24 @@ impl FileManagerApp {
                     self.tree
                         .failed_children
                         .retain(|path| !crate::platform::is_wsl_path(path));
+                }
+                WorkerMsg::WinrarFinished(finished) => {
+                    match finished.result {
+                        Ok(()) => {
+                            if finished.invalidate {
+                                self.apply_external_dir_change(&finished.directory, ctx);
+                            }
+                        }
+                        Err(reason) => {
+                            let message = self
+                                .t("winrar.operation_failed")
+                                .replace("{operation}", self.t(finished.operation))
+                                .replace("{path}", &finished.path.display().to_string());
+                            self.ops_ui.journal.push(format!("{message}\n{reason}"));
+                            self.ops_ui.show_journal = true;
+                        }
+                    }
+                    ctx.request_repaint();
                 }
                 WorkerMsg::OpenPath(path) => self.open_path_in_new_tab(path, ctx),
                 WorkerMsg::LogExportFinished { result } => {
