@@ -245,7 +245,7 @@ mod tests {
     #[test]
     fn secure_trash_name_column_shows_only_file_name() {
         let entry = FileEntry {
-            name: "LLamaApp_0.13.0.0_x64.msix".to_owned(),
+            name: "example-file.txt".to_owned(),
             path: r"C:\trash\item".into(),
             is_dir: false,
             is_symlink: false,
@@ -255,11 +255,38 @@ mod tests {
             size: Some(1),
             modified: None,
             created: None,
-            extension: Some("msix".to_owned()),
+            extension: Some("txt".to_owned()),
             archive_member: Some("card-id".to_owned()),
         };
-        assert_eq!(name_column_text(&entry), "LLamaApp_0.13.0.0_x64.msix");
+        let displayed_name = name_column_text(&entry);
+        assert_eq!(displayed_name, "example-file.txt");
+        assert!(!displayed_name.contains("Откуда"));
+        assert!(!displayed_name.contains("В корзине"));
+        assert!(!displayed_name.contains("сверен"));
         assert!(include_str!("rows.rs").contains("name_column_text(&entry)"));
         assert!(include_str!("grid.rs").contains("rows::name_column_text(&entry)"));
+    }
+
+    #[test]
+    fn secure_trash_name_column_works_for_different_names() {
+        let entry = FileEntry {
+            name: "data.xlsx".to_owned(),
+            path: r"C:\trash\item-2".into(),
+            is_dir: false,
+            is_symlink: false,
+            hidden: false,
+            system: false,
+            readonly: false,
+            size: Some(2),
+            modified: None,
+            created: None,
+            extension: Some("xlsx".to_owned()),
+            archive_member: Some("card-id-2".to_owned()),
+        };
+        let displayed_name = name_column_text(&entry);
+        assert_eq!(displayed_name, "data.xlsx");
+        assert!(!displayed_name.contains("Откуда"));
+        assert!(!displayed_name.contains("В корзине"));
+        assert!(!displayed_name.contains("сверен"));
     }
 }
