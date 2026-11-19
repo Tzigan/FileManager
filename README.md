@@ -8,7 +8,7 @@ your files, and free of a console window.
 
 ## Status
 
-Early development — **v0.9.2: file creation, list scrolling, and clearer update prompts**.
+Early development — **v0.9.3: resizable folder tree and correct Recycle Bin navigation**.
 See [ROADMAP.md](ROADMAP.md)
 for the full plan up to the stable 1.0 release (in Russian).
 
@@ -97,7 +97,7 @@ Portable-файловый менеджер только для **Windows 11 x64*
 
 ## Статус
 
-Ранняя разработка — **версия 0.9.2: создание файлов, прокрутка списков и показ обновлений**.
+Ранняя разработка — **версия 0.9.3: настройка и прокрутка дерева папок, корректное открытие Корзины**.
 Полный план до стабильного релиза 1.0 — в [ROADMAP.md](ROADMAP.md).
 
 Уже работает:
