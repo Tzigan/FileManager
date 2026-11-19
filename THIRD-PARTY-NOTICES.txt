@@ -1,10 +1,10 @@
-FileManager 0.9.2 — Third-Party Notices
+FileManager 0.9.3 — Third-Party Notices
 
 Status of this build
-FileManager 0.9.2 is an intermediate/pre-release Windows build.
+FileManager 0.9.3 is an intermediate/pre-release Windows build.
 The final project license for FileManager is not selected yet and will be defined for public release 1.0.
 This file contains only third-party notices and license texts required for redistributed components.
-The project package version is 0.9.2 in Cargo.toml.
+The project package version is 0.9.3 in Cargo.toml.
 This is a practical notices document, not a legal opinion.
 
 Scope
@@ -331,7 +331,7 @@ Section 4. Important license notes
 - byteorder-lite 0.1.0 and memchr 2.8.3: Selected MIT from Unlicense OR MIT.
 - wgpu-core-deps-windows-linux-android 30.0.1 is present in the filtered Windows graph; it is a WGPU helper package, not an android-* platform package.
 - r-efi is absent from the filtered Windows graph and is not included.
-- The FileManager project license is not selected for 0.9.2; the final project license will be defined by 1.0.
+- The FileManager project license is not selected for 0.9.3; the final project license will be defined by 1.0.
 
 Section 5. Full license texts
 Each standard license text is included once. Package-specific font attribution notices are listed in Section 3.
