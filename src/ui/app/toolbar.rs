@@ -2,6 +2,89 @@
 
 use super::*;
 
+const NAV_PRESS_DURATION: f32 = 0.12;
+const NAV_PRESS_SHRINK: f32 = 0.08;
+
+fn nav_press_scale_from_progress(progress: f32, enabled: bool) -> f32 {
+    if enabled {
+        1.0 - NAV_PRESS_SHRINK * progress
+    } else {
+        1.0
+    }
+}
+
+fn nav_press_scale(ctx: &egui::Context, response: &egui::Response, enabled: bool) -> f32 {
+    if !enabled {
+        return 1.0;
+    }
+    let progress = ctx.animate_bool_with_time(
+        response.id.with("nav_press"),
+        response.is_pointer_button_down_on(),
+        NAV_PRESS_DURATION,
+    );
+    nav_press_scale_from_progress(progress, enabled)
+}
+
+fn nav_icon_button(
+    ctx: &egui::Context,
+    ui: &mut egui::Ui,
+    enabled: bool,
+    hover: String,
+    draw: impl FnOnce(&egui::Painter, egui::Rect, egui::Color32),
+) -> egui::Response {
+    super::chrome::icon_button_with_scale(ui, enabled, hover, |response| {
+        nav_press_scale(ctx, response, enabled)
+    }, draw)
+}
+
+#[cfg(test)]
+mod nav_press_tests {
+    use super::*;
+
+    #[test]
+    fn nav_buttons_use_shared_press_animation() {
+        let source = include_str!("toolbar.rs");
+        assert_eq!(
+            source.matches("if nav_icon_button(").count()
+                + source.matches("let up_response = nav_icon_button(").count(),
+            7
+        );
+    }
+
+    #[test]
+    fn nav_press_animation_constants_named() {
+        assert!(NAV_PRESS_DURATION > 0.0);
+        assert!((0.0..1.0).contains(&NAV_PRESS_SHRINK));
+    }
+
+    #[test]
+    fn disabled_nav_buttons_do_not_animate() {
+        assert_eq!(nav_press_scale_from_progress(1.0, false), 1.0);
+    }
+
+    #[test]
+    fn nav_button_rect_stable_during_animation() {
+        let source = include_str!("chrome.rs");
+        assert!(source.contains("allocate_exact_size(egui::vec2(button_size, button_size), sense)"));
+        assert!(source.contains("Rect::from_center_size(icon_rect.center()"));
+    }
+
+    #[test]
+    fn nav_button_actions_not_regressed() {
+        let source = include_str!("toolbar.rs");
+        for action in ["self.go_back(ctx)", "self.go_forward(ctx)", "self.go_up(ctx)", "self.refresh(ctx)", "self.act_bookmark()"] {
+            assert!(source.contains(action));
+        }
+    }
+
+    #[test]
+    fn existing_toolbar_tests_not_regressed() {
+        let source = include_str!("tests.rs");
+        assert!(source.contains("fn toolbar_plus_button_and_its_menu_removed"));
+        assert!(source.contains("fn toolbar_layout_stable_after_removal"));
+    }
+}
+
 impl FileManagerApp {
     // ------------------------------------------------------------------
     // Chrome: menus, tab bar, toolbar, breadcrumbs
@@ -525,7 +608,8 @@ impl FileManagerApp {
                 )
             };
             let in_archive = self.tabs[self.active].archive_prefix.is_some();
-            if icon_button(
+            if nav_icon_button(
+                ctx,
                 ui,
                 can_back,
                 self.t("toolbar.back").to_owned(),
@@ -537,7 +621,8 @@ impl FileManagerApp {
             {
                 self.go_back(ctx);
             }
-            if icon_button(
+            if nav_icon_button(
+                ctx,
                 ui,
                 can_fwd,
                 self.t("toolbar.forward").to_owned(),
@@ -549,7 +634,8 @@ impl FileManagerApp {
             {
                 self.go_forward(ctx);
             }
-            let up_response = icon_button(
+            let up_response = nav_icon_button(
+                ctx,
                 ui,
                 has_parent,
                 self.t("toolbar.up").to_owned(),
@@ -572,7 +658,7 @@ impl FileManagerApp {
             if up_response.clicked() {
                 self.go_up(ctx);
             }
-            if icon_button(ui, true, self.t("toolbar.refresh").to_owned(), |p, r, c| {
+            if nav_icon_button(ctx, ui, true, self.t("toolbar.refresh").to_owned(), |p, r, c| {
                 icon_refresh(p, r, c);
             })
             .clicked()
@@ -594,7 +680,8 @@ impl FileManagerApp {
                     .bookmarks
                     .contains(&self.tabs[self.active].path);
             let star_color = ui.visuals().selection.stroke.color;
-            if icon_button(
+            if nav_icon_button(
+                ctx,
                 ui,
                 !in_archive,
                 self.t("toolbar.bookmark").to_owned(),

@@ -42,10 +42,11 @@ pub(crate) fn configure_tab_scroll_style(style: &mut egui::Style) {
 }
 
 /// Квадратная кнопка панели: глиф рисуется вручную, без символов шрифта.
-pub(crate) fn icon_button(
+pub(crate) fn icon_button_with_scale(
     ui: &mut egui::Ui,
     enabled: bool,
     hover: String,
+    scale: impl FnOnce(&egui::Response) -> f32,
     draw: impl FnOnce(&egui::Painter, egui::Rect, egui::Color32),
 ) -> egui::Response {
     let sense = if enabled { egui::Sense::click() } else { egui::Sense::hover() };
@@ -65,7 +66,12 @@ pub(crate) fn icon_button(
         visuals.text_color()
     };
     let icon_inset = (button_size - style::TOOLBAR_ICON_SIZE) * 0.5;
-    draw(painter, rect.shrink(icon_inset), color);
+    let icon_rect = rect.shrink(icon_inset);
+    draw(
+        painter,
+        egui::Rect::from_center_size(icon_rect.center(), icon_rect.size() * scale(&resp)),
+        color,
+    );
     resp
 }
 
