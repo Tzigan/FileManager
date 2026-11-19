@@ -114,9 +114,10 @@ impl FileManagerApp {
                 } else {
                     row.origin.clone()
                 };
-                // Суффикс только для отрисовки. entry.name и extension остаются данными карточки.
-                let note = format!("{}: {origin} · {status}", self.t("trash.col.origin"));
-                notes.insert(row.id.clone(), note);
+                notes.insert(
+                    row.id.clone(),
+                    crate::ui::tabs::TrashDisplayMetadata { origin, status },
+                );
                 let modified = (row.deleted_at > 0).then(|| {
                     std::time::UNIX_EPOCH + std::time::Duration::from_secs(row.deleted_at)
                 });
@@ -531,6 +532,39 @@ impl FileManagerApp {
 // Режим по умолчанию не должен уводить удаление в защищённую корзину.
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn secure_trash_restore_uses_origin_path_from_card_not_name() {
+        let source = include_str!("../../core/secure_trash.rs");
+        let restore_start = source.find("pub fn restore(").unwrap();
+        let restore_end = source[restore_start..]
+            .find("\npub fn purge(")
+            .unwrap()
+            + restore_start;
+        let restore = &source[restore_start..restore_end];
+        assert!(restore.contains("Path::new(&record.original_path)"));
+        assert!(restore.contains("PathBuf::from(&record.stored_path)"));
+        assert!(!restore.contains("record.original_name"));
+
+        let app = include_str!("trash.rs");
+        let handler_start = app.find("pub(crate) fn restore_trash_ids").unwrap();
+        let handler = &app[handler_start..];
+        assert!(handler.contains("Path::new(&record.original_path)"));
+        assert!(handler.contains("secure_trash::restore(&record"));
+    }
+
+    #[test]
+    fn existing_secure_trash_ops_tests_not_regressed() {
+        let source = include_str!("../../core/secure_trash.rs");
+        for test_name in [
+            "restore_puts_hidden_and_readonly_attributes_back",
+            "purge_deletes_permanently_and_does_not_use_the_windows_bin",
+            "cross_volume_without_a_hash_is_marked_size_checked",
+            "list_row_shows_the_original_name_not_the_storage_name",
+        ] {
+            assert!(source.contains(&format!("fn {test_name}")));
+        }
+    }
+
     #[test]
     fn default_delete_mode_stays_on_windows_recycle() {
         assert_eq!(

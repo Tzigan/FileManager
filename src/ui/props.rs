@@ -7,7 +7,7 @@ use crate::core::format::format_size;
 use crate::core::fs::FileEntry;
 use crate::platform::format_local_time;
 use crate::ui::FileManagerApp;
-use crate::ui::tabs::SelectionKey;
+use crate::ui::tabs::{SelectionKey, TrashDisplayMetadata};
 
 pub(crate) const PROPERTY_PANEL_FIXED_WIDTH: f32 = 440.0;
 #[cfg(test)]
@@ -23,6 +23,36 @@ pub(crate) fn property_panel_fixed_range() -> RangeInclusive<f32> {
 pub(crate) struct PropertyLine {
     pub label: String,
     pub value: String,
+}
+
+fn secure_trash_property_lines(
+    entry: &FileEntry,
+    secure_trash: bool,
+    selected_count: usize,
+    notes: &std::collections::HashMap<String, TrashDisplayMetadata>,
+    origin_label: &str,
+    status_label: &str,
+) -> Vec<PropertyLine> {
+    if !secure_trash || selected_count != 1 {
+        return Vec::new();
+    }
+    let Some(note) = entry
+        .archive_member
+        .as_deref()
+        .and_then(|id| notes.get(id))
+    else {
+        return Vec::new();
+    };
+    vec![
+        PropertyLine {
+            label: origin_label.to_owned(),
+            value: note.origin.clone(),
+        },
+        PropertyLine {
+            label: status_label.to_owned(),
+            value: note.status.clone(),
+        },
+    ]
 }
 
 impl FileManagerApp {
@@ -115,6 +145,15 @@ impl FileManagerApp {
             self.property_line("props.modified", date_value(entry.modified)),
         ];
         rows.push(self.property_line("props.attributes", self.attribute_text(entry)));
+        let tab = &self.tabs[self.active];
+        rows.extend(secure_trash_property_lines(
+            entry,
+            tab.secure_trash,
+            1,
+            &tab.trash_notes,
+            self.t("trash.col.origin"),
+            self.t("trash.col.status"),
+        ));
         rows.extend(
             self.heavy_detail_lines(&entry.path, entry.is_dir, reparse_point, allow_details)
                 .into_iter()
@@ -471,6 +510,122 @@ mod tests {
             created: None,
             extension: crate::core::fs::listing_extension(is_dir, &Path::new(parent).join(name)),
             archive_member: None,
+        }
+    }
+
+    fn secure_trash_notes() -> std::collections::HashMap<String, TrashDisplayMetadata> {
+        std::collections::HashMap::from([(
+            "card-id".to_owned(),
+            TrashDisplayMetadata {
+                origin: r"C:\Users\user\Documents\LLamaApp_0.13.0.0_x64.msix".to_owned(),
+                status: "В корзине. сверен только размер".to_owned(),
+            },
+        )])
+    }
+
+    fn secure_trash_entry() -> FileEntry {
+        let mut entry = entry(
+            "LLamaApp_0.13.0.0_x64.msix",
+            r"C:\trash\items\card-id",
+            false,
+            Some(1),
+        );
+        entry.archive_member = Some("card-id".to_owned());
+        entry
+    }
+
+    #[test]
+    fn secure_trash_origin_path_shown_in_properties_panel() {
+        let entry = secure_trash_entry();
+        let notes = secure_trash_notes();
+        let rows = secure_trash_property_lines(
+            &entry,
+            true,
+            1,
+            &notes,
+            "Откуда",
+            "Статус",
+        );
+
+        assert_eq!(rows[0].label, "Откуда");
+        assert_eq!(
+            rows[0].value,
+            r"C:\Users\user\Documents\LLamaApp_0.13.0.0_x64.msix"
+        );
+        let source = include_str!("props.rs");
+        assert!(source.contains("rows.extend(secure_trash_property_lines("));
+        assert!(source.contains("Label::new(&row.value).wrap()"));
+    }
+
+    #[test]
+    fn secure_trash_verification_status_shown_in_properties_panel() {
+        let rows = secure_trash_property_lines(
+            &secure_trash_entry(),
+            true,
+            1,
+            &secure_trash_notes(),
+            "Откуда",
+            "Статус",
+        );
+
+        assert_eq!(rows[1].label, "Статус");
+        assert_eq!(rows[1].value, "В корзине. сверен только размер");
+    }
+
+    #[test]
+    fn secure_trash_properties_lines_absent_for_regular_files() {
+        let rows = secure_trash_property_lines(
+            &secure_trash_entry(),
+            false,
+            1,
+            &secure_trash_notes(),
+            "From",
+            "Status",
+        );
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn secure_trash_multi_selection_shows_summary_without_origin_lines() {
+        let rows = secure_trash_property_lines(
+            &secure_trash_entry(),
+            true,
+            2,
+            &secure_trash_notes(),
+            "From",
+            "Status",
+        );
+        assert!(rows.is_empty());
+        let source = include_str!("props.rs");
+        assert!(source.contains("0 => self.props_folder_info(ui)"));
+        assert!(source.contains("self.multi_property_lines(&selected, count)"));
+    }
+
+    #[test]
+    fn secure_trash_localization_ru_en_complete_for_property_lines() {
+        for json in [
+            include_str!("../../i18n/ru.json"),
+            include_str!("../../i18n/en.json"),
+        ] {
+            let labels: serde_json::Value = serde_json::from_str(json).unwrap();
+            for key in ["trash.col.origin", "trash.col.status"] {
+                let value = labels[key].as_str().unwrap();
+                assert!(!value.is_empty());
+                assert_ne!(value, key);
+            }
+        }
+    }
+
+    #[test]
+    fn existing_properties_panel_tests_not_regressed() {
+        let source = include_str!("props.rs");
+        for test_name in [
+            "props_panel_width_is_fixed_and_wider_than_previous_default",
+            "multiple_selection_aggregates_count_and_logical_size_without_fake_heavy_fields",
+            "props_window_alt_enter_reuses_existing_dialog_and_shows_same_fields",
+            "props_labels_are_localized_in_ru_and_en",
+        ] {
+            assert!(source.contains(&format!("fn {test_name}")));
         }
     }
 

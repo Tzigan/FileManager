@@ -869,15 +869,14 @@ mod tests {
     }
 
     #[test]
-    fn trash_rows_group_and_sort_by_card_fields_not_the_painted_suffix() {
+    fn secure_trash_sort_and_search_use_pure_name() {
         let mut notes = entry("notes.txt", false, Some("txt"));
         notes.size = Some(10);
         notes.modified = Some(UNIX_EPOCH + Duration::from_secs(20));
+        notes.archive_member = Some("card-notes".to_owned());
         let mut bigger = entry("bigger.txt", false, Some("txt"));
         bigger.size = Some(30);
         bigger.modified = Some(UNIX_EPOCH + Duration::from_secs(5));
-        let painted = format!("{} · Откуда: D:\\docs • повреждена", notes.name);
-        assert_ne!(notes.name, painted);
         assert_eq!(notes.extension.as_deref(), Some("txt"));
         let entries = vec![bigger.clone(), notes.clone()];
         let rows = table_rows_sorted(&entries, true, &[], "Папка", "Файл", SortKey::Name, false);
@@ -906,6 +905,17 @@ mod tests {
             .map(|index| entries[index].modified)
             .collect();
         assert_eq!(times, vec![bigger.modified, notes.modified]);
+
+        let by_name = crate::core::search::SearchOptions {
+            query: "notes".to_owned(),
+            ..Default::default()
+        };
+        assert!(crate::core::search::matches_entry(&notes, &by_name));
+        let by_origin = crate::core::search::SearchOptions {
+            query: r"D:\docs".to_owned(),
+            ..Default::default()
+        };
+        assert!(!crate::core::search::matches_entry(&notes, &by_origin));
         assert!(rows.iter().any(|row| matches!(
             row,
             ListRow::Header { key, .. } if key == "ext:txt"
